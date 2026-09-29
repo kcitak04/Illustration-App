@@ -45,6 +45,13 @@ button, input, select { font: inherit; color: inherit; }
 header.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; padding-block: 16px 12px; }
 header.top h1 { margin: 0; font-family: var(--font-display); font-weight: 800; font-size: clamp(24px, 4vw, 34px); letter-spacing: -.02em; }
 header.top p { margin: 2px 0 0; color: var(--muted); max-width: 64ch; }
+.import {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px;
+  background: var(--panel); border: 1px dashed var(--accent); border-radius: var(--r); padding: 12px 14px; margin-bottom: 12px;
+}
+.import-text { min-width: 0; flex: 1 1 320px; }
+.import .hint { margin-top: 4px; }
+.btn.big { padding: 10px 16px; font-size: 14px; }
 .file-name { font-family: var(--font-mono); font-size: 12px; color: var(--muted); max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .btn { border: 1px solid var(--rule); background: var(--panel); border-radius: var(--r); padding: 7px 12px; cursor: pointer; font-weight: 600; font-size: 13px; }
@@ -125,12 +132,20 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
     <h1>Stemloop</h1>
     <p>Split a song into vocals, drums, bass and other with the HTDemucs AI model, loop any bars, and warp the tempo or pitch. Everything runs in your browser.</p>
   </div>
-  <div class="btn-row">
-    <span class="file-name" id="fileName">Demo beat · 120 BPM</span>
-    <button class="btn primary" id="openBtn" type="button">Open song</button>
-    <input id="file" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus" hidden>
-  </div>
 </header>
+
+<section class="import" aria-label="Import your files">
+  <div class="import-text">
+    <strong>Your music</strong> <span class="file-name" id="fileName">Demo beat (example)</span>
+    <p class="hint">Import a song to split into stems, or add your own stems, loops or recordings as separate tracks. MP3, WAV, M4A, AAC, FLAC, OGG, AIFF, or the sound from a video. You can also drop files anywhere on the page.</p>
+  </div>
+  <div class="btn-row">
+    <button class="btn primary big" id="openBtn" type="button">Import song</button>
+    <button class="btn big" id="addTracksBtn" type="button">Add my own tracks</button>
+  </div>
+  <input id="file" type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.oga,.opus,.aif,.aiff,.caf,.mp4,.mov,.webm" hidden>
+  <input id="tracksFile" type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.oga,.opus,.aif,.aiff,.caf,.mp4,.mov,.webm" multiple hidden>
+</section>
 
 <section aria-label="Arrangement">
   <div class="transport">
@@ -214,7 +229,7 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
       <button type="button" data-v="song" aria-pressed="false">Whole song</button>
     </div>
     <label class="check"><input id="expMix" type="checkbox" checked> Mix as you hear it</label>
-    <label class="check"><input id="expStems" type="checkbox" checked> Each stem separately</label>
+    <label class="check"><input id="expStems" type="checkbox" checked> Each stem / track separately</label>
     <p class="hint">Saves 24-bit WAV files in a ZIP, with the warp applied. Loops are cut exactly on the loop points so they repeat cleanly in a DAW or sampler.</p>
     <button class="btn primary" id="exportBtn" type="button">Download ZIP</button>
     <p class="status" id="exportStatus"></p>
@@ -227,6 +242,11 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
   <div id="saveList"></div>
   <div class="btn-row"><button class="btn" id="closeDialog" type="button">Close</button></div>
 </dialog>
+<dialog id="dropDialog">
+  <strong>Open <span id="dropName"></span></strong>
+  <p class="hint">Replace the current song, or add this file as another track next to it?</p>
+  <div class="btn-row"><button class="btn primary" id="dropSong" type="button">Open as new song</button><button class="btn" id="dropTrack" type="button">Add as a track</button></div>
+</dialog>
 <div class="toast" id="toast" hidden></div>
 
 <script>
@@ -234,14 +254,17 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
   "use strict";
   const $ = (id) => document.getElementById(id);
   const SR = 44100;
-  const LANES = [
+  const BASE_LANES = [
     { id: "mix", name: "Original", color: "--c-mix" },
     { id: "vocals", name: "Vocals", color: "--c-vocals" },
     { id: "drums", name: "Drums", color: "--c-drums" },
     { id: "bass", name: "Bass", color: "--c-bass" },
     { id: "other", name: "Other", color: "--c-other" }
   ];
-  const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  let LANES = BASE_LANES.slice();
+  const TRACK_COLORS = ["#3b82f6", "#ec4899", "#84cc16", "#f97316", "#06b6d4", "#a855f7", "#eab308", "#ef4444"];
+  const cssVar = (n) => n.startsWith("--") ? getComputedStyle(document.documentElement).getPropertyValue(n).trim() : n;
+  const cssRef = (n) => n.startsWith("--") ? `var(${n})` : n;
 
   // ------------------------------------------------------------------ state
   const st = {
@@ -257,7 +280,8 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
     warp: { mode: "warp", target: 120, semis: 0, cents: 0 },
     applied: { mode: "warp", speed: 1, semis: 0, cents: 0 },
     playhead: 0,                            // original seconds
-    split: false
+    split: false,
+    isDemo: true
   };
   for (const l of LANES) st.mixer[l.id] = { vol: 1, mute: l.id !== "mix", solo: false };
 
@@ -322,11 +346,13 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
     stopPlayback();
     st.name = name; st.length = L.length;
     st.src = { mix: [L, R] }; st.peaks = {}; st.play = {}; st.split = false;
+    st.isDemo = name === "Demo beat";
+    LANES = BASE_LANES.slice();
     st.applied = { mode: "warp", speed: 1, semis: 0, cents: 0 };
     for (const l of LANES) st.mixer[l.id] = { vol: 1, mute: false, solo: false };
     st.peaks.mix = computePeaks(L, R);
     st.playhead = 0;
-    $("fileName").textContent = name;
+    $("fileName").textContent = st.isDemo ? "Demo beat (example)" : name;
     $("sepBadge").textContent = "not split"; $("sepBadge").className = "badge";
     $("sepStatus").textContent = "";
     rebuildPlayBuffers();
@@ -361,12 +387,56 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
       toast("Couldn't open that file. Try an MP3, WAV, M4A, FLAC or OGG.");
     }
   }
+  // Your own stems / loops / recordings become extra lanes that play, loop, warp and export with everything else.
+  async function addTracks(fileList) {
+    const files = [...fileList];
+    if (!files.length) return;
+    toast(`Opening ${files.length} ${files.length === 1 ? "file" : "files"}…`);
+    const decoded = [], failed = [];
+    for (const f of files) {
+      try { const d = await decodeFile(f); decoded.push({ name: (f.name || "Track").replace(/\.[^.]+$/, ""), ...d }); }
+      catch (e) { failed.push(f.name || "file"); }
+    }
+    if (failed.length) toast(`Couldn't open ${failed.join(", ")}.`);
+    if (!decoded.length) return;
+    if (st.isDemo) {
+      // start a new session from these tracks; the "Original" lane becomes their sum so it can still be split
+      const len = Math.max(...decoded.map(d => d.L.length));
+      const L = new Float32Array(len), R = new Float32Array(len);
+      for (const d of decoded) for (let i = 0; i < d.L.length; i++) { L[i] += d.L[i]; R[i] += d.R[i]; }
+      setSong(decoded.length === 1 ? decoded[0].name : `${decoded[0].name} + ${decoded.length - 1} more`, L, R);
+      st.mixer.mix.mute = true;
+    }
+    stopPlayback();
+    for (const d of decoded) {
+      const id = "t" + (LANES.filter(l => l.id.startsWith("t")).length + 1) + "_" + Math.random().toString(36).slice(2, 6);
+      const color = TRACK_COLORS[LANES.filter(l => l.id.startsWith("t")).length % TRACK_COLORS.length];
+      // fit to the session length so everything stays in sync
+      const fit = (x) => { if (x.length === st.length) return x; const y = new Float32Array(st.length); y.set(x.subarray(0, st.length)); return y; };
+      const Lf = fit(d.L), Rf = fit(d.R);
+      LANES.push({ id, name: d.name.slice(0, 18), color, user: true });
+      st.src[id] = [Lf, Rf]; st.peaks[id] = computePeaks(Lf, Rf);
+      st.mixer[id] = { vol: 1, mute: false, solo: false };
+    }
+    if (decoded.some(d => d.L.length > st.length)) toast("Tracks longer than the song were trimmed to its length.");
+    buildMixer();
+    if (st.applied.speed !== 1 || st.applied.semis || st.applied.cents) runWarp(st.applied); else rebuildPlayBuffers();
+    draw();
+  }
   $("openBtn").addEventListener("click", () => $("file").click());
+  $("addTracksBtn").addEventListener("click", () => $("tracksFile").click());
   $("file").addEventListener("change", e => { openFile(e.target.files && e.target.files[0]); e.target.value = ""; });
+  $("tracksFile").addEventListener("change", e => { addTracks(e.target.files || []); e.target.value = ""; });
   const wrap = $("wrap");
   document.addEventListener("dragover", e => { e.preventDefault(); $("dropHint").hidden = false; });
   document.addEventListener("dragleave", e => { if (!e.relatedTarget) $("dropHint").hidden = true; });
-  document.addEventListener("drop", e => { e.preventDefault(); $("dropHint").hidden = true; const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) openFile(f); });
+  document.addEventListener("drop", e => { e.preventDefault(); $("dropHint").hidden = true; const fl = e.dataTransfer.files; if (!fl || !fl.length) return; if (fl.length === 1 && st.isDemo) openFile(fl[0]); else if (fl.length === 1) askDrop(fl[0]); else addTracks(fl); });
+  function askDrop(f) {
+    const d = $("dropDialog"); $("dropName").textContent = f.name || "this file";
+    $("dropSong").onclick = () => { d.close(); openFile(f); };
+    $("dropTrack").onclick = () => { d.close(); addTracks([f]); };
+    d.showModal();
+  }
 
   // ------------------------------------------------------------------ mixer strips
   function laneAudible(id) {
@@ -380,7 +450,7 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
     mixer.querySelectorAll(".strip").forEach(n => n.remove());
     for (const l of LANES) {
       if (!st.src[l.id]) continue;
-      const s = document.createElement("div"); s.className = "strip"; s.style.setProperty("--lane", `var(${l.color})`);
+      const s = document.createElement("div"); s.className = "strip"; s.style.setProperty("--lane", cssRef(l.color));
       s.dataset.id = l.id;
       const top = document.createElement("div"); top.className = "name";
       const nm = document.createElement("span"); nm.textContent = l.name;
@@ -926,8 +996,8 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
 
   $("exportBtn").addEventListener("click", async () => {
     if (pendingWarp) { toast("Wait for the warp to finish, then export."); return; }
-    const wantMix = $("expMix").checked, wantStems = $("expStems").checked && hasStems() && ["vocals", "drums", "bass", "other"].every(k => st.play[k]);
-    if (!wantMix && !wantStems) { toast(hasStems() ? "Pick at least one thing to export." : "Split the song first to export stems, or tick “Mix as you hear it”."); return; }
+    const wantMix = $("expMix").checked, stemIds = LANES.filter(l => l.id !== "mix" && st.play[l.id]).map(l => l.id), wantStems = $("expStems").checked && stemIds.length > 0;
+    if (!wantMix && !wantStems) { toast(stemIds.length ? "Pick at least one thing to export." : "Split the song or add tracks to export them separately, or tick “Mix as you hear it”."); return; }
     $("exportStatus").textContent = "Preparing files…";
     await new Promise(r => setTimeout(r, 20));
     const sp = speed();
@@ -949,10 +1019,14 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
       }
       files.push({ name: `${base}_mix_${bpmTag}${warpTag}${rangeTag}.wav`, data: wav24(L, R) });
     }
-    if (wantStems) for (const k of ["vocals", "drums", "bass", "other"]) {
+    if (wantStems) for (const k of stemIds) {
       const [l, r] = st.play[k].map(slice);
-      files.push({ name: `${base}_${k}_${bpmTag}${warpTag}${rangeTag}.wav`, data: wav24(l, r) });
+      const lane = LANES.find(x => x.id === k);
+      const label = lane.user ? lane.name.replace(/[\\/:*?"<>|]+/g, "_") : k;
+      files.push({ name: `${base}_${label}_${bpmTag}${warpTag}${rangeTag}.wav`, data: wav24(l, r) });
     }
+    const seen = new Map();
+    for (const f of files) { const n = seen.get(f.name) || 0; seen.set(f.name, n + 1); if (n) f.name = f.name.replace(/\.wav$/, `_${n + 1}.wav`); }
     const blob = zip(files);
     const zipName = `${base}_${rangeMode === "loop" ? "loop" : "stems"}_${bpmTag}.zip`;
     $("exportStatus").textContent = `${files.length} ${files.length === 1 ? "file" : "files"}, ${(blob.size / 1e6).toFixed(1)} MB`;
