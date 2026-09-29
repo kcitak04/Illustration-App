@@ -1,0 +1,809 @@
+<title>Cover Motion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Anton&family=DM+Serif+Display&family=Caveat:wght@700&display=swap">
+<style>
+/* Layout: an editing bay — monitor + transport on the left, the photo strip and settings stacked like an inspector on the right; one column on phones. */
+:root {
+  --bg: #e9e9e6;
+  --panel: #f6f6f3;
+  --ink: #181a19;
+  --muted: #5e6361;
+  --rule: #d0d2cd;
+  --accent: #0f766e;        /* teal, like a timeline playhead */
+  --accent-ink: #ffffff;
+  --monitor: #141615;
+  --warn: #b45309;
+  --font-display: "Unbounded", "Arial Black", Arial, sans-serif;
+  --font-body: "Figtree", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  --r: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101211; --panel: #171a19; --ink: #e5e8e6; --muted: #98a09c; --rule: #2a2f2d;
+    --accent: #2dd4bf; --accent-ink: #042b27; --monitor: #070808; --warn: #f59e0b; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #101211; --panel: #171a19; --ink: #e5e8e6; --muted: #98a09c; --rule: #2a2f2d;
+  --accent: #2dd4bf; --accent-ink: #042b27; --monitor: #070808; --warn: #f59e0b; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; line-height: 1.45; padding-inline: 16px; padding-block: 0 28px; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 20px; padding-block: 18px 12px; border-bottom: 1px solid var(--rule); }
+header.top h1 { margin: 0; font-family: var(--font-display); font-weight: 700; font-size: clamp(22px, 4vw, 32px); letter-spacing: -.01em; }
+header.top p { margin: 0; color: var(--muted); max-width: 62ch; }
+
+main.bay { display: grid; grid-template-columns: minmax(0, 1fr) minmax(290px, 360px); gap: 20px; padding-block: 18px 0; align-items: start; }
+@media (max-width: 860px) { main.bay { grid-template-columns: minmax(0, 1fr); } }
+
+.monitor-col { min-width: 0; display: flex; flex-direction: column; gap: 10px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 10px); }
+@media (max-width: 860px) { .monitor-col { position: static; } }
+.monitor { background: var(--monitor); border-radius: var(--r); display: grid; place-items: center; padding: 14px; min-height: 240px; position: relative; }
+.monitor.dragging { outline: 2px dashed var(--accent); outline-offset: -8px; }
+#view { display: block; max-width: 100%; max-height: 66vh; width: auto; height: auto; background: #000; }
+.transport { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.play { width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--accent); color: var(--accent-ink); cursor: pointer; display: grid; place-items: center; }
+.play svg { width: 18px; height: 18px; fill: currentColor; }
+#scrub { width: 100%; accent-color: var(--accent); }
+.tc { font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; line-height: 1.25; }
+.tc small { display: block; color: var(--muted); font-size: 11px; }
+.meta { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin: 0; font-variant-numeric: tabular-nums; }
+
+.inspector { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+details.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); }
+details.panel > summary {
+  list-style: none; cursor: pointer; padding: 11px 14px; display: flex; justify-content: space-between; align-items: center;
+  font-family: var(--font-display); font-weight: 500; font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+}
+details.panel > summary::-webkit-details-marker { display: none; }
+details.panel > summary::after { content: "+"; font-family: var(--font-mono); color: var(--muted); }
+details.panel[open] > summary::after { content: "–"; }
+.body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.hint { margin: 0; color: var(--muted); font-size: 12px; }
+
+.strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
+.thumb { position: relative; border-radius: 6px; overflow: hidden; border: 1px solid var(--rule); background: var(--monitor); aspect-ratio: 1; }
+.thumb.current { outline: 2px solid var(--accent); outline-offset: 1px; }
+.thumb canvas { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb .n { position: absolute; left: 4px; top: 3px; font-family: var(--font-mono); font-size: 11px; color: #fff; text-shadow: 0 1px 2px #000; }
+.thumb .acts { position: absolute; inset: auto 0 0 0; display: flex; justify-content: space-between; background: rgba(0,0,0,.55); }
+.thumb .acts button { border: 0; background: transparent; color: #fff; padding: 3px 6px; cursor: pointer; font-size: 12px; line-height: 1; }
+.thumb .acts button:hover { background: rgba(255,255,255,.18); }
+
+.btn { border: 1px solid var(--rule); background: var(--bg); border-radius: var(--r); padding: 8px 12px; cursor: pointer; font-weight: 600; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.field { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: center; gap: 8px; }
+.field > label { font-size: 13px; }
+.slider { display: grid; grid-template-columns: 110px minmax(0, 1fr) 48px; align-items: center; gap: 8px; }
+.slider label { font-size: 13px; }
+.slider output { font-family: var(--font-mono); font-size: 12px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; min-width: 0; accent-color: var(--accent); }
+input[type=number], input[type=text], select { width: 100%; min-width: 0; background: var(--bg); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 8px; }
+input[type=color] { width: 36px; height: 30px; padding: 0; border: 1px solid var(--rule); border-radius: 6px; background: none; }
+input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button { border: 1px solid var(--rule); background: var(--bg); border-radius: 999px; padding: 4px 10px; cursor: pointer; font-size: 12px; font-family: var(--font-mono); }
+.chips button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; border: 1px solid var(--rule); border-radius: var(--r); overflow: hidden; }
+.seg button { border: 0; background: transparent; padding: 7px 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+
+.progress { height: 6px; border-radius: 3px; background: var(--rule); overflow: hidden; }
+.progress div { height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
+.warn { color: var(--warn); font-size: 12px; margin: 0; }
+.toast { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 20px); transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 9px 14px; border-radius: var(--r); font-size: 13px; max-width: calc(100% - 32px); z-index: 5; }
+dialog { border: 1px solid var(--rule); border-radius: var(--r); background: var(--panel); color: var(--ink); max-width: min(560px, calc(100% - 32px)); padding: 16px; }
+dialog video { display: block; max-width: 100%; max-height: 60vh; margin: 10px 0; background: #000; }
+dialog::backdrop { background: rgba(0,0,0,.5); }
+@media (prefers-reduced-motion: reduce) { .progress div { transition: none; } }
+</style>
+
+<header class="top">
+  <h1>Cover Motion</h1>
+  <p>Animate your photos into a looping video for Spotify Canvas, Reels or a moving album cover. Set the frame rate and length, then export an MP4.</p>
+</header>
+
+<main class="bay">
+  <section class="monitor-col" aria-label="Preview">
+    <div class="monitor" id="monitor"><canvas id="view" width="720" height="720" aria-label="Animation preview"></canvas></div>
+    <div class="transport">
+      <button class="play" id="playBtn" type="button" aria-label="Play"><svg viewBox="0 0 20 20" id="playIcon"><path d="M5 3l12 7-12 7z"/></svg></button>
+      <input id="scrub" type="range" min="0" max="100" step="1" value="0" aria-label="Timeline">
+      <div class="tc"><span id="tc">00:00:00:00</span><small id="frameNo">frame 1 / 1</small></div>
+    </div>
+    <p class="meta" id="meta"></p>
+  </section>
+
+  <section class="inspector" aria-label="Settings">
+    <details class="panel" open>
+      <summary>Photos</summary>
+      <div class="body">
+        <div class="btn-row">
+          <button class="btn primary" id="addBtn" type="button">Add photos</button>
+          <input id="file" type="file" accept="image/*,.heic,.heif" multiple hidden>
+          <button class="btn" id="clearBtn" type="button">Remove all</button>
+        </div>
+        <div class="strip" id="strip"></div>
+        <p class="hint" id="photoHint">These are sample photos. Add your own and they play in this order. Use ‹ › to reorder. You can also drop or paste images here.</p>
+        <p class="hint">If the picker doesn't open inside the Claude app, open this page in Chrome or Safari.</p>
+      </div>
+    </details>
+
+    <details class="panel" open>
+      <summary>Timing</summary>
+      <div class="body">
+        <div class="seg" id="modeSeg" role="group" aria-label="Animation type">
+          <button type="button" data-v="slideshow">Slideshow</button>
+          <button type="button" data-v="stop">Stop motion</button>
+          <button type="button" data-v="single">One photo</button>
+        </div>
+        <div class="field"><span style="font-size:13px">Frame rate</span>
+          <div class="chips" id="fpsChips"></div></div>
+        <div class="slider"><label for="fps">Custom fps</label><input id="fps" type="range" min="1" max="60" step="1"><output id="fpsOut"></output></div>
+        <div class="slider"><label for="duration">Duration</label><input id="duration" type="range" min="1" max="60" step="0.5"><output id="durationOut"></output></div>
+        <div class="slider" id="holdRow"><label for="hold">Frames / photo</label><input id="hold" type="range" min="1" max="24" step="1"><output id="holdOut"></output></div>
+        <div class="field" id="transRow"><label for="transition">Transition</label>
+          <select id="transition">
+            <option value="cut">Cut</option><option value="fade">Crossfade</option><option value="slide">Slide</option>
+            <option value="zoom">Zoom through</option><option value="flash">Flash</option><option value="glitch">Glitch</option>
+          </select></div>
+        <div class="slider" id="transLenRow"><label for="transLen">Fade length</label><input id="transLen" type="range" min="0.05" max="2" step="0.05"><output id="transLenOut"></output></div>
+        <label class="check" id="bounceRow"><input id="bounce" type="checkbox"> Boomerang (play back and forth)</label>
+        <label class="check"><input id="loop" type="checkbox"> Seamless loop</label>
+      </div>
+    </details>
+
+    <details class="panel" open>
+      <summary>Motion</summary>
+      <div class="body">
+        <div class="field"><label for="motion">Camera move</label>
+          <select id="motion">
+            <option value="none">None</option><option value="zoomIn">Slow zoom in</option><option value="zoomOut">Slow zoom out</option>
+            <option value="panLeft">Pan left</option><option value="panRight">Pan right</option><option value="panUp">Pan up</option>
+            <option value="pulse">Pulse to the beat</option><option value="sway">Sway / rotate</option><option value="float">Floating drift</option>
+          </select></div>
+        <div class="slider"><label for="amount">Amount</label><input id="amount" type="range" min="0" max="1" step="0.01"><output id="amountOut"></output></div>
+        <div class="slider"><label for="bpm">Tempo (BPM)</label><input id="bpm" type="range" min="40" max="200" step="1"><output id="bpmOut"></output></div>
+        <div class="slider"><label for="shake">Camera shake</label><input id="shake" type="range" min="0" max="1" step="0.01"><output id="shakeOut"></output></div>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>Look</summary>
+      <div class="body">
+        <div class="slider"><label for="grain">Film grain</label><input id="grain" type="range" min="0" max="1" step="0.01"><output id="grainOut"></output></div>
+        <div class="slider"><label for="rgb">RGB split</label><input id="rgb" type="range" min="0" max="1" step="0.01"><output id="rgbOut"></output></div>
+        <div class="slider"><label for="flicker">Flicker</label><input id="flicker" type="range" min="0" max="1" step="0.01"><output id="flickerOut"></output></div>
+        <div class="slider"><label for="leak">Light leak</label><input id="leak" type="range" min="0" max="1" step="0.01"><output id="leakOut"></output></div>
+        <div class="slider"><label for="scan">Scanlines</label><input id="scan" type="range" min="0" max="1" step="0.01"><output id="scanOut"></output></div>
+        <div class="slider"><label for="vignette">Vignette</label><input id="vignette" type="range" min="0" max="1" step="0.01"><output id="vignetteOut"></output></div>
+        <div class="slider"><label for="tint">Colour tint</label><input id="tint" type="range" min="0" max="1" step="0.01"><output id="tintOut"></output></div>
+        <div class="field"><label for="tintColor">Tint colour</label><input id="tintColor" type="color"></div>
+        <label class="check"><input id="bw" type="checkbox"> Black &amp; white</label>
+      </div>
+    </details>
+
+    <details class="panel">
+      <summary>Text</summary>
+      <div class="body">
+        <div class="field"><label for="title">Title</label><input id="title" type="text" placeholder="Song title" maxlength="80"></div>
+        <div class="field"><label for="subtitle">Subtitle</label><input id="subtitle" type="text" placeholder="Artist" maxlength="80"></div>
+        <div class="field"><label for="font">Font</label>
+          <select id="font"><option value="Anton">Anton</option><option value="DM Serif Display">DM Serif Display</option><option value="Unbounded">Unbounded</option><option value="JetBrains Mono">JetBrains Mono</option><option value="Caveat">Caveat (handwritten)</option></select></div>
+        <div class="field"><label for="textPos">Position</label>
+          <select id="textPos"><option value="bottom">Bottom</option><option value="center">Centre</option><option value="top">Top</option></select></div>
+        <div class="field"><label for="textAnim">Animation</label>
+          <select id="textAnim"><option value="fade">Fade in</option><option value="type">Typewriter</option><option value="pop">Pop</option><option value="none">Always on</option></select></div>
+        <div class="field"><label for="textColor">Colour</label><input id="textColor" type="color"></div>
+      </div>
+    </details>
+
+    <details class="panel" open>
+      <summary>Export</summary>
+      <div class="body">
+        <div class="field"><label for="format">Frame</label>
+          <select id="format">
+            <option value="square">Square 1:1 (cover, feed)</option>
+            <option value="vertical">Vertical 9:16 (Spotify Canvas, Reels)</option>
+            <option value="landscape">Landscape 16:9 (YouTube)</option>
+          </select></div>
+        <div class="field"><label for="res">Resolution</label>
+          <select id="res"><option value="720">720p</option><option value="1080">1080p</option></select></div>
+        <div class="btn-row">
+          <button class="btn primary" id="exportBtn" type="button">Export video</button>
+          <button class="btn" id="cancelBtn" type="button" hidden>Cancel</button>
+        </div>
+        <div class="progress" id="progress" hidden><div id="progressBar"></div></div>
+        <p class="hint" id="exportHint"></p>
+      </div>
+    </details>
+  </section>
+</main>
+
+<dialog id="saveDialog">
+  <strong>Your video</strong>
+  <p class="hint" id="saveMsg">Downloads aren't available in this view. On a computer, right-click the video and choose "Save video as". On a phone, open this page in Chrome or Safari to download.</p>
+  <video id="saveVideo" controls playsinline loop></video>
+  <div class="btn-row"><button class="btn" id="closeDialog" type="button">Close</button></div>
+</dialog>
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.js"></script>
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const view = $("view");
+  const vctx = view.getContext("2d");
+
+  const S = {
+    mode: "slideshow", fps: 24, duration: 8, hold: 3, transition: "fade", transLen: 0.6, bounce: false, loop: true,
+    motion: "zoomIn", amount: 0.35, bpm: 120, shake: 0,
+    grain: 0.25, rgb: 0.1, flicker: 0.1, leak: 0.2, scan: 0, vignette: 0.35, tint: 0, tintColor: "#ff5a3c", bw: false,
+    title: "", subtitle: "", font: "Anton", textPos: "bottom", textAnim: "fade", textColor: "#ffffff",
+    format: "square", res: 720
+  };
+  let photos = [];          // [{img: CanvasImageSource, w, h, name}]
+  let usingSamples = true;
+
+  // ------------------------------------------------------------------ helpers
+  const hash = (n) => { n = Math.imul(n ^ 0x9E3779B9, 0x85EBCA6B); n ^= n >>> 13; n = Math.imul(n, 0xC2B2AE35); n ^= n >>> 16; return (n >>> 0) / 4294967296; };
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  const ease = (t) => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  const totalFrames = () => Math.max(1, Math.round(S.duration * S.fps));
+  function frameSize(res = S.res) {
+    const even = (v) => Math.round(v / 2) * 2;
+    if (S.format === "vertical") return [even(res), even(res * 16 / 9)];
+    if (S.format === "landscape") return [even(res * 16 / 9), even(res)];
+    return [even(res), even(res)];
+  }
+  function timecode(f) {
+    const fps = S.fps, s = Math.floor(f / fps), ff = f % fps;
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(Math.floor(s / 3600))}:${p(Math.floor(s / 60) % 60)}:${p(s % 60)}:${p(ff)}`;
+  }
+
+  // ------------------------------------------------------------------ sample photos
+  function samplePhotos() {
+    const make = (draw) => { const c = document.createElement("canvas"); c.width = 1200; c.height = 1200; draw(c.getContext("2d")); return c; };
+    const sunset = make(g => {
+      const sky = g.createLinearGradient(0, 0, 0, 760); sky.addColorStop(0, "#2b1055"); sky.addColorStop(.55, "#d53369"); sky.addColorStop(1, "#ffb56b");
+      g.fillStyle = sky; g.fillRect(0, 0, 1200, 760);
+      const sun = g.createRadialGradient(600, 560, 20, 600, 560, 300); sun.addColorStop(0, "#fffbe0"); sun.addColorStop(.45, "#ffd36e"); sun.addColorStop(1, "rgba(255,160,90,0)");
+      g.fillStyle = sun; g.beginPath(); g.arc(600, 560, 300, 0, 7); g.fill();
+      g.fillStyle = "#1a0f2e"; g.beginPath(); g.moveTo(0, 760); g.lineTo(0, 610); g.lineTo(170, 520); g.lineTo(300, 600); g.lineTo(430, 470); g.lineTo(560, 640); g.lineTo(700, 540); g.lineTo(860, 620); g.lineTo(1010, 500); g.lineTo(1200, 610); g.lineTo(1200, 760); g.fill();
+      const sea = g.createLinearGradient(0, 760, 0, 1200); sea.addColorStop(0, "#3a1d5d"); sea.addColorStop(1, "#07040f"); g.fillStyle = sea; g.fillRect(0, 760, 1200, 440);
+    });
+    const city = make(g => {
+      const sky = g.createLinearGradient(0, 0, 0, 1200); sky.addColorStop(0, "#050a1f"); sky.addColorStop(1, "#1b2a6b");
+      g.fillStyle = sky; g.fillRect(0, 0, 1200, 1200);
+      for (let i = 0; i < 120; i++) { g.fillStyle = `rgba(255,255,255,${hash(i) * .8})`; g.fillRect(hash(i + 7) * 1200, hash(i + 13) * 600, 2, 2); }
+      g.fillStyle = "#e8e6ff"; g.beginPath(); g.arc(900, 220, 70, 0, 7); g.fill();
+      for (let b = 0; b < 14; b++) {
+        const x = b * 90 - 20, w = 70 + hash(b) * 50, h = 300 + hash(b + 3) * 500;
+        g.fillStyle = "#0a0d1c"; g.fillRect(x, 1200 - h, w, h);
+        for (let y = 1200 - h + 20; y < 1180; y += 26) for (let wx = x + 10; wx < x + w - 10; wx += 18)
+          if (hash(wx * 7 + y) > .55) { g.fillStyle = hash(wx + y) > .5 ? "#ffcf6e" : "#7fd6ff"; g.fillRect(wx, y, 8, 12); }
+      }
+    });
+    const waves = make(g => {
+      const bg = g.createLinearGradient(0, 0, 1200, 1200); bg.addColorStop(0, "#00c2b8"); bg.addColorStop(1, "#073b4c");
+      g.fillStyle = bg; g.fillRect(0, 0, 1200, 1200);
+      for (let k = 0; k < 14; k++) {
+        g.strokeStyle = `rgba(255,255,255,${0.15 + k * 0.04})`; g.lineWidth = 10 + k * 2; g.beginPath();
+        for (let x = 0; x <= 1200; x += 20) { const y = 200 + k * 70 + Math.sin(x / 90 + k) * 30; x ? g.lineTo(x, y) : g.moveTo(x, y); }
+        g.stroke();
+      }
+    });
+    const bloom = make(g => {
+      g.fillStyle = "#1c0f12"; g.fillRect(0, 0, 1200, 1200);
+      for (let i = 0; i < 9; i++) {
+        const a = i / 9 * Math.PI * 2, x = 600 + Math.cos(a) * 220, y = 600 + Math.sin(a) * 220;
+        const gr = g.createRadialGradient(x, y, 10, x, y, 300); gr.addColorStop(0, "rgba(255,90,120,.9)"); gr.addColorStop(1, "rgba(255,90,120,0)");
+        g.fillStyle = gr; g.beginPath(); g.arc(x, y, 300, 0, 7); g.fill();
+      }
+      const c = g.createRadialGradient(600, 600, 10, 600, 600, 200); c.addColorStop(0, "#ffe9a8"); c.addColorStop(1, "rgba(255,200,90,0)");
+      g.fillStyle = c; g.beginPath(); g.arc(600, 600, 200, 0, 7); g.fill();
+    });
+    return [sunset, city, waves, bloom].map((img, i) => ({ img, w: 1200, h: 1200, name: `Sample ${i + 1}` }));
+  }
+
+  // ------------------------------------------------------------------ grain tiles (pre-made so every frame is cheap)
+  const grainTiles = [];
+  for (let t = 0; t < 6; t++) {
+    const c = document.createElement("canvas"); c.width = c.height = 256;
+    const g = c.getContext("2d"); const d = g.createImageData(256, 256);
+    for (let i = 0; i < 256 * 256; i++) { const v = (hash(i * 31 + t * 99991) * 255) | 0; d.data[i * 4] = d.data[i * 4 + 1] = d.data[i * 4 + 2] = v; d.data[i * 4 + 3] = 255; }
+    g.putImageData(d, 0, 0); grainTiles.push(c);
+  }
+  const fx = document.createElement("canvas");   // scratch buffer for effects
+  const chan = document.createElement("canvas");
+
+  // ------------------------------------------------------------------ motion
+  // p = 0..1 progress through the clip; t = seconds (for beat-synced moves)
+  function motionAt(kind, p, t, loop) {
+    const a = S.amount;
+    const q = loop ? 0.5 - 0.5 * Math.cos(p * Math.PI * 2) : ease(p);   // loop: out and back
+    let s = 1, dx = 0, dy = 0, r = 0;
+    switch (kind) {
+      case "zoomIn": s = 1 + a * 0.35 * q; break;
+      case "zoomOut": s = 1 + a * 0.35 * (1 - q); break;
+      case "panLeft": dx = (0.5 - q) * a * 0.3; s = 1 + a * 0.32; break;
+      case "panRight": dx = (q - 0.5) * a * 0.3; s = 1 + a * 0.32; break;
+      case "panUp": dy = (0.5 - q) * a * 0.3; s = 1 + a * 0.32; break;
+      case "pulse": { const ph = (t * S.bpm / 60) % 1; s = 1 + a * 0.12 * Math.exp(-ph * 6) + 0.02 * a; break; }
+      case "sway": r = Math.sin(p * Math.PI * 2) * a * 0.08; s = 1 + a * 0.12; break;
+      case "float": dx = Math.sin(p * Math.PI * 2) * a * 0.04; dy = Math.cos(p * Math.PI * 4) * a * 0.03; s = 1 + a * 0.1; break;
+    }
+    return { s, dx, dy, r };
+  }
+
+  // draw a photo "cover"-fitted into W×H with a motion transform
+  function drawPhoto(ctx, ph, W, H, m, frame) {
+    if (!ph) return;
+    const cover = Math.max(W / ph.w, H / ph.h);
+    let sx = 0, sy = 0;
+    if (S.shake > 0) {
+      const u = Math.min(W, H);
+      sx = (hash(frame * 2 + 1) - 0.5) * S.shake * u * 0.03;
+      sy = (hash(frame * 2 + 2) - 0.5) * S.shake * u * 0.03;
+    }
+    const extra = 1 + S.shake * 0.06;
+    ctx.save();
+    ctx.translate(W / 2 + m.dx * W + sx, H / 2 + m.dy * H + sy);
+    ctx.rotate(m.r);
+    const k = cover * m.s * extra;
+    ctx.drawImage(ph.img, -ph.w * k / 2, -ph.h * k / 2, ph.w * k, ph.h * k);
+    ctx.restore();
+  }
+
+  // ------------------------------------------------------------------ one frame
+  function renderFrame(ctx, W, H, f) {
+    const fps = S.fps, N = totalFrames();
+    const t = f / fps;
+    const n = photos.length;
+    ctx.save();
+    ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1; ctx.filter = "none";
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+    if (!n) { ctx.restore(); return; }
+
+    if (S.mode === "single" || n === 1) {
+      drawPhoto(ctx, photos[0], W, H, motionAt(S.motion, f / N, t, S.loop), f);
+    } else if (S.mode === "stop") {
+      let step = Math.floor(f / S.hold);
+      let idx;
+      if (S.bounce && n > 2) { const cyc = 2 * n - 2; const k = step % cyc; idx = k < n ? k : cyc - k; }
+      else idx = step % n;
+      drawPhoto(ctx, photos[idx], W, H, motionAt(S.motion, f / N, t, S.loop), step * 7 + (S.shake ? f : 0));
+    } else {
+      // slideshow: photos share the duration; the last one hands over to the first when looping
+      const L = S.duration / n;
+      const T = S.transition === "cut" ? 0 : Math.min(S.transLen, L * 0.5);
+      const i = Math.min(n - 1, Math.floor(t / L));
+      const local = t - i * L;
+      const next = (i + 1) % n;
+      const hasNext = i < n - 1 || S.loop;
+      const mA = motionAt(S.motion, clamp(local / L, 0, 1), t, false);
+      if (T > 0 && hasNext && local > L - T) {
+        const q = ease((local - (L - T)) / T);
+        const mB = motionAt(S.motion, 0, t, false);
+        transition(ctx, W, H, photos[i], mA, photos[next], mB, q, f);
+      } else {
+        // when looping, clip 0's start shows the end of the last transition's incoming photo seamlessly
+        drawPhoto(ctx, photos[i], W, H, mA, f);
+      }
+    }
+    effects(ctx, W, H, f, N);
+    text(ctx, W, H, t);
+    ctx.restore();
+  }
+
+  function transition(ctx, W, H, a, mA, b, mB, q, f) {
+    switch (S.transition) {
+      case "fade":
+        drawPhoto(ctx, a, W, H, mA, f); ctx.globalAlpha = q; drawPhoto(ctx, b, W, H, mB, f); ctx.globalAlpha = 1; break;
+      case "slide":
+        ctx.save(); ctx.translate(-q * W, 0); drawPhoto(ctx, a, W, H, mA, f); ctx.restore();
+        ctx.save(); ctx.translate((1 - q) * W, 0); drawPhoto(ctx, b, W, H, mB, f); ctx.restore(); break;
+      case "zoom":
+        drawPhoto(ctx, a, W, H, { ...mA, s: mA.s * (1 + q * 0.8) }, f);
+        ctx.globalAlpha = q; drawPhoto(ctx, b, W, H, { ...mB, s: mB.s * (1.3 - 0.3 * q) }, f); ctx.globalAlpha = 1; break;
+      case "flash":
+        drawPhoto(ctx, q < 0.5 ? a : b, W, H, q < 0.5 ? mA : mB, f);
+        ctx.fillStyle = "#fff"; ctx.globalAlpha = 1 - Math.abs(q - 0.5) * 2; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; break;
+      case "glitch": {
+        drawPhoto(ctx, q < 0.5 ? a : b, W, H, q < 0.5 ? mA : mB, f);
+        const k = 1 - Math.abs(q - 0.5) * 2;
+        if (fx.width !== W || fx.height !== H) { fx.width = W; fx.height = H; }
+        const g = fx.getContext("2d"); g.clearRect(0, 0, W, H); g.drawImage(ctx.canvas, 0, 0);
+        const bands = 12;
+        for (let s = 0; s < bands; s++) {
+          if (hash(f * 31 + s) > 0.55 * k + 0.2) continue;
+          const y = hash(f * 17 + s * 3) * H, h = (0.02 + hash(s + f) * 0.08) * H;
+          const off = (hash(f * 13 + s * 7) - 0.5) * W * 0.25 * k;
+          ctx.drawImage(fx, 0, y, W, h, off, y, W, h);
+        }
+        break;
+      }
+      default: drawPhoto(ctx, q < 0.5 ? a : b, W, H, q < 0.5 ? mA : mB, f);
+    }
+  }
+
+  function effects(ctx, W, H, f, N) {
+    const u = Math.min(W, H);
+    if (S.bw) { ctx.globalCompositeOperation = "saturation"; ctx.fillStyle = "#808080"; ctx.fillRect(0, 0, W, H); }
+    if (S.tint > 0) { ctx.globalCompositeOperation = "color"; ctx.globalAlpha = S.tint; ctx.fillStyle = S.tintColor; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+    ctx.globalCompositeOperation = "source-over";
+
+    if (S.rgb > 0) {
+      // split the frame into R, G, B copies and offset red and blue
+      if (fx.width !== W || fx.height !== H) { fx.width = W; fx.height = H; }
+      if (chan.width !== W || chan.height !== H) { chan.width = W; chan.height = H; }
+      const g = fx.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, W, H); g.drawImage(ctx.canvas, 0, 0);
+      const c = chan.getContext("2d");
+      const wob = 0.6 + 0.4 * Math.sin(f / 5) + (hash(f) - 0.5) * 0.5;
+      const off = S.rgb * u * 0.012 * wob;
+      ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = "lighter";
+      [["#ff0000", -off], ["#00ff00", 0], ["#0000ff", off]].forEach(([col, dx]) => {
+        c.globalCompositeOperation = "source-over"; c.clearRect(0, 0, W, H); c.drawImage(fx, 0, 0);
+        c.globalCompositeOperation = "multiply"; c.fillStyle = col; c.fillRect(0, 0, W, H);
+        ctx.drawImage(chan, dx, 0);
+      });
+      ctx.globalCompositeOperation = "source-over";
+    }
+    if (S.leak > 0) {
+      const p = f / Math.max(1, N);
+      const x = W * (0.5 + 0.6 * Math.sin(p * Math.PI * 2)), y = H * (0.3 + 0.3 * Math.cos(p * Math.PI * 2));
+      const gr = ctx.createRadialGradient(x, y, 0, x, y, u * 0.9);
+      gr.addColorStop(0, `rgba(255,140,60,${0.55 * S.leak})`); gr.addColorStop(0.5, `rgba(255,40,90,${0.25 * S.leak})`); gr.addColorStop(1, "rgba(255,40,90,0)");
+      ctx.globalCompositeOperation = "screen"; ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
+    }
+    if (S.scan > 0) {
+      ctx.globalCompositeOperation = "multiply"; ctx.fillStyle = `rgba(0,0,0,${0.35 * S.scan})`;
+      const step = Math.max(2, Math.round(u / 240));
+      const off = (f * 0.5) % (step * 2);
+      for (let y = -step * 2 + off; y < H; y += step * 2) ctx.fillRect(0, y, W, step);
+    }
+    if (S.grain > 0) {
+      const tile = grainTiles[f % grainTiles.length];
+      const pat = ctx.createPattern(tile, "repeat");
+      const sc = Math.max(1, u / 900);
+      const m = new DOMMatrix().translate(hash(f) * 256, hash(f + 9) * 256).scale(sc);
+      pat.setTransform(m);
+      ctx.globalCompositeOperation = "overlay"; ctx.globalAlpha = S.grain * 0.55; ctx.fillStyle = pat; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1;
+    }
+    if (S.flicker > 0) {
+      const v = (hash(f * 3 + 1) - 0.5) * S.flicker * 0.25;
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = v > 0 ? `rgba(255,255,255,${v})` : `rgba(0,0,0,${-v})`; ctx.fillRect(0, 0, W, H);
+    }
+    if (S.vignette > 0) {
+      const gr = ctx.createRadialGradient(W / 2, H / 2, u * 0.3, W / 2, H / 2, Math.hypot(W, H) / 2);
+      gr.addColorStop(0, "rgba(0,0,0,0)"); gr.addColorStop(1, `rgba(0,0,0,${0.85 * S.vignette})`);
+      ctx.globalCompositeOperation = "source-over"; ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
+    }
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  function text(ctx, W, H, t) {
+    if (!S.title && !S.subtitle) return;
+    const u = Math.min(W, H);
+    let a = 1, sc = 1, chars = Infinity;
+    const start = 0.3, len = 0.9;
+    const p = clamp((t - start) / len, 0, 1);
+    if (S.textAnim === "fade") a = ease(p);
+    else if (S.textAnim === "pop") { a = p > 0 ? 1 : 0; sc = p >= 1 ? 1 : 0.6 + 0.4 * (1 + Math.sin(p * Math.PI * 1.5) * (1 - p) * 0.5) * ease(p) + 0.001; }
+    else if (S.textAnim === "type") chars = Math.floor(clamp((t - start) / 1.6, 0, 1) * (S.title.length + S.subtitle.length));
+    if (a <= 0) return;
+    const titleSize = u * (S.font === "Caveat" ? 0.12 : 0.085), subSize = u * 0.042;
+    const y0 = S.textPos === "top" ? H * 0.12 : S.textPos === "center" ? H * 0.47 : H * 0.8;
+    ctx.save();
+    ctx.globalAlpha = a; ctx.fillStyle = S.textColor; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = u * 0.02;
+    ctx.translate(W / 2, y0); ctx.scale(sc, sc);
+    const tt = S.title.slice(0, Math.min(S.title.length, chars));
+    const st = S.subtitle.slice(0, Math.max(0, chars - S.title.length));
+    ctx.font = `${S.font === "Anton" ? "" : "700 "}${titleSize}px "${S.font}", sans-serif`;
+    if (tt) fitText(ctx, S.font === "Anton" ? tt.toUpperCase() : tt, 0, 0, W * 0.88);
+    ctx.font = `500 ${subSize}px "Figtree", sans-serif`;
+    if (st) { ctx.globalAlpha = a * 0.9; fitText(ctx, st.toUpperCase().split("").join(" "), 0, titleSize * 0.85, W * 0.88); }
+    ctx.restore();
+  }
+  function fitText(ctx, s, x, y, maxW) { const w = ctx.measureText(s).width; if (w > maxW) { ctx.save(); ctx.scale(maxW / w, maxW / w); ctx.fillText(s, x * w / maxW, y * w / maxW); ctx.restore(); } else ctx.fillText(s, x, y); }
+
+  // ------------------------------------------------------------------ preview player
+  let playing = false, frame = 0, startTime = 0, startFrame = 0, lastDrawn = -1;
+  function sizePreview() {
+    const [W, H] = frameSize(Math.min(720, S.res));
+    const s = Math.min(1, 720 / Math.max(W, H));
+    const w = Math.round(W * s), h = Math.round(H * s);
+    if (view.width !== w || view.height !== h) { view.width = w; view.height = h; }
+  }
+  function draw(f) { sizePreview(); renderFrame(vctx, view.width, view.height, f); lastDrawn = f; updateTransport(); }
+  function updateTransport() {
+    const N = totalFrames();
+    $("scrub").max = String(N - 1); $("scrub").value = String(frame);
+    $("tc").textContent = timecode(frame);
+    $("frameNo").textContent = `frame ${frame + 1} / ${N}`;
+  }
+  function tick(now) {
+    if (!playing) return;
+    const N = totalFrames();
+    const f = (startFrame + Math.floor((now - startTime) / 1000 * S.fps)) % N;
+    if (f !== lastDrawn) { frame = f; draw(f); }
+    requestAnimationFrame(tick);
+  }
+  function setPlaying(p) {
+    playing = p;
+    $("playIcon").innerHTML = p ? '<path d="M5 3h4v14H5zM11 3h4v14h-4z"/>' : '<path d="M5 3l12 7-12 7z"/>';
+    $("playBtn").setAttribute("aria-label", p ? "Pause" : "Play");
+    if (p) { startTime = performance.now(); startFrame = frame; requestAnimationFrame(tick); }
+  }
+  $("playBtn").addEventListener("click", () => setPlaying(!playing));
+  $("scrub").addEventListener("input", () => { frame = parseInt($("scrub").value, 10); if (playing) { startTime = performance.now(); startFrame = frame; } draw(frame); });
+  function refresh() {
+    const N = totalFrames(); if (frame >= N) frame = 0;
+    if (playing) { startTime = performance.now(); startFrame = frame; }
+    lastDrawn = -1; draw(frame); updateMeta();
+  }
+  function updateMeta() {
+    const [W, H] = frameSize(); const N = totalFrames();
+    let extra = "";
+    if (S.mode === "slideshow" && photos.length > 1) extra = ` · ${(S.duration / photos.length).toFixed(2)} s per photo`;
+    if (S.mode === "stop") extra = ` · each photo ${S.hold} ${S.hold === 1 ? "frame" : "frames"} = ${(S.hold / S.fps).toFixed(3)} s`;
+    $("meta").textContent = `${W}×${H} · ${S.fps} fps · ${S.duration} s · ${N} frames${extra}`;
+    $("holdRow").hidden = S.mode !== "stop"; $("bounceRow").hidden = S.mode !== "stop";
+    $("transRow").hidden = S.mode !== "slideshow"; $("transLenRow").hidden = S.mode !== "slideshow" || S.transition === "cut";
+    const warn = S.format === "vertical" && (S.duration < 3 || S.duration > 8) ? "Spotify Canvas clips must be 3–8 seconds long." : "";
+    $("exportHint").textContent = warn || (window.VideoEncoder && window.Mp4Muxer ? "Exports an MP4 (H.264), frame-accurate at your frame rate." : "Your browser records the video in real time, so export takes as long as the video.");
+  }
+
+  // ------------------------------------------------------------------ controls
+  const fmt = {
+    fps: v => `${v}`, duration: v => `${v}s`, hold: v => `${v}`, transLen: v => `${v.toFixed(2)}s`,
+    amount: v => `${Math.round(v * 100)}`, bpm: v => `${v}`, shake: v => `${Math.round(v * 100)}`,
+    grain: v => `${Math.round(v * 100)}`, rgb: v => `${Math.round(v * 100)}`, flicker: v => `${Math.round(v * 100)}`,
+    leak: v => `${Math.round(v * 100)}`, scan: v => `${Math.round(v * 100)}`, vignette: v => `${Math.round(v * 100)}`, tint: v => `${Math.round(v * 100)}`
+  };
+  for (const k of Object.keys(fmt)) {
+    const el = $(k); el.value = S[k]; $(k + "Out").textContent = fmt[k](S[k]);
+    el.addEventListener("input", () => { S[k] = parseFloat(el.value); $(k + "Out").textContent = fmt[k](S[k]); if (k === "fps") pressFps(); refresh(); });
+  }
+  for (const k of ["transition", "motion", "font", "textPos", "textAnim", "format"]) {
+    $(k).value = S[k];
+    $(k).addEventListener("change", () => { S[k] = $(k).value; if (k === "font") loadFont(); refresh(); });
+  }
+  $("res").value = String(S.res); $("res").addEventListener("change", () => { S.res = parseInt($("res").value, 10); refresh(); });
+  for (const k of ["tintColor", "textColor"]) { $(k).value = S[k]; $(k).addEventListener("input", () => { S[k] = $(k).value; refresh(); }); }
+  for (const k of ["title", "subtitle"]) $(k).addEventListener("input", () => { S[k] = $(k).value; refresh(); });
+  for (const k of ["bounce", "loop", "bw"]) { $(k).checked = S[k]; $(k).addEventListener("change", () => { S[k] = $(k).checked; refresh(); }); }
+
+  const FPS = [8, 12, 15, 24, 25, 30, 60];
+  FPS.forEach(v => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = v; b.dataset.v = v;
+    b.addEventListener("click", () => { S.fps = v; $("fps").value = v; $("fpsOut").textContent = v; pressFps(); refresh(); });
+    $("fpsChips").append(b);
+  });
+  function pressFps() { for (const b of $("fpsChips").children) b.setAttribute("aria-pressed", String(+b.dataset.v === S.fps)); }
+
+  function pressMode() { for (const b of $("modeSeg").children) b.setAttribute("aria-pressed", String(b.dataset.v === S.mode)); }
+  $("modeSeg").addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    S.mode = b.dataset.v; pressMode();
+    if (S.mode === "stop" && S.fps > 15) { S.fps = 12; $("fps").value = 12; $("fpsOut").textContent = 12; pressFps(); }
+    refresh();
+  });
+
+  function loadFont() {
+    if (!document.fonts || !document.fonts.load) return;
+    document.fonts.load(`700 40px "${S.font}"`).then(() => refresh()).catch(() => {});
+  }
+
+  // ------------------------------------------------------------------ photos
+  function renderStrip() {
+    const strip = $("strip"); strip.textContent = "";
+    photos.forEach((p, i) => {
+      const d = document.createElement("div"); d.className = "thumb";
+      const c = document.createElement("canvas"); c.width = c.height = 120;
+      const g = c.getContext("2d"); const k = Math.max(120 / p.w, 120 / p.h);
+      g.drawImage(p.img, (120 - p.w * k) / 2, (120 - p.h * k) / 2, p.w * k, p.h * k);
+      const n = document.createElement("span"); n.className = "n"; n.textContent = i + 1;
+      const acts = document.createElement("div"); acts.className = "acts";
+      const mk = (label, title, fn) => { const b = document.createElement("button"); b.type = "button"; b.textContent = label; b.title = title; b.setAttribute("aria-label", title + " photo " + (i + 1)); b.addEventListener("click", fn); return b; };
+      acts.append(
+        mk("‹", "Move earlier", () => { if (i > 0) { [photos[i - 1], photos[i]] = [photos[i], photos[i - 1]]; renderStrip(); refresh(); } }),
+        mk("✕", "Remove", () => { photos.splice(i, 1); renderStrip(); refresh(); }),
+        mk("›", "Move later", () => { if (i < photos.length - 1) { [photos[i + 1], photos[i]] = [photos[i], photos[i + 1]]; renderStrip(); refresh(); } })
+      );
+      d.append(c, n, acts); strip.append(d);
+    });
+    $("photoHint").textContent = usingSamples
+      ? "These are sample photos. Add your own and they play in this order. Use ‹ › to reorder. You can also drop or paste images here."
+      : `${photos.length} ${photos.length === 1 ? "photo" : "photos"}, played left to right. Use ‹ › to reorder.`;
+  }
+
+  async function decode(file) {
+    const name = file.name || "photo";
+    let src = null, w = 0, h = 0;
+    try { src = await createImageBitmap(file, { imageOrientation: "from-image" }); w = src.width; h = src.height; }
+    catch (e) {
+      src = await new Promise((res) => { const url = URL.createObjectURL(file); const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = url; });
+      if (src) { w = src.naturalWidth; h = src.naturalHeight; }
+    }
+    if (!src || !w) return null;
+    const max = 2160, s = Math.min(1, max / Math.max(w, h));
+    const c = document.createElement("canvas"); c.width = Math.round(w * s); c.height = Math.round(h * s);
+    const g = c.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(src, 0, 0, c.width, c.height);
+    return { img: c, w: c.width, h: c.height, name };
+  }
+
+  async function addFiles(files) {
+    const list = [...files];
+    if (!list.length) return;
+    toast(`Loading ${list.length} ${list.length === 1 ? "photo" : "photos"}…`);
+    const loaded = [], failed = [];
+    for (const f of list) { const p = await decode(f); if (p) loaded.push(p); else failed.push(f.name || "file"); }
+    if (loaded.length) {
+      if (usingSamples) { photos = []; usingSamples = false; }
+      photos.push(...loaded);
+      renderStrip(); refresh();
+      toast(`Added ${loaded.length} ${loaded.length === 1 ? "photo" : "photos"}.`);
+    }
+    if (failed.length) toast(`Couldn't read ${failed.join(", ")}. HEIC photos need Safari, or export them as JPG.`);
+  }
+
+  $("addBtn").addEventListener("click", () => $("file").click());
+  $("file").addEventListener("change", e => { addFiles(e.target.files || []); e.target.value = ""; });
+  $("clearBtn").addEventListener("click", () => { photos = []; usingSamples = false; renderStrip(); refresh(); });
+  const mon = $("monitor");
+  for (const el of [mon, $("strip")]) {
+    el.addEventListener("dragover", e => { e.preventDefault(); mon.classList.add("dragging"); });
+    el.addEventListener("dragleave", () => mon.classList.remove("dragging"));
+    el.addEventListener("drop", e => { e.preventDefault(); mon.classList.remove("dragging"); addFiles(e.dataTransfer.files || []); });
+  }
+  window.addEventListener("paste", e => {
+    const files = [...(e.clipboardData ? e.clipboardData.items : [])].filter(i => i.type.startsWith("image/")).map(i => i.getAsFile()).filter(Boolean);
+    if (files.length) addFiles(files);
+  });
+
+  // ------------------------------------------------------------------ export
+  let downloads = null;
+  if (window.claude && typeof window.claude.use === "function") window.claude.use("downloads").then(d => { downloads = d; }).catch(() => {});
+  let cancelled = false;
+
+  function setBusy(b) {
+    $("exportBtn").disabled = b; $("cancelBtn").hidden = !b; $("progress").hidden = !b;
+    if (!b) $("progressBar").style.width = "0";
+  }
+  const progress = (p) => { $("progressBar").style.width = `${Math.round(p * 100)}%`; };
+
+  async function pickCodec(W, H, fps, bitrate) {
+    // H.264 plays everywhere; VP9-in-MP4 is the fallback for browsers without an H.264 encoder.
+    const list = ["avc1.640034", "avc1.640033", "avc1.64002A", "avc1.640028", "avc1.4D4028", "avc1.42E028", "avc1.42001F", "vp09.00.40.08", "vp09.00.10.08"];
+    for (const codec of list) {
+      try {
+        const avc = codec.startsWith("avc");
+        const cfg = { codec, width: W, height: H, bitrate, framerate: fps };
+        if (avc) cfg.avc = { format: "avc" };
+        const r = await VideoEncoder.isConfigSupported(cfg);
+        if (r.supported) return { cfg, mux: avc ? "avc" : "vp9" };
+      } catch (e) { /* try next */ }
+    }
+    return null;
+  }
+
+  async function exportMp4(W, H) {
+    const fps = S.fps, N = totalFrames();
+    const bitrate = Math.round(clamp(W * H * fps * 0.18, 2e6, 24e6));
+    const picked = await pickCodec(W, H, fps, bitrate);
+    if (!picked) return null;
+    const cfg = picked.cfg;
+    const target = new Mp4Muxer.ArrayBufferTarget();
+    const muxer = new Mp4Muxer.Muxer({ target, video: { codec: picked.mux, width: W, height: H, frameRate: fps }, fastStart: "in-memory" });
+    let err = null;
+    const enc = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: e => { err = e; } });
+    enc.configure(cfg);
+    const c = document.createElement("canvas"); c.width = W; c.height = H;
+    const g = c.getContext("2d");
+    for (let f = 0; f < N; f++) {
+      if (cancelled || err) break;
+      renderFrame(g, W, H, f);
+      const vf = new VideoFrame(c, { timestamp: Math.round(f * 1e6 / fps), duration: Math.round(1e6 / fps) });
+      enc.encode(vf, { keyFrame: f % Math.max(1, fps * 2) === 0 });
+      vf.close();
+      while (enc.encodeQueueSize > 6) await new Promise(r => setTimeout(r, 4));
+      if (f % 4 === 0) { progress(f / N); await new Promise(r => setTimeout(r, 0)); }
+    }
+    if (cancelled) { try { enc.close(); } catch (e) {} return "cancelled"; }
+    await enc.flush();
+    enc.close();
+    if (err) throw err;
+    muxer.finalize();
+    progress(1);
+    return { blob: new Blob([target.buffer], { type: "video/mp4" }), ext: "mp4" };
+  }
+
+  // Fallback: record the canvas in real time.
+  async function exportRecorder(W, H) {
+    if (!window.MediaRecorder) return null;
+    const types = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+    const type = types.find(t => MediaRecorder.isTypeSupported(t));
+    if (!type) return null;
+    const c = document.createElement("canvas"); c.width = W; c.height = H;
+    const g = c.getContext("2d");
+    renderFrame(g, W, H, 0);
+    const stream = c.captureStream(S.fps);
+    const rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: Math.round(clamp(W * H * S.fps * 0.2, 2e6, 20e6)) });
+    const chunks = [];
+    rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    const done = new Promise(r => { rec.onstop = r; });
+    rec.start(250);
+    const N = totalFrames(), t0 = performance.now();
+    await new Promise(resolve => {
+      let last = -1;
+      const step = () => {
+        if (cancelled) return resolve();
+        const f = Math.floor((performance.now() - t0) / 1000 * S.fps);
+        if (f >= N) return resolve();
+        if (f !== last) { renderFrame(g, W, H, f); last = f; progress(f / N); }
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+    rec.stop(); await done;
+    if (cancelled) return "cancelled";
+    const ext = type.startsWith("video/mp4") ? "mp4" : "webm";
+    return { blob: new Blob(chunks, { type: type.split(";")[0] }), ext };
+  }
+
+  $("exportBtn").addEventListener("click", async () => {
+    if (!photos.length) { toast("Add at least one photo first."); return; }
+    setPlaying(false);
+    cancelled = false; setBusy(true); progress(0);
+    const [W, H] = frameSize();
+    let res = null;
+    try {
+      if (window.VideoEncoder && window.VideoFrame && window.Mp4Muxer) res = await exportMp4(W, H);
+      if (!res) res = await exportRecorder(W, H);
+    } catch (e) {
+      try { res = await exportRecorder(W, H); } catch (e2) { res = null; }
+    }
+    setBusy(false);
+    if (res === "cancelled") { toast("Export cancelled."); return; }
+    if (!res) { toast("This browser can't make videos. Try Chrome or Safari."); return; }
+    const name = `cover-motion_${S.format}_${S.fps}fps_${S.duration}s.${res.ext}`;
+    if (downloads) {
+      try { await downloads.save({ filename: name, data: res.blob }); toast("Saved " + name); return; }
+      catch (e) {
+        if (e && e.code === "declined") { toast("Download cancelled."); return; }
+        if (e && e.code === "rate_limited") { toast("A save prompt is already open."); return; }
+      }
+    }
+    $("saveVideo").src = URL.createObjectURL(res.blob);
+    $("saveDialog").showModal();
+  });
+  $("cancelBtn").addEventListener("click", () => { cancelled = true; });
+  $("closeDialog").addEventListener("click", () => { $("saveVideo").pause(); $("saveDialog").close(); });
+
+  let toastTimer = 0;
+  function toast(msg) { const t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 3200); }
+
+  // ------------------------------------------------------------------ start
+  photos = samplePhotos();
+  pressFps(); pressMode(); renderStrip(); refresh(); loadFont();
+  setPlaying(!window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+})();
+</script>
