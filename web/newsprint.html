@@ -1,0 +1,604 @@
+<title>Grain Gazette</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=UnifrakturCook:wght@700&family=Libre+Franklin:wght@400;500;600;800&family=Courier+Prime&display=swap">
+<style>
+/* Layout: a newspaper front page — nameplate across the top, the proof as the lead photo, controls set like a sidebar column; stacks on phones. */
+:root {
+  --paper: #e3e1db;         /* grey newsprint stock */
+  --sheet: #efede8;
+  --ink: #1c1b19;
+  --muted: #5f5c55;
+  --rule: #c4c0b6;
+  --accent: #2a6f97;        /* non-photo blue, darkened for text */
+  --accent-ink: #ffffff;
+  --stage: #d3d0c8;
+  --font-plate: "UnifrakturCook", "Old English Text MT", "Times New Roman", serif;
+  --font-ui: "Libre Franklin", "Franklin Gothic Medium", "Helvetica Neue", Arial, sans-serif;
+  --font-type: "Courier Prime", "Courier New", ui-monospace, monospace;
+  --r: 3px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #171716; --sheet: #1f1f1d; --ink: #e6e3dc; --muted: #a29e95; --rule: #3a3833;
+    --accent: #7fc4e8; --accent-ink: #0b1a22; --stage: #0f0f0e; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #171716; --sheet: #1f1f1d; --ink: #e6e3dc; --muted: #a29e95; --rule: #3a3833;
+  --accent: #7fc4e8; --accent-ink: #0b1a22; --stage: #0f0f0e; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  background: var(--paper); color: var(--ink);
+  font-family: var(--font-ui); font-size: 14px; line-height: 1.45;
+  padding-inline: 16px; padding-block: 0 28px;
+}
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.plate { text-align: center; padding-block: 18px 0; }
+.plate .ears { display: flex; justify-content: space-between; gap: 12px; font-family: var(--font-type); font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.plate h1 { margin: 4px 0 2px; font-family: var(--font-plate); font-weight: 700; font-size: clamp(38px, 8vw, 72px); line-height: 1; text-wrap: balance; }
+.plate .dateline {
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px;
+  border-top: 3px double var(--ink); border-bottom: 1px solid var(--ink);
+  padding: 5px 2px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
+}
+.plate .dateline span:nth-child(2) { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); }
+
+main.front {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(270px, 320px);
+  gap: 22px; padding-block: 18px 0; align-items: start;
+}
+@media (max-width: 820px) { main.front { grid-template-columns: minmax(0, 1fr); } }
+
+.lead { min-width: 0; display: flex; flex-direction: column; gap: 10px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 10px); }
+@media (max-width: 820px) { .lead { position: static; } }
+.stage {
+  background: var(--stage); border: 1px solid var(--rule);
+  display: grid; place-items: center; padding: 14px; min-height: 260px; overflow: auto; position: relative;
+}
+.stage.dragging { outline: 2px dashed var(--accent); outline-offset: -8px; }
+.stage.zoomed { place-items: start; max-height: 78vh; }
+#out { display: block; max-width: 100%; max-height: 72vh; width: auto; height: auto; box-shadow: 0 1px 2px rgba(0,0,0,.2), 0 6px 20px rgba(0,0,0,.15); background: #fff; }
+.stage.zoomed #out { max-width: none; max-height: none; }
+.caption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; }
+.caption p { margin: 0; font-family: var(--font-type); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.busy { font-family: var(--font-type); font-size: 12px; color: var(--accent); }
+
+.column { display: flex; flex-direction: column; gap: 16px; min-width: 0; border-left: 1px solid var(--rule); padding-left: 18px; }
+@media (max-width: 820px) { .column { border-left: 0; padding-left: 0; } }
+.section { display: flex; flex-direction: column; gap: 9px; }
+.section h2 {
+  margin: 0; padding-bottom: 4px; border-bottom: 2px solid var(--ink);
+  font-size: 12px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase;
+}
+.hint { margin: 0; font-size: 12px; color: var(--muted); }
+
+.btn { border: 1px solid var(--ink); background: transparent; border-radius: var(--r); padding: 7px 12px; cursor: pointer; font-weight: 600; font-size: 13px; }
+.btn:hover { background: var(--sheet); }
+.btn.primary { background: var(--ink); color: var(--paper); }
+.btn.primary:hover { filter: brightness(1.2); }
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; }
+.presets button {
+  text-align: left; border: 1px solid var(--rule); background: var(--sheet); border-radius: var(--r);
+  padding: 7px 9px; cursor: pointer; display: flex; flex-direction: column; gap: 1px;
+}
+.presets button b { font-size: 13px; }
+.presets button span { font-size: 11px; color: var(--muted); }
+.presets button[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; border: 1px solid var(--ink); border-radius: var(--r); overflow: hidden; }
+.seg button { border: 0; background: transparent; padding: 6px 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.seg button + button { border-left: 1px solid var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+
+.slider { display: grid; grid-template-columns: 96px minmax(0, 1fr) 44px; align-items: center; gap: 8px; }
+.slider label { font-size: 13px; }
+.slider output { font-family: var(--font-type); font-size: 12px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+input[type=range] { width: 100%; min-width: 0; accent-color: var(--accent); }
+input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
+input[type=color] { width: 34px; height: 28px; padding: 0; border: 1px solid var(--rule); border-radius: var(--r); background: none; cursor: pointer; }
+select { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r); padding: 5px 8px; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.check { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
+
+.toast { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 20px); transform: translateX(-50%); background: var(--ink); color: var(--paper); padding: 9px 14px; border-radius: var(--r); font-size: 13px; max-width: calc(100% - 32px); }
+dialog { border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); max-width: min(560px, calc(100% - 32px)); padding: 16px; }
+dialog img { display: block; max-width: 100%; max-height: 60vh; margin: 10px 0; }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+</style>
+
+<header class="plate">
+  <div class="ears"><span>Late Edition</span><span>Price: free</span></div>
+  <h1>The Grain Gazette</h1>
+  <div class="dateline"><span>Photo Desk</span><span>Turn any photo into worn, grainy newsprint</span><span>85 lines per inch</span></div>
+</header>
+
+<main class="front">
+  <section class="lead" aria-label="Proof">
+    <div class="stage" id="stage"><canvas id="out" width="10" height="10" aria-label="Newsprint preview"></canvas></div>
+    <div class="caption">
+      <p id="stats">Sample photo</p>
+      <div class="btn-row">
+        <button class="btn" id="compareBtn" type="button">Hold: original</button>
+        <button class="btn" id="zoomBtn" type="button" aria-pressed="false">Actual pixels</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="column" aria-label="Controls">
+    <div class="section">
+      <h2>Photo</h2>
+      <div class="btn-row">
+        <button class="btn primary" id="pickBtn" type="button">Choose photo</button>
+        <input id="file" type="file" accept="image/*,.heic,.heif" hidden>
+        <button class="btn" id="sampleBtn" type="button">Use sample</button>
+      </div>
+      <p class="hint">Opens your photo library or files. You can also drop or paste a photo onto the page. Nothing is uploaded.</p>
+      <p class="hint">If the picker doesn't open inside the Claude app, open this page in Chrome or Safari.</p>
+    </div>
+
+    <div class="section">
+      <h2>Editions</h2>
+      <div class="presets" id="presets"></div>
+    </div>
+
+    <div class="section">
+      <h2>Print</h2>
+      <div class="seg" id="screenSeg" role="group" aria-label="Print method">
+        <button type="button" data-v="halftone">Halftone</button>
+        <button type="button" data-v="grain">Grain</button>
+        <button type="button" data-v="copy">Photocopy</button>
+      </div>
+      <div class="seg" id="colorSeg" role="group" aria-label="Ink">
+        <button type="button" data-v="bw">Black ink</button>
+        <button type="button" data-v="color">Four colour</button>
+      </div>
+      <div class="slider"><label for="dot">Dot size</label><input id="dot" type="range" min="2" max="24" step="0.5"><output id="dotOut"></output></div>
+      <div class="slider"><label for="angle">Screen angle</label><input id="angle" type="range" min="0" max="90" step="1"><output id="angleOut"></output></div>
+      <div class="slider" id="misregRow"><label for="misreg">Misregister</label><input id="misreg" type="range" min="0" max="12" step="0.5"><output id="misregOut"></output></div>
+    </div>
+
+    <div class="section">
+      <h2>Ink</h2>
+      <div class="slider"><label for="brightness">Brightness</label><input id="brightness" type="range" min="-0.5" max="0.5" step="0.01"><output id="brightnessOut"></output></div>
+      <div class="slider"><label for="contrast">Contrast</label><input id="contrast" type="range" min="-0.8" max="2" step="0.01"><output id="contrastOut"></output></div>
+      <div class="slider"><label for="gain">Dot gain</label><input id="gain" type="range" min="0" max="0.4" step="0.01"><output id="gainOut"></output></div>
+      <div class="slider"><label for="density">Ink density</label><input id="density" type="range" min="0.3" max="1" step="0.01"><output id="densityOut"></output></div>
+      <div class="slider"><label for="rough">Rough edges</label><input id="rough" type="range" min="0" max="1" step="0.01"><output id="roughOut"></output></div>
+      <div class="slider"><label for="blotch">Patchy ink</label><input id="blotch" type="range" min="0" max="1" step="0.01"><output id="blotchOut"></output></div>
+      <div class="slider"><label for="bleed">Ink bleed</label><input id="bleed" type="range" min="0" max="3" step="0.1"><output id="bleedOut"></output></div>
+    </div>
+
+    <div class="section">
+      <h2>Paper</h2>
+      <div class="row">
+        <label class="check"><input id="paperColor" type="color" aria-label="Paper colour"> Paper</label>
+        <label class="check"><input id="inkColor" type="color" aria-label="Ink colour"> Ink</label>
+      </div>
+      <div class="slider"><label for="grain">Grain</label><input id="grain" type="range" min="0" max="1" step="0.01"><output id="grainOut"></output></div>
+      <div class="slider"><label for="grainSize">Grain size</label><input id="grainSize" type="range" min="1" max="4" step="0.1"><output id="grainSizeOut"></output></div>
+      <div class="slider"><label for="fiber">Paper fibre</label><input id="fiber" type="range" min="0" max="1" step="0.01"><output id="fiberOut"></output></div>
+      <div class="slider"><label for="age">Age</label><input id="age" type="range" min="0" max="1" step="0.01"><output id="ageOut"></output></div>
+      <div class="slider"><label for="dust">Dust &amp; specks</label><input id="dust" type="range" min="0" max="1" step="0.01"><output id="dustOut"></output></div>
+      <label class="check"><input id="fold" type="checkbox"> Fold crease</label>
+      <button class="btn" id="reshuffle" type="button">Reshuffle grain</button>
+    </div>
+
+    <div class="section">
+      <h2>Save</h2>
+      <div class="row">
+        <label for="outW" style="font-size:13px">Width</label>
+        <select id="outW">
+          <option value="1000">1000 px</option>
+          <option value="1600">1600 px</option>
+          <option value="2400">2400 px</option>
+          <option value="3000">3000 px (cover)</option>
+        </select>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" id="jpgBtn" type="button">Download JPG</button>
+        <button class="btn" id="pngBtn" type="button">Download PNG</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="saveDialog">
+  <strong>Save your image</strong>
+  <p class="hint">Downloads aren't available here. Long-press or right-click the image to save it.</p>
+  <img id="saveImg" alt="Newsprint export">
+  <div class="btn-row"><button class="btn" id="closeDialog" type="button">Close</button></div>
+</dialog>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const out = $("out");
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+
+  const DEFAULTS = {
+    screen: "halftone", color: "bw", dot: 6, angle: 45, misreg: 3,
+    brightness: 0.02, contrast: 0.35, gain: 0.12, density: 0.9, rough: 0.45, blotch: 0.25, bleed: 0.6,
+    paper: "#e6e1d3", ink: "#1d1c1a", grain: 0.35, grainSize: 1.6, fiber: 0.35, age: 0.25, dust: 0.3, fold: false,
+    outW: 1600
+  };
+  const PRESETS = [
+    { name: "Daily paper", note: "Classic 85 lpi", v: {} },
+    { name: "Tabloid", note: "Coarse, punchy", v: { dot: 10, contrast: 0.8, gain: 0.2, rough: 0.6, blotch: 0.5, grain: 0.3, age: 0.15, paper: "#e9e6de" } },
+    { name: "Old archive", note: "Yellowed, worn", v: { dot: 5, contrast: 0.15, density: 0.75, age: 0.85, dust: 0.7, fiber: 0.6, blotch: 0.55, paper: "#dccfae", ink: "#2a241c", fold: true } },
+    { name: "Photocopy zine", note: "Harsh toner", v: { screen: "copy", contrast: 1.2, brightness: 0.05, rough: 0.7, grain: 0.55, dust: 0.8, fiber: 0.1, age: 0, paper: "#f2f1ee", ink: "#101010", bleed: 0.3 } },
+    { name: "Grainy press", note: "Stochastic grit", v: { screen: "grain", grain: 0.5, grainSize: 2.2, contrast: 0.45, blotch: 0.4 } },
+    { name: "Sunday colour", note: "Offset, misregistered", v: { color: "color", dot: 7, misreg: 4, contrast: 0.3, density: 0.85, age: 0.3, paper: "#e7e0cf" } }
+  ];
+  let state = { ...DEFAULTS };
+  let seed = 1337;
+  let source = null, sourceName = "Sample photo";
+
+  // ------------------------------------------------------------------ helpers
+  function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  function hexRgb(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+
+  /** Random pixels at (w/scale, h/scale), smoothly upscaled to w×h. Returns Uint8 of one channel. */
+  function noiseField(w, h, cellW, cellH, rnd, smooth = true) {
+    const sw = Math.max(2, Math.round(w / cellW)), sh = Math.max(2, Math.round(h / cellH));
+    const s = document.createElement("canvas"); s.width = sw; s.height = sh;
+    const sg = s.getContext("2d"); const id = sg.createImageData(sw, sh);
+    for (let i = 0; i < sw * sh; i++) { const v = rnd() * 255; id.data[i * 4] = v; id.data[i * 4 + 3] = 255; }
+    sg.putImageData(id, 0, 0);
+    const b = document.createElement("canvas"); b.width = w; b.height = h;
+    const bg = b.getContext("2d", { willReadFrequently: true });
+    bg.imageSmoothingEnabled = smooth; bg.imageSmoothingQuality = "high";
+    bg.drawImage(s, 0, 0, w, h);
+    const d = bg.getImageData(0, 0, w, h).data, outArr = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) outArr[i] = d[i * 4];
+    return outArr;
+  }
+
+  // Noise textures depend only on size + seed + grain size, so cache them between slider moves.
+  let cache = { key: "" };
+  function textures(W, H) {
+    const key = `${W}x${H}:${seed}:${state.grainSize}`;
+    if (cache.key === key) return cache;
+    const rnd = mulberry(seed);
+    cache = {
+      key,
+      grain: noiseField(W, H, state.grainSize, state.grainSize, rnd, state.grainSize > 1.2),
+      fine: noiseField(W, H, 1, 1, rnd, false),
+      blotch: noiseField(W, H, W / 18, H / 18, rnd),
+      blotch2: noiseField(W, H, W / 60, H / 60, rnd),
+      fiber: noiseField(W, H, 22, 1.4, rnd),
+      rough: noiseField(W, H, 2.2, 2.2, rnd)
+    };
+    return cache;
+  }
+
+  // ------------------------------------------------------------------ sample photo
+  function makeSample() {
+    const c = document.createElement("canvas"); c.width = 1200; c.height = 1200;
+    const g = c.getContext("2d");
+    const sky = g.createLinearGradient(0, 0, 0, 760);
+    sky.addColorStop(0, "#2b1055"); sky.addColorStop(0.55, "#d53369"); sky.addColorStop(1, "#ffb56b");
+    g.fillStyle = sky; g.fillRect(0, 0, 1200, 760);
+    const sun = g.createRadialGradient(600, 560, 20, 600, 560, 300);
+    sun.addColorStop(0, "#fffbe0"); sun.addColorStop(0.45, "#ffd36e"); sun.addColorStop(1, "rgba(255,160,90,0)");
+    g.fillStyle = sun; g.beginPath(); g.arc(600, 560, 300, 0, Math.PI * 2); g.fill();
+    g.fillStyle = "#1a0f2e";
+    g.beginPath(); g.moveTo(0, 760); g.lineTo(0, 610); g.lineTo(170, 520); g.lineTo(300, 600); g.lineTo(430, 470);
+    g.lineTo(560, 640); g.lineTo(700, 540); g.lineTo(860, 620); g.lineTo(1010, 500); g.lineTo(1200, 610); g.lineTo(1200, 760); g.fill();
+    const sea = g.createLinearGradient(0, 760, 0, 1200);
+    sea.addColorStop(0, "#3a1d5d"); sea.addColorStop(1, "#07040f");
+    g.fillStyle = sea; g.fillRect(0, 760, 1200, 440);
+    for (let i = 0; i < 16; i++) {
+      const y = 780 + i * i * 1.6 + i * 6, w = 380 - i * 18;
+      g.fillStyle = `rgba(255, ${190 - i * 6}, ${120 - i * 4}, ${0.75 - i * 0.04})`;
+      g.fillRect(600 - w / 2, y, w, 3 + i * 0.6);
+    }
+    return c;
+  }
+
+  function setSource(c, name) { source = c; sourceName = name; schedule(); }
+
+  function drawToSource(bmp, w, h, name) {
+    const max = 3000, s = Math.min(1, max / Math.max(w, h));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
+    const g = c.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(bmp, 0, 0, c.width, c.height);
+    setSource(c, name);
+  }
+
+  async function loadFile(file) {
+    if (!file) return;
+    const name = file.name || "Your photo";
+    const heic = /\.(heic|heif)$/i.test(name) || /hei[cf]/i.test(file.type || "");
+    $("stats").textContent = "Loading " + name + "…";
+    try {
+      if (window.createImageBitmap) {
+        const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+        drawToSource(bmp, bmp.width, bmp.height, name); return;
+      }
+    } catch (e) { /* fall back to <img> */ }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { drawToSource(img, img.naturalWidth, img.naturalHeight, name); URL.revokeObjectURL(url); };
+    img.onerror = () => {
+      URL.revokeObjectURL(url); schedule();
+      toast(heic ? "This browser can't read HEIC photos. Export the photo as JPG, or open this page in Safari."
+                 : "Couldn't read " + name + ". Try a JPG, PNG or WebP.");
+    };
+    img.src = url;
+  }
+
+  // ------------------------------------------------------------------ render
+  function tone(v) {
+    v = (v - 0.5) * (1 + state.contrast) + 0.5 + state.brightness;
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+  }
+
+  function render(W) {
+    const H = Math.max(1, Math.round(W * source.height / source.width));
+    if (out.width !== W || out.height !== H) { out.width = W; out.height = H; }
+    // source pixels at output size (optional ink bleed = slight softening before screening)
+    const sc = document.createElement("canvas"); sc.width = W; sc.height = H;
+    const sg = sc.getContext("2d", { willReadFrequently: true });
+    sg.imageSmoothingQuality = "high";
+    sg.fillStyle = "#fff"; sg.fillRect(0, 0, W, H);
+    sg.drawImage(source, 0, 0, W, H);
+    const src = sg.getImageData(0, 0, W, H).data;
+    const T = textures(W, H);
+
+    const img = ctx.createImageData(W, H);
+    const px = img.data;
+    const paper = hexRgb(state.paper), ink = hexRgb(state.ink);
+    const cell = state.dot * W / 1600;              // dot size is specified at 1600 px and scales with width
+    const color = state.color === "color";
+    const angles = color ? [15, 75, 0, state.angle] : [state.angle];
+    const inks = color ? [[0, 160, 225], [230, 0, 126], [255, 236, 0], ink] : [ink];
+    const offs = color ? [[1, -0.6], [-0.8, 0.9], [0.4, 1], [0, 0]].map(([a, b]) => [a * state.misreg * W / 1600, b * state.misreg * W / 1600]) : [[0, 0]];
+    const trig = angles.map(a => [Math.cos(a * Math.PI / 180), Math.sin(a * Math.PI / 180)]);
+    const k2 = 2 * Math.PI / cell;
+    const aa = Math.min(0.5, 0.9 / Math.max(1, cell * 0.5));
+    const rough = state.rough, grain = state.grain, fiber = state.fiber, blotch = state.blotch;
+    const gain = state.gain, density = state.density, screen = state.screen;
+    const cx = W / 2, cy = H / 2, maxR = Math.hypot(cx, cy);
+    const age = state.age;
+    const cov = [0, 0, 0, 0];
+
+    function sampleRGB(x, y) {
+      let xi = x | 0, yi = y | 0;
+      if (xi < 0) xi = 0; else if (xi >= W) xi = W - 1;
+      if (yi < 0) yi = 0; else if (yi >= H) yi = H - 1;
+      return (yi * W + xi) * 4;
+    }
+
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        const rn = (T.rough[i] / 255 - 0.5) * rough * 0.5;
+        const fn = (T.fine[i] / 255 - 0.5);
+        const gn = (T.grain[i] / 255 - 0.5);
+        const nCh = inks.length;
+        for (let c = 0; c < nCh; c++) {
+          const o = sampleRGB(x + offs[c][0], y + offs[c][1]);
+          const r = tone(src[o] / 255), g = tone(src[o + 1] / 255), b = tone(src[o + 2] / 255);
+          let d;
+          if (color) {
+            const kk = 1 - Math.max(r, g, b);
+            const k = kk * 0.85, den = 1 - k || 1e-6;
+            d = c === 0 ? (1 - r - k) / den : c === 1 ? (1 - g - k) / den : c === 2 ? (1 - b - k) / den : k;
+            if (d < 0) d = 0; else if (d > 1) d = 1;
+          } else {
+            d = 1 - (0.2126 * r + 0.7152 * g + 0.0722 * b);
+          }
+          d = d + gain * d * (1 - d) * 2;            // dot gain spreads mid-tones darker
+          let a;
+          if (screen === "halftone") {
+            const u = (x * trig[c][0] + y * trig[c][1]) * k2, v = (-x * trig[c][1] + y * trig[c][0]) * k2;
+            const t = 0.5 - (Math.cos(u) + Math.cos(v)) * 0.25;   // 0 at dot centre .. 1 between dots
+            a = (d - t + rn) / aa + 0.5;
+          } else if (screen === "grain") {
+            const t = (T.grain[i] * 0.6 + T.fine[i] * 0.4) / 255;
+            a = (d - t + rn * 0.6) / 0.08 + 0.5;
+          } else {
+            const t = 0.5 + gn * 0.35 + fn * 0.12;
+            a = (d - t + rn) / 0.05 + 0.5;
+          }
+          a = a < 0 ? 0 : a > 1 ? 1 : a;
+          cov[c] = a;
+        }
+        // ink strength varies over the page like an unevenly inked press
+        const bl = 1 - blotch * (0.55 * T.blotch[i] / 255 + 0.45 * T.blotch2[i] / 255) * 0.85;
+        const dens = density * bl;
+        // paper: fibres, grain and ageing (yellow + darker edges)
+        const rr = Math.hypot(x - cx, y - cy) / maxR;
+        const edge = age * Math.max(0, rr - 0.45) * 0.55;
+        const pf = 1 + (T.fiber[i] / 255 - 0.5) * fiber * 0.16 + fn * fiber * 0.05 - edge;
+        let R = paper[0] * pf * (1 - age * 0.02), G = paper[1] * pf * (1 - age * 0.05), B = paper[2] * pf * (1 - age * 0.16);
+        for (let c = 0; c < nCh; c++) {
+          const a = cov[c] * dens;
+          if (a <= 0) continue;
+          // subtractive: multiply paper by ink colour
+          const ic = inks[c];
+          R *= 1 - a * (1 - ic[0] / 255); G *= 1 - a * (1 - ic[1] / 255); B *= 1 - a * (1 - ic[2] / 255);
+        }
+        const gr = gn * grain * 70 + fn * grain * 30;
+        px[i * 4] = R + gr; px[i * 4 + 1] = G + gr; px[i * 4 + 2] = B + gr; px[i * 4 + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    if (state.bleed > 0) {
+      // soften ink edges a touch, the way ink wicks into cheap paper
+      const tmp = document.createElement("canvas"); tmp.width = W; tmp.height = H;
+      const tg = tmp.getContext("2d"); tg.drawImage(out, 0, 0);
+      ctx.save(); ctx.filter = `blur(${(state.bleed * W / 1600).toFixed(2)}px)`;
+      ctx.globalAlpha = 0.85; ctx.drawImage(tmp, 0, 0); ctx.restore();
+    }
+    drawDust(W, H);
+    if (state.fold) drawFold(W, H);
+    return H;
+  }
+
+  function drawDust(W, H) {
+    const n = Math.round(state.dust * (W * H) / 9000);
+    if (!n) return;
+    const rnd = mulberry(seed * 7 + 3);
+    const s = W / 1600;
+    const ink = state.ink;
+    for (let i = 0; i < n; i++) {
+      const x = rnd() * W, y = rnd() * H, r = (0.4 + rnd() * rnd() * 2.6) * s;
+      const light = rnd() < 0.55;
+      ctx.globalAlpha = 0.25 + rnd() * 0.6;
+      ctx.fillStyle = light ? state.paper : ink;
+      ctx.beginPath();
+      if (rnd() < 0.2) { const l = r * (3 + rnd() * 8), a = rnd() * Math.PI; ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); ctx.lineWidth = r * 0.6; ctx.strokeStyle = ctx.fillStyle; ctx.stroke(); }
+      else { ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawFold(W, H) {
+    const x = W * 0.5;
+    const g = ctx.createLinearGradient(x - W * 0.03, 0, x + W * 0.03, 0);
+    g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(0.46, "rgba(0,0,0,0.13)");
+    g.addColorStop(0.5, "rgba(255,255,255,0.32)"); g.addColorStop(0.56, "rgba(0,0,0,0.08)"); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g; ctx.fillRect(x - W * 0.03, 0, W * 0.06, H);
+    const h = ctx.createLinearGradient(0, H * 0.5 - H * 0.02, 0, H * 0.5 + H * 0.02);
+    h.addColorStop(0, "rgba(0,0,0,0)"); h.addColorStop(0.5, "rgba(0,0,0,0.07)"); h.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = h; ctx.fillRect(0, H * 0.48, W, H * 0.04);
+  }
+
+  // Preview renders at a lighter width while you drag, then at full width once you let go.
+  let timer = 0, raf = 0;
+  function schedule(quick = true) {
+    if (!source) return;
+    cancelAnimationFrame(raf); clearTimeout(timer);
+    const full = state.outW;
+    const fast = Math.min(full, 1000);
+    raf = requestAnimationFrame(() => {
+      const h = render(quick ? fast : full);
+      updateStats(quick ? fast : full, h, !quick || fast === full);
+      if (quick && fast !== full) timer = setTimeout(() => { const hh = render(full); updateStats(full, hh, true); }, 350);
+    });
+  }
+  function updateStats(W, H, final) {
+    // cells across the width ÷ 10 inches of print = lines per inch if the picture ran 10″ wide
+    const lpi = state.screen === "halftone" ? Math.round(160 / state.dot) : 0;
+    $("stats").textContent = `${sourceName} · ${W}×${H} px${final ? "" : " (preview)"}` + (lpi ? ` · ≈ ${lpi} lpi printed 10″ wide` : "");
+  }
+
+  // ------------------------------------------------------------------ controls
+  const fmts = {
+    dot: v => v.toFixed(1), angle: v => `${v}°`, misreg: v => v.toFixed(1),
+    brightness: v => (v > 0 ? "+" : "") + Math.round(v * 100), contrast: v => (v > 0 ? "+" : "") + Math.round(v * 100),
+    gain: v => `${Math.round(v * 100)}%`, density: v => `${Math.round(v * 100)}%`, rough: v => `${Math.round(v * 100)}`,
+    blotch: v => `${Math.round(v * 100)}`, bleed: v => v.toFixed(1), grain: v => `${Math.round(v * 100)}`,
+    grainSize: v => v.toFixed(1), fiber: v => `${Math.round(v * 100)}`, age: v => `${Math.round(v * 100)}`, dust: v => `${Math.round(v * 100)}`
+  };
+  for (const key of Object.keys(fmts)) {
+    const el = $(key);
+    el.addEventListener("input", () => { state[key] = parseFloat(el.value); $(key + "Out").textContent = fmts[key](state[key]); clearPreset(); schedule(true); });
+    el.addEventListener("change", () => schedule(false));
+  }
+  function syncControls() {
+    for (const key of Object.keys(fmts)) { $(key).value = state[key]; $(key + "Out").textContent = fmts[key](state[key]); }
+    $("paperColor").value = state.paper; $("inkColor").value = state.ink; $("fold").checked = state.fold;
+    $("outW").value = String(state.outW);
+    pressSeg("screenSeg", state.screen); pressSeg("colorSeg", state.color);
+    $("misregRow").hidden = state.color !== "color";
+  }
+  function pressSeg(id, v) { for (const b of $(id).querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.v === v)); }
+  $("screenSeg").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; state.screen = b.dataset.v; clearPreset(); syncControls(); schedule(false); });
+  $("colorSeg").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; state.color = b.dataset.v; clearPreset(); syncControls(); schedule(false); });
+  $("paperColor").addEventListener("input", e => { state.paper = e.target.value; clearPreset(); schedule(true); });
+  $("inkColor").addEventListener("input", e => { state.ink = e.target.value; clearPreset(); schedule(true); });
+  $("fold").addEventListener("change", e => { state.fold = e.target.checked; schedule(false); });
+  $("outW").addEventListener("change", e => { state.outW = parseInt(e.target.value, 10); schedule(false); });
+  $("reshuffle").addEventListener("click", () => { seed = (Math.random() * 1e9) | 0; schedule(false); });
+
+  const presetBox = $("presets");
+  PRESETS.forEach((p, i) => {
+    const b = document.createElement("button"); b.type = "button"; b.dataset.i = i;
+    const t = document.createElement("b"); t.textContent = p.name;
+    const n = document.createElement("span"); n.textContent = p.note;
+    b.append(t, n);
+    b.addEventListener("click", () => {
+      state = { ...DEFAULTS, ...p.v, outW: state.outW };
+      syncControls(); schedule(false);
+      for (const x of presetBox.children) x.setAttribute("aria-pressed", String(x === b));
+    });
+    presetBox.append(b);
+  });
+  function clearPreset() { for (const x of presetBox.children) x.setAttribute("aria-pressed", "false"); }
+
+  $("pickBtn").addEventListener("click", () => $("file").click());
+  $("file").addEventListener("change", e => { const f = e.target.files && e.target.files[0]; if (f) loadFile(f); e.target.value = ""; });
+  $("sampleBtn").addEventListener("click", () => setSource(makeSample(), "Sample photo"));
+  const stage = $("stage");
+  stage.addEventListener("dragover", e => { e.preventDefault(); stage.classList.add("dragging"); });
+  stage.addEventListener("dragleave", () => stage.classList.remove("dragging"));
+  stage.addEventListener("drop", e => { e.preventDefault(); stage.classList.remove("dragging"); const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) loadFile(f); });
+  window.addEventListener("paste", e => {
+    const item = [...(e.clipboardData ? e.clipboardData.items : [])].find(i => i.type.startsWith("image/"));
+    if (item) { const f = item.getAsFile(); if (f) loadFile(f); }
+  });
+
+  // hold to compare
+  let saved = null;
+  const cmp = $("compareBtn");
+  const showOrig = () => { if (!source || saved) return; saved = ctx.getImageData(0, 0, out.width, out.height); ctx.drawImage(source, 0, 0, out.width, out.height); };
+  const restore = () => { if (saved) { ctx.putImageData(saved, 0, 0); saved = null; } };
+  cmp.addEventListener("pointerdown", e => { e.preventDefault(); showOrig(); });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) cmp.addEventListener(ev, restore);
+  cmp.addEventListener("keydown", e => { if ((e.key === " " || e.key === "Enter") && !e.repeat) { e.preventDefault(); showOrig(); } });
+  cmp.addEventListener("keyup", e => { if (e.key === " " || e.key === "Enter") restore(); });
+  $("zoomBtn").addEventListener("click", () => {
+    const on = !stage.classList.contains("zoomed");
+    stage.classList.toggle("zoomed", on);
+    $("zoomBtn").setAttribute("aria-pressed", String(on));
+    $("zoomBtn").textContent = on ? "Fit to view" : "Actual pixels";
+  });
+
+  // ------------------------------------------------------------------ export
+  let downloads = null;
+  if (window.claude && typeof window.claude.use === "function") {
+    window.claude.use("downloads").then(d => { downloads = d; }).catch(() => { downloads = null; });
+  }
+  function baseName() { return (sourceName || "newsprint").replace(/\.[^.]+$/, "").replace(/[^\w-]+/g, "_").slice(0, 60) + "_newsprint"; }
+  async function exportAs(type, ext) {
+    if (!source) return;
+    clearTimeout(timer);
+    const h = render(state.outW); updateStats(state.outW, h, true);
+    out.toBlob(async (blob) => {
+      if (!blob) { toast("Export failed. Try a smaller width."); return; }
+      const name = baseName() + "." + ext;
+      if (downloads) {
+        try { await downloads.save({ filename: name, data: blob }); toast("Saved " + name); return; }
+        catch (e) {
+          if (e && e.code === "declined") { toast("Download cancelled."); return; }
+          if (e && e.code === "rate_limited") { toast("A save prompt is already open."); return; }
+        }
+      }
+      $("saveImg").src = URL.createObjectURL(blob);
+      $("saveDialog").showModal();
+    }, type, 0.93);
+  }
+  $("jpgBtn").addEventListener("click", () => exportAs("image/jpeg", "jpg"));
+  $("pngBtn").addEventListener("click", () => exportAs("image/png", "png"));
+  $("closeDialog").addEventListener("click", () => $("saveDialog").close());
+
+  let toastTimer = 0;
+  function toast(msg) { const t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 3000); }
+
+  syncControls();
+  presetBox.children[0].setAttribute("aria-pressed", "true");
+  setSource(makeSample(), "Sample photo");
+})();
+</script>
