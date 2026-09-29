@@ -1,0 +1,25 @@
+{
+ "ortMjs": "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.0/dist/ort-wasm-simd-threaded.jsep.mjs",
+ "model": [
+  "model/htdemucs.00.wasm",
+  "model/htdemucs.01.wasm",
+  "model/htdemucs.02.wasm",
+  "model/htdemucs.03.wasm",
+  "model/htdemucs.04.wasm",
+  "model/htdemucs.05.wasm",
+  "model/htdemucs.06.wasm",
+  "model/htdemucs.07.wasm",
+  "model/htdemucs.08.wasm",
+  "model/htdemucs.09.wasm",
+  "model/htdemucs.10.wasm",
+  "model/htdemucs.11.wasm",
+  "model/htdemucs.12.wasm"
+ ],
+ "modelBytes": 174263526,
+ "engine": [
+  "engine/ort-jsep.00.wasm",
+  "engine/ort-jsep.01.wasm"
+ ],
+ "engineBytes": 23696346,
+ "cacheKey": "htdemucs-1.0.0+ort-1.23.0"
+}
