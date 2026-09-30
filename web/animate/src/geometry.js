@@ -110,6 +110,7 @@ function regionBounds(region) {
   for (const P of region) for (const [x, y] of P[0]) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
   return { x0, y0, x1, y1 };
 }
+Geo.inside = (region, x, y) => insideRegion(region, x, y);
 function insideRegion(region, x, y) {
   let c = false;
   for (const P of region) for (const r of P) {
@@ -255,11 +256,12 @@ Geo.combine = function (objs, op) {
 };
 
 /** Erases the region from every vector object of a cell. Returns the ids that are gone or changed. */
-Geo.cutCell = function (cell, region) {
+Geo.cutCell = function (cell, region, skip) {
   if (!region.length || typeof polygonClipping === "undefined") return { changed: 0, removed: [] };
   const rb = regionBounds(region), out = [], removed = [];
   let n = 0;
   for (const o of cell.objects) {
+    if (skip && skip.has(o.id)) { out.push(o); continue; }
     let r = null;
     try { r = Geo.cutObject(o, region, rb); } catch (e) { r = null; }
     if (r === null) { out.push(o); continue; }

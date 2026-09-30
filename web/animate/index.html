@@ -65,6 +65,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .tool:hover { background: var(--panel-2); }
 .tool.on { background: var(--accent); color: var(--accent-ink); }
 .tool.symbtn { margin-top: 6px; border-top: 1px solid var(--rule); border-radius: 0 0 6px 6px; }
+.tool.maskbtn.active { color: #e11d48; background: var(--panel-2); box-shadow: inset 0 0 0 2px #e11d48; border-radius: 6px; }
 .tool.symbtn.active { color: var(--accent); background: var(--panel-2); box-shadow: inset 0 0 0 2px var(--accent); border-radius: 6px; }
 .swatches { position: relative; width: 38px; height: 40px; flex: 0 0 auto; margin-top: 6px; cursor: pointer; }
 .sw { position: absolute; width: 24px; height: 24px; border-radius: 4px; }
@@ -1017,6 +1018,7 @@ function regionBounds(region) {
   for (const P of region) for (const [x, y] of P[0]) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
   return { x0, y0, x1, y1 };
 }
+Geo.inside = (region, x, y) => insideRegion(region, x, y);
 function insideRegion(region, x, y) {
   let c = false;
   for (const P of region) for (const r of P) {
@@ -1162,11 +1164,12 @@ Geo.combine = function (objs, op) {
 };
 
 /** Erases the region from every vector object of a cell. Returns the ids that are gone or changed. */
-Geo.cutCell = function (cell, region) {
+Geo.cutCell = function (cell, region, skip) {
   if (!region.length || typeof polygonClipping === "undefined") return { changed: 0, removed: [] };
   const rb = regionBounds(region), out = [], removed = [];
   let n = 0;
   for (const o of cell.objects) {
+    if (skip && skip.has(o.id)) { out.push(o); continue; }
     let r = null;
     try { r = Geo.cutObject(o, region, rb); } catch (e) { r = null; }
     if (r === null) { out.push(o); continue; }
@@ -1696,6 +1699,7 @@ function paint() {
     Render.frame(g, s.frame);
   }
   if (!s.playing) Render.onion(g, s.frame);
+  if (!s.playing) Mask.overlay(g);
   g.restore();
   // overlays in screen space
   g.save();
@@ -1968,6 +1972,65 @@ function drawSymmetryGuides(g) {
   const [px, py] = toScreen(cx, cy); g.fillStyle = "#fff"; g.beginPath(); g.arc(px, py, 4, 0, 7); g.fill(); g.stroke();
   g.restore();
 }
+
+// ---------------------------------------------------------------- mask: paint / erase only outside (or inside) chosen shapes
+const MASK_TOOLS = ["paint", "eraser", "vbrush"];
+const Mask = (App.Mask = {
+  current: null,   // { invert, area (MultiPolygon, doc coords), ids, allow (canvas: opaque where painting is allowed), guard (Path2D of the protected part) }
+  /** Makes a mask from the selected shapes. invert = true paints outside them. */
+  fromSelection(invert) {
+    const sel = selectedObjects();
+    if (!sel.length) { toast("Select one or more shapes first, then turn on the mask."); return false; }
+    if (typeof polygonClipping === "undefined") { toast("The shape library didn't load; check your connection and reload."); return false; }
+    const rect = (o) => { const b = Render.docBounds(o); return [[[[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h], [b.x, b.y]]]]; };
+    let area;
+    try { const parts = sel.map((o) => Geo.areaOf(o) || rect(o)).filter((a) => a.length); area = parts.length > 1 ? polygonClipping.union(...parts) : parts[0] || []; }
+    catch (e) { toast("Couldn't make a mask from that selection."); return false; }
+    if (!area.length) { toast("That selection has no area to mask with."); return false; }
+    const d = App.doc, shape = new Path2D();
+    for (const P of area) for (const r of P) { r.forEach(([x, y], i) => (i ? shape.lineTo(x, y) : shape.moveTo(x, y))); shape.closePath(); }
+    const allow = document.createElement("canvas"); allow.width = d.width; allow.height = d.height;
+    const ag = allow.getContext("2d"); ag.fillStyle = "#000";
+    if (invert) { ag.fillRect(0, 0, d.width, d.height); ag.globalCompositeOperation = "destination-out"; ag.fill(shape, "evenodd"); }
+    else ag.fill(shape, "evenodd");
+    const guard = new Path2D();
+    if (invert) guard.addPath(shape); else { guard.rect(0, 0, d.width, d.height); guard.addPath(shape); }
+    this.current = { invert, area, ids: new Set(sel.map((o) => o.id)), allow, guard };
+    App.emit("mask"); View.redraw();
+    toast(invert ? "Mask on: painting and erasing now only reach outside the selected shapes." : "Mask on: painting and erasing now stay inside the selected shapes.");
+    return true;
+  },
+  clear() { if (!this.current) return; this.current = null; App.emit("mask"); View.redraw(); toast("Mask off."); },
+  toggle(invert = true) { if (this.current) this.clear(); else this.fromSelection(invert); },
+  /** Is painting allowed at this document point? */
+  allows(x, y) { const m = this.current; if (!m) return true; return Geo.inside(m.area, x, y) !== m.invert; },
+  /** Keeps only the allowed part of a stroke buffer. */
+  clipBuffer(g) { const m = this.current; if (!m) return; g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(m.allow, 0, 0); g.restore(); },
+  /** Puts back the protected pixels (for brushes that paint straight onto the layer). */
+  restore(g, before) {
+    const m = this.current; if (!m) return;
+    g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
+    g.clip(m.guard, "evenodd"); g.clearRect(0, 0, g.canvas.width, g.canvas.height); if (before) g.drawImage(before, 0, 0);
+    g.restore();
+  },
+  /** Limits an eraser footprint to the allowed area. */
+  clipRegion(region) {
+    const m = this.current; if (!m || !region.length) return region;
+    return m.invert ? polygonClipping.difference(region, m.area) : polygonClipping.intersection(region, m.area);
+  },
+  /** Trims a finished vector shape to the allowed area; returns the new object, or null if nothing is left. */
+  clipObject(o) {
+    const m = this.current; if (!m) return o;
+    const a = Geo.areaOf(o); if (!a || !a.length) return o;
+    const res = m.invert ? polygonClipping.difference(a, m.area) : polygonClipping.intersection(a, m.area);
+    if (!res.length) return null;
+    return { id: o.id, group: o.group, type: "rings", m: M.id(), fill: o.fill && typeof o.fill === "object" ? { ...o.fill } : o.fill, stroke: null, sw: 0, opacity: o.opacity ?? 1, blend: o.blend || "source-over", polys: res.map((P) => P.map((r) => r.flat())) };
+  },
+  overlay(g) {
+    const m = this.current; if (!m || !MASK_TOOLS.includes(App.state.tool)) return;
+    g.save(); g.fillStyle = "rgba(225, 29, 72, 0.22)"; g.fill(m.guard, "evenodd"); g.restore();
+  }
+});
 
 // ---------------------------------------------------------------- the tools
 const Tools = (App.Tools = {});
@@ -2279,7 +2342,18 @@ tool("vbrush", (() => {
       const cell = editableCell(); for (const o of cell.objects) if (ids.includes(o.id)) o.pts = obj.pts;
       changed("brush");
     },
-    up() { obj = null; },
+    up() {
+      if (obj && Mask.current) {
+        const cell = editableCell(); const out = [];
+        for (const o of cell.objects) {
+          if (!ids.includes(o.id)) { out.push(o); continue; }
+          let r = o; try { r = Mask.clipObject(o); } catch (e) { r = o; }
+          if (r) out.push(r);
+        }
+        cell.objects = out; changed("brush");
+      }
+      obj = null;
+    },
     cancel() { if (obj) { History.doUndo(); obj = null; } }
   };
 })());
@@ -2548,7 +2622,7 @@ App.setPaintBrush = function (kind) {
 };
 
 function paintTool(erase) {
-  let last = null, cell = null, leftover = 0, trails = null, painter = null;
+  let last = null, cell = null, leftover = 0, trails = null, painter = null, before = null;
   const cfg = () => (erase ? { size: App.style.eraser.size, hardness: 0.8, opacity: 1, flow: 1, pressureSize: true, pressureOpacity: false, color: "#000" } : App.style.paint);
   const mode = () => (erase ? App.style.eraser.mode || "all" : "pixels");
   // a mirrored copy of a stroke also mirrors its direction
@@ -2571,6 +2645,7 @@ function paintTool(erase) {
       History.push();
       cell = editableCell();
       const m = mode(), pixels = m === "pixels" || m === "all", vectors = m === "cut" || m === "all";
+      before = cell.raster || null;   // the untouched pixels (history keeps them), used by the mask
       if (pixels && (cell.raster || !erase)) rasterForPaint(cell);
       buildStrokeCache();
       const d = App.doc, b = Paint.buffer;
@@ -2581,7 +2656,7 @@ function paintTool(erase) {
       painter = kind ? makePainter(direct ? cell.raster.getContext("2d", { willReadFrequently: kind === "oil" }) : g, kind, cfg(), cfg().color) : null;
       Paint.live = { alpha: direct ? 1 : cfg().opacity, erase, pixels: pixels && !direct, vectors, direct };
       trails = vectors ? [] : null;
-      last = p; leftover = 0; dab(painter && direct ? null : g, p.x, p.y, p.p); changed("paint");
+      last = p; leftover = 0; dab(painter && direct ? null : g, p.x, p.y, p.p); this.masked(); changed("paint");
     },
     move(p) {
       if (erase && mode() === "objects") { if (this._erasing) this.eraseObjects(p, false); return; }
@@ -2592,7 +2667,13 @@ function paintTool(erase) {
       const dir = Math.atan2(p.y - last.y, p.x - last.x);
       let t = leftover;
       while (t < dist) { const k = t / dist; dab(g, lerp(last.x, p.x, k), lerp(last.y, p.y, k), lerp(last.p, p.p, k), dir); t += step; }
-      leftover = t - dist; last = p; changed("paint");
+      leftover = t - dist; last = p; this.masked(); changed("paint");
+    },
+    /** With a mask on, keeps the stroke out of the protected area as it is drawn. */
+    masked() {
+      if (!Mask.current || !Paint.live) return;
+      if (Paint.live.direct) Mask.restore(cell.raster.getContext("2d"), before);
+      else Mask.clipBuffer(Paint.buffer.getContext("2d"));
     },
     up() {
       this._erasing = false;
@@ -2605,7 +2686,7 @@ function paintTool(erase) {
       }
       if (lv.vectors && trails && cell.objects.length) {
         try {
-          const res = Geo.cutCell(cell, Geo.eraserRegion(trails));
+          const res = Geo.cutCell(cell, Mask.clipRegion(Geo.eraserRegion(trails)), Mask.current ? Mask.current.ids : null);
           if (res.removed.length) App.state.selection = App.state.selection.filter((id) => !res.removed.includes(id));
           if (res.changed) App.emit("selection");
         } catch (e) { console.warn("vector erase failed", e); }
@@ -2617,7 +2698,7 @@ function paintTool(erase) {
       if (!layerEditable(first)) return;
       const tol = Math.max(App.style.eraser.size / 2, docLen(4));
       const spots = Sym.all().map((T) => M.apply(T, p.x, p.y));
-      const hits = currentObjects().filter((o) => spots.some(([x, y]) => Render.hit(o, x, y, tol))).map((o) => o.id);
+      const hits = currentObjects().filter((o) => !(Mask.current && Mask.current.ids.has(o.id)) && spots.some(([x, y]) => Mask.allows(x, y) && Render.hit(o, x, y, tol))).map((o) => o.id);
       if (first) this._erasing = true;
       if (!hits.length) return;
       if (!this._pushed || first) { History.push(); this._pushed = true; }
@@ -3177,6 +3258,7 @@ const ICON = {
   eye: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><circle cx="12" cy="12" r="2.8" fill="currentColor"/>',
   eyeOff: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><path d="M4 4l16 16"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
+  mask: '<rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor" opacity=".35"/><circle cx="12" cy="12" r="5.5" fill="var(--panel, #fff)" stroke="currentColor"/>',
   sym: '<path d="M12 2v20" stroke-dasharray="2 2.2"/><path d="M9 6L3 12l6 6z"/><path d="M15 6l6 6-6 6z" fill="currentColor"/>',
   unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018-1"/>'
 };
@@ -3268,7 +3350,9 @@ UI.buildToolbar = function () {
     h("span", { class: "sw stroke", style: `border-color:${App.style.strokeOn ? App.style.stroke : "transparent"}` }));
   sw.onclick = () => UI.openProps();
   const sb = h("button", { class: "tool symbtn", type: "button", "aria-label": "Symmetry", html: ICON.sym, onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); window.innerWidth <= 900 ? UI.symmetryMenu(r.left, r.bottom + 6) : UI.symmetryMenu(r.right + 6, r.top); } });
-  bar.append(sb, sw);
+  const mb = h("button", { class: "tool maskbtn", type: "button", "aria-label": "Mask", html: ICON.mask, onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); window.innerWidth <= 900 ? UI.maskMenu(r.left, r.bottom + 6) : UI.maskMenu(r.right + 6, r.top); } });
+  bar.append(sb, mb, sw);
+  UI.syncMaskButton();
   UI.syncSymButton();
 };
 App.setTool = function (name) {
@@ -3350,6 +3434,7 @@ UI.buildProps = function () {
   if (["rect", "ellipse", "poly", "line", "pen", "pencil", "vbrush", "text"].includes(t)) opts.push(slider("Opacity", 0, 1, 0.01, () => s.opacity, (v) => (s.opacity = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }));
   if (opts.length) box.append(section("Tool", ...opts));
   if (SYM_TOOLS.includes(t)) box.append(UI.symmetrySection());
+  if (App.Mask.current && MASK_TOOLS.includes(t)) box.append(section("Mask", h("p", { class: "hint" }, App.Mask.current.invert ? "On: you can only paint and erase outside the masked shapes (shaded red)." : "On: you can only paint and erase inside the masked shapes (outside is shaded red)."), btn("Turn mask off", () => App.Mask.clear())));
 
   // --- selection
   if (editSel) {
@@ -3360,6 +3445,7 @@ UI.buildProps = function () {
       h("div", { class: "btnrow" }, btn("Duplicate", () => Cmd.duplicate()), btn("Repeat…", () => UI.repeatDialog()), btn("Delete", () => Cmd.delete())),
       h("div", { class: "btnrow" }, btn("Mirror copy ↔", () => Cmd.mirrorCopy(true)), btn("Mirror copy ↕", () => Cmd.mirrorCopy(false)), btn("To path", () => Cmd.toPath())),
       h("div", { class: "btnrow" }, btn("Group", () => Cmd.group()), btn("Ungroup", () => Cmd.ungroup())),
+      h("div", { class: "btnrow" }, btn("Mask: paint outside", () => App.Mask.fromSelection(true)), btn("Mask: paint inside", () => App.Mask.fromSelection(false))),
       h("p", { class: "hint" }, "Merge shapes into one:"),
       h("div", { class: "btnrow" }, btn("Unite", () => Cmd.merge("unite")), btn("Subtract", () => Cmd.merge("subtract")), btn("Intersect", () => Cmd.merge("intersect")), btn("Exclude", () => Cmd.merge("exclude"))),
       h("div", { class: "btnrow" }, btn("Front", () => Cmd.arrange("front")), btn("Forward", () => Cmd.arrange("forward")), btn("Backward", () => Cmd.arrange("backward")), btn("Back", () => Cmd.arrange("back"))),
@@ -3420,6 +3506,23 @@ UI.symmetryMenu = function (x, y) {
     ["More options…", () => UI.openProps()]
   ]);
 };
+UI.syncMaskButton = function () {
+  const b = document.querySelector(".tool.maskbtn"); if (!b) return;
+  const m = App.Mask.current;
+  b.classList.toggle("active", !!m);
+  b.title = m ? (m.invert ? "Mask on: paint outside the shapes (Q to turn off)" : "Mask on: paint inside the shapes (Q to turn off)") : "Mask: paint only outside / inside selected shapes (Q)";
+};
+UI.maskMenu = function (x, y) {
+  const m = App.Mask.current;
+  UI.popup(x, y, [
+    [(m && m.invert ? "✓ " : "") + "Paint outside the selection (inverted)", () => App.Mask.fromSelection(true)],
+    [(m && !m.invert ? "✓ " : "") + "Paint inside the selection", () => App.Mask.fromSelection(false)],
+    ["-"],
+    [m ? "Turn mask off" : "Mask is off", () => App.Mask.clear()]
+  ]);
+};
+App.on("mask", () => { UI.syncMaskButton(); UI.buildProps(); });
+
 UI.repeatDialog = function () {
   if (!App.state.selection.length) { toast("Select the objects to repeat first."); return; }
   const r = App.style.repeat;
@@ -3626,7 +3729,7 @@ UI.docSettings = function () {
 UI.help = function () {
   const rows = [["Space + drag / two fingers", "Pan"], ["Ctrl + wheel / pinch", "Zoom"], ["Enter", "Play / stop"], [", and .", "Previous / next frame"], ["Shift + , and .", "Previous / next key"],
     ["F6", "New blank key"], ["F7", "Duplicate key"], ["F5", "Hold one more frame"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Two-finger tap", "Undo"],
-    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Ctrl+Shift+D", "Repeat copies…"], ["Ctrl+G / Ctrl+Shift+G", "Group / ungroup"], ["Ctrl+M", "Merge (unite) shapes"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
+    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Ctrl+Shift+D", "Repeat copies…"], ["Ctrl+G / Ctrl+Shift+G", "Group / ungroup"], ["Ctrl+M", "Merge (unite) shapes"], ["Q", "Mask on (paint outside selection) / off"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
   const tbl = h("table", { class: "keys" }, rows.map(([k, v]) => h("tr", {}, h("td", {}, h("kbd", {}, k)), h("td", {}, v))));
   const tools = h("table", { class: "keys" }, TOOLS.map(([, t]) => h("tr", {}, h("td", {}, t))));
   UI.dialog("Shortcuts", h("div", { class: "cols" }, tbl, tools), []);
@@ -3740,6 +3843,7 @@ UI.bindKeys = function () {
     if (mod && k.toLowerCase() === "s") { e.preventDefault(); App.Exporter.saveProject(); return; }
     if (mod && k.toLowerCase() === "e") { e.preventDefault(); App.Exporter.open(); return; }
     if (k === "Enter") { e.preventDefault(); if (App.state.tool === "pen") Tools.get("pen").finish(); else Player.toggle(); return; }
+    if (!mod && k.toLowerCase() === "q") { e.preventDefault(); App.Mask.current ? App.Mask.clear() : App.Mask.fromSelection(true); return; }
     if (k === "Escape") { Tools.get("pen").finish(); App.state.selection = []; App.emit("selection"); View.redraw(); return; }
     if (k === "Delete" || k === "Backspace") { e.preventDefault(); if (App.state.tool === "direct" && Tools.get("direct").activeNode >= 0) Cmd.deleteNode(); else Cmd.delete(); return; }
     if (k.startsWith("Arrow")) { e.preventDefault(); const s = e.shiftKey ? 10 : 1; Cmd.nudge(k === "ArrowLeft" ? -s : k === "ArrowRight" ? s : 0, k === "ArrowUp" ? -s : k === "ArrowDown" ? s : 0); return; }

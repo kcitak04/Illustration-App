@@ -20,6 +20,7 @@ const ICON = {
   eye: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><circle cx="12" cy="12" r="2.8" fill="currentColor"/>',
   eyeOff: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><path d="M4 4l16 16"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
+  mask: '<rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor" opacity=".35"/><circle cx="12" cy="12" r="5.5" fill="var(--panel, #fff)" stroke="currentColor"/>',
   sym: '<path d="M12 2v20" stroke-dasharray="2 2.2"/><path d="M9 6L3 12l6 6z"/><path d="M15 6l6 6-6 6z" fill="currentColor"/>',
   unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018-1"/>'
 };
@@ -111,7 +112,9 @@ UI.buildToolbar = function () {
     h("span", { class: "sw stroke", style: `border-color:${App.style.strokeOn ? App.style.stroke : "transparent"}` }));
   sw.onclick = () => UI.openProps();
   const sb = h("button", { class: "tool symbtn", type: "button", "aria-label": "Symmetry", html: ICON.sym, onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); window.innerWidth <= 900 ? UI.symmetryMenu(r.left, r.bottom + 6) : UI.symmetryMenu(r.right + 6, r.top); } });
-  bar.append(sb, sw);
+  const mb = h("button", { class: "tool maskbtn", type: "button", "aria-label": "Mask", html: ICON.mask, onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); window.innerWidth <= 900 ? UI.maskMenu(r.left, r.bottom + 6) : UI.maskMenu(r.right + 6, r.top); } });
+  bar.append(sb, mb, sw);
+  UI.syncMaskButton();
   UI.syncSymButton();
 };
 App.setTool = function (name) {
@@ -193,6 +196,7 @@ UI.buildProps = function () {
   if (["rect", "ellipse", "poly", "line", "pen", "pencil", "vbrush", "text"].includes(t)) opts.push(slider("Opacity", 0, 1, 0.01, () => s.opacity, (v) => (s.opacity = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }));
   if (opts.length) box.append(section("Tool", ...opts));
   if (SYM_TOOLS.includes(t)) box.append(UI.symmetrySection());
+  if (App.Mask.current && MASK_TOOLS.includes(t)) box.append(section("Mask", h("p", { class: "hint" }, App.Mask.current.invert ? "On: you can only paint and erase outside the masked shapes (shaded red)." : "On: you can only paint and erase inside the masked shapes (outside is shaded red)."), btn("Turn mask off", () => App.Mask.clear())));
 
   // --- selection
   if (editSel) {
@@ -203,6 +207,7 @@ UI.buildProps = function () {
       h("div", { class: "btnrow" }, btn("Duplicate", () => Cmd.duplicate()), btn("Repeat…", () => UI.repeatDialog()), btn("Delete", () => Cmd.delete())),
       h("div", { class: "btnrow" }, btn("Mirror copy ↔", () => Cmd.mirrorCopy(true)), btn("Mirror copy ↕", () => Cmd.mirrorCopy(false)), btn("To path", () => Cmd.toPath())),
       h("div", { class: "btnrow" }, btn("Group", () => Cmd.group()), btn("Ungroup", () => Cmd.ungroup())),
+      h("div", { class: "btnrow" }, btn("Mask: paint outside", () => App.Mask.fromSelection(true)), btn("Mask: paint inside", () => App.Mask.fromSelection(false))),
       h("p", { class: "hint" }, "Merge shapes into one:"),
       h("div", { class: "btnrow" }, btn("Unite", () => Cmd.merge("unite")), btn("Subtract", () => Cmd.merge("subtract")), btn("Intersect", () => Cmd.merge("intersect")), btn("Exclude", () => Cmd.merge("exclude"))),
       h("div", { class: "btnrow" }, btn("Front", () => Cmd.arrange("front")), btn("Forward", () => Cmd.arrange("forward")), btn("Backward", () => Cmd.arrange("backward")), btn("Back", () => Cmd.arrange("back"))),
@@ -263,6 +268,23 @@ UI.symmetryMenu = function (x, y) {
     ["More options…", () => UI.openProps()]
   ]);
 };
+UI.syncMaskButton = function () {
+  const b = document.querySelector(".tool.maskbtn"); if (!b) return;
+  const m = App.Mask.current;
+  b.classList.toggle("active", !!m);
+  b.title = m ? (m.invert ? "Mask on: paint outside the shapes (Q to turn off)" : "Mask on: paint inside the shapes (Q to turn off)") : "Mask: paint only outside / inside selected shapes (Q)";
+};
+UI.maskMenu = function (x, y) {
+  const m = App.Mask.current;
+  UI.popup(x, y, [
+    [(m && m.invert ? "✓ " : "") + "Paint outside the selection (inverted)", () => App.Mask.fromSelection(true)],
+    [(m && !m.invert ? "✓ " : "") + "Paint inside the selection", () => App.Mask.fromSelection(false)],
+    ["-"],
+    [m ? "Turn mask off" : "Mask is off", () => App.Mask.clear()]
+  ]);
+};
+App.on("mask", () => { UI.syncMaskButton(); UI.buildProps(); });
+
 UI.repeatDialog = function () {
   if (!App.state.selection.length) { toast("Select the objects to repeat first."); return; }
   const r = App.style.repeat;
@@ -469,7 +491,7 @@ UI.docSettings = function () {
 UI.help = function () {
   const rows = [["Space + drag / two fingers", "Pan"], ["Ctrl + wheel / pinch", "Zoom"], ["Enter", "Play / stop"], [", and .", "Previous / next frame"], ["Shift + , and .", "Previous / next key"],
     ["F6", "New blank key"], ["F7", "Duplicate key"], ["F5", "Hold one more frame"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Two-finger tap", "Undo"],
-    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Ctrl+Shift+D", "Repeat copies…"], ["Ctrl+G / Ctrl+Shift+G", "Group / ungroup"], ["Ctrl+M", "Merge (unite) shapes"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
+    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Ctrl+Shift+D", "Repeat copies…"], ["Ctrl+G / Ctrl+Shift+G", "Group / ungroup"], ["Ctrl+M", "Merge (unite) shapes"], ["Q", "Mask on (paint outside selection) / off"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
   const tbl = h("table", { class: "keys" }, rows.map(([k, v]) => h("tr", {}, h("td", {}, h("kbd", {}, k)), h("td", {}, v))));
   const tools = h("table", { class: "keys" }, TOOLS.map(([, t]) => h("tr", {}, h("td", {}, t))));
   UI.dialog("Shortcuts", h("div", { class: "cols" }, tbl, tools), []);
@@ -583,6 +605,7 @@ UI.bindKeys = function () {
     if (mod && k.toLowerCase() === "s") { e.preventDefault(); App.Exporter.saveProject(); return; }
     if (mod && k.toLowerCase() === "e") { e.preventDefault(); App.Exporter.open(); return; }
     if (k === "Enter") { e.preventDefault(); if (App.state.tool === "pen") Tools.get("pen").finish(); else Player.toggle(); return; }
+    if (!mod && k.toLowerCase() === "q") { e.preventDefault(); App.Mask.current ? App.Mask.clear() : App.Mask.fromSelection(true); return; }
     if (k === "Escape") { Tools.get("pen").finish(); App.state.selection = []; App.emit("selection"); View.redraw(); return; }
     if (k === "Delete" || k === "Backspace") { e.preventDefault(); if (App.state.tool === "direct" && Tools.get("direct").activeNode >= 0) Cmd.deleteNode(); else Cmd.delete(); return; }
     if (k.startsWith("Arrow")) { e.preventDefault(); const s = e.shiftKey ? 10 : 1; Cmd.nudge(k === "ArrowLeft" ? -s : k === "ArrowRight" ? s : 0, k === "ArrowUp" ? -s : k === "ArrowDown" ? s : 0); return; }

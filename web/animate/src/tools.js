@@ -86,6 +86,7 @@ function paint() {
     Render.frame(g, s.frame);
   }
   if (!s.playing) Render.onion(g, s.frame);
+  if (!s.playing) Mask.overlay(g);
   g.restore();
   // overlays in screen space
   g.save();
@@ -358,6 +359,65 @@ function drawSymmetryGuides(g) {
   const [px, py] = toScreen(cx, cy); g.fillStyle = "#fff"; g.beginPath(); g.arc(px, py, 4, 0, 7); g.fill(); g.stroke();
   g.restore();
 }
+
+// ---------------------------------------------------------------- mask: paint / erase only outside (or inside) chosen shapes
+const MASK_TOOLS = ["paint", "eraser", "vbrush"];
+const Mask = (App.Mask = {
+  current: null,   // { invert, area (MultiPolygon, doc coords), ids, allow (canvas: opaque where painting is allowed), guard (Path2D of the protected part) }
+  /** Makes a mask from the selected shapes. invert = true paints outside them. */
+  fromSelection(invert) {
+    const sel = selectedObjects();
+    if (!sel.length) { toast("Select one or more shapes first, then turn on the mask."); return false; }
+    if (typeof polygonClipping === "undefined") { toast("The shape library didn't load; check your connection and reload."); return false; }
+    const rect = (o) => { const b = Render.docBounds(o); return [[[[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h], [b.x, b.y]]]]; };
+    let area;
+    try { const parts = sel.map((o) => Geo.areaOf(o) || rect(o)).filter((a) => a.length); area = parts.length > 1 ? polygonClipping.union(...parts) : parts[0] || []; }
+    catch (e) { toast("Couldn't make a mask from that selection."); return false; }
+    if (!area.length) { toast("That selection has no area to mask with."); return false; }
+    const d = App.doc, shape = new Path2D();
+    for (const P of area) for (const r of P) { r.forEach(([x, y], i) => (i ? shape.lineTo(x, y) : shape.moveTo(x, y))); shape.closePath(); }
+    const allow = document.createElement("canvas"); allow.width = d.width; allow.height = d.height;
+    const ag = allow.getContext("2d"); ag.fillStyle = "#000";
+    if (invert) { ag.fillRect(0, 0, d.width, d.height); ag.globalCompositeOperation = "destination-out"; ag.fill(shape, "evenodd"); }
+    else ag.fill(shape, "evenodd");
+    const guard = new Path2D();
+    if (invert) guard.addPath(shape); else { guard.rect(0, 0, d.width, d.height); guard.addPath(shape); }
+    this.current = { invert, area, ids: new Set(sel.map((o) => o.id)), allow, guard };
+    App.emit("mask"); View.redraw();
+    toast(invert ? "Mask on: painting and erasing now only reach outside the selected shapes." : "Mask on: painting and erasing now stay inside the selected shapes.");
+    return true;
+  },
+  clear() { if (!this.current) return; this.current = null; App.emit("mask"); View.redraw(); toast("Mask off."); },
+  toggle(invert = true) { if (this.current) this.clear(); else this.fromSelection(invert); },
+  /** Is painting allowed at this document point? */
+  allows(x, y) { const m = this.current; if (!m) return true; return Geo.inside(m.area, x, y) !== m.invert; },
+  /** Keeps only the allowed part of a stroke buffer. */
+  clipBuffer(g) { const m = this.current; if (!m) return; g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(m.allow, 0, 0); g.restore(); },
+  /** Puts back the protected pixels (for brushes that paint straight onto the layer). */
+  restore(g, before) {
+    const m = this.current; if (!m) return;
+    g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
+    g.clip(m.guard, "evenodd"); g.clearRect(0, 0, g.canvas.width, g.canvas.height); if (before) g.drawImage(before, 0, 0);
+    g.restore();
+  },
+  /** Limits an eraser footprint to the allowed area. */
+  clipRegion(region) {
+    const m = this.current; if (!m || !region.length) return region;
+    return m.invert ? polygonClipping.difference(region, m.area) : polygonClipping.intersection(region, m.area);
+  },
+  /** Trims a finished vector shape to the allowed area; returns the new object, or null if nothing is left. */
+  clipObject(o) {
+    const m = this.current; if (!m) return o;
+    const a = Geo.areaOf(o); if (!a || !a.length) return o;
+    const res = m.invert ? polygonClipping.difference(a, m.area) : polygonClipping.intersection(a, m.area);
+    if (!res.length) return null;
+    return { id: o.id, group: o.group, type: "rings", m: M.id(), fill: o.fill && typeof o.fill === "object" ? { ...o.fill } : o.fill, stroke: null, sw: 0, opacity: o.opacity ?? 1, blend: o.blend || "source-over", polys: res.map((P) => P.map((r) => r.flat())) };
+  },
+  overlay(g) {
+    const m = this.current; if (!m || !MASK_TOOLS.includes(App.state.tool)) return;
+    g.save(); g.fillStyle = "rgba(225, 29, 72, 0.22)"; g.fill(m.guard, "evenodd"); g.restore();
+  }
+});
 
 // ---------------------------------------------------------------- the tools
 const Tools = (App.Tools = {});
@@ -669,7 +729,18 @@ tool("vbrush", (() => {
       const cell = editableCell(); for (const o of cell.objects) if (ids.includes(o.id)) o.pts = obj.pts;
       changed("brush");
     },
-    up() { obj = null; },
+    up() {
+      if (obj && Mask.current) {
+        const cell = editableCell(); const out = [];
+        for (const o of cell.objects) {
+          if (!ids.includes(o.id)) { out.push(o); continue; }
+          let r = o; try { r = Mask.clipObject(o); } catch (e) { r = o; }
+          if (r) out.push(r);
+        }
+        cell.objects = out; changed("brush");
+      }
+      obj = null;
+    },
     cancel() { if (obj) { History.doUndo(); obj = null; } }
   };
 })());
@@ -938,7 +1009,7 @@ App.setPaintBrush = function (kind) {
 };
 
 function paintTool(erase) {
-  let last = null, cell = null, leftover = 0, trails = null, painter = null;
+  let last = null, cell = null, leftover = 0, trails = null, painter = null, before = null;
   const cfg = () => (erase ? { size: App.style.eraser.size, hardness: 0.8, opacity: 1, flow: 1, pressureSize: true, pressureOpacity: false, color: "#000" } : App.style.paint);
   const mode = () => (erase ? App.style.eraser.mode || "all" : "pixels");
   // a mirrored copy of a stroke also mirrors its direction
@@ -961,6 +1032,7 @@ function paintTool(erase) {
       History.push();
       cell = editableCell();
       const m = mode(), pixels = m === "pixels" || m === "all", vectors = m === "cut" || m === "all";
+      before = cell.raster || null;   // the untouched pixels (history keeps them), used by the mask
       if (pixels && (cell.raster || !erase)) rasterForPaint(cell);
       buildStrokeCache();
       const d = App.doc, b = Paint.buffer;
@@ -971,7 +1043,7 @@ function paintTool(erase) {
       painter = kind ? makePainter(direct ? cell.raster.getContext("2d", { willReadFrequently: kind === "oil" }) : g, kind, cfg(), cfg().color) : null;
       Paint.live = { alpha: direct ? 1 : cfg().opacity, erase, pixels: pixels && !direct, vectors, direct };
       trails = vectors ? [] : null;
-      last = p; leftover = 0; dab(painter && direct ? null : g, p.x, p.y, p.p); changed("paint");
+      last = p; leftover = 0; dab(painter && direct ? null : g, p.x, p.y, p.p); this.masked(); changed("paint");
     },
     move(p) {
       if (erase && mode() === "objects") { if (this._erasing) this.eraseObjects(p, false); return; }
@@ -982,7 +1054,13 @@ function paintTool(erase) {
       const dir = Math.atan2(p.y - last.y, p.x - last.x);
       let t = leftover;
       while (t < dist) { const k = t / dist; dab(g, lerp(last.x, p.x, k), lerp(last.y, p.y, k), lerp(last.p, p.p, k), dir); t += step; }
-      leftover = t - dist; last = p; changed("paint");
+      leftover = t - dist; last = p; this.masked(); changed("paint");
+    },
+    /** With a mask on, keeps the stroke out of the protected area as it is drawn. */
+    masked() {
+      if (!Mask.current || !Paint.live) return;
+      if (Paint.live.direct) Mask.restore(cell.raster.getContext("2d"), before);
+      else Mask.clipBuffer(Paint.buffer.getContext("2d"));
     },
     up() {
       this._erasing = false;
@@ -995,7 +1073,7 @@ function paintTool(erase) {
       }
       if (lv.vectors && trails && cell.objects.length) {
         try {
-          const res = Geo.cutCell(cell, Geo.eraserRegion(trails));
+          const res = Geo.cutCell(cell, Mask.clipRegion(Geo.eraserRegion(trails)), Mask.current ? Mask.current.ids : null);
           if (res.removed.length) App.state.selection = App.state.selection.filter((id) => !res.removed.includes(id));
           if (res.changed) App.emit("selection");
         } catch (e) { console.warn("vector erase failed", e); }
@@ -1007,7 +1085,7 @@ function paintTool(erase) {
       if (!layerEditable(first)) return;
       const tol = Math.max(App.style.eraser.size / 2, docLen(4));
       const spots = Sym.all().map((T) => M.apply(T, p.x, p.y));
-      const hits = currentObjects().filter((o) => spots.some(([x, y]) => Render.hit(o, x, y, tol))).map((o) => o.id);
+      const hits = currentObjects().filter((o) => !(Mask.current && Mask.current.ids.has(o.id)) && spots.some(([x, y]) => Mask.allows(x, y) && Render.hit(o, x, y, tol))).map((o) => o.id);
       if (first) this._erasing = true;
       if (!hits.length) return;
       if (!this._pushed || first) { History.push(); this._pushed = true; }
