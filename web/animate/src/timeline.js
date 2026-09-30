@@ -187,6 +187,24 @@ const Layers = (App.Layers = {
     changed("mask"); App.emit("layers");
   },
   editMask(on) { const L = App.doc.layers[App.state.layer]; if (!L || !L.mask) return; L.maskEdit = on; changed("mask"); App.emit("layers"); },
+  // ---- layer groups (linked layers: their shapes are selected and moved together)
+  setGroup(indices) {
+    const d = App.doc, L = d.layers[App.state.layer]; if (!L) return;
+    History.push();
+    let gid = L.lgroup;
+    if (!gid) { const used = new Set(d.layers.map((x) => x.lgroup).filter(Boolean)); gid = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").find((c) => !used.has(c)) || "g" + uid(); }
+    d.layers.forEach((M, i) => { if (indices.includes(i)) M.lgroup = gid; else if (M.lgroup === gid) delete M.lgroup; });
+    const n = d.layers.filter((M) => M.lgroup === gid).length;
+    if (n < 2) d.layers.forEach((M) => { if (M.lgroup === gid) delete M.lgroup; });
+    changed("layers"); App.emit("layers");
+    toast(n < 2 ? "A layer group needs at least two layers." : `Layer group ${gid}: ${n} layers linked. Their shapes are selected and moved together.`);
+  },
+  leaveGroup() {
+    const d = App.doc, L = d.layers[App.state.layer]; if (!L || !L.lgroup) return;
+    History.push(); const gid = L.lgroup; delete L.lgroup;
+    if (d.layers.filter((M) => M.lgroup === gid).length < 2) d.layers.forEach((M) => { if (M.lgroup === gid) delete M.lgroup; });
+    App.state.selection = []; changed("layers"); App.emit("layers"); App.emit("selection");
+  },
   toggleClip() {
     const L = App.doc.layers[App.state.layer]; if (!L) return;
     if (App.state.layer === 0 && !L.clip) { toast("The bottom layer has nothing below it to clip to."); return; }
@@ -272,7 +290,7 @@ TL.buildHeads = function () {
     const lock = document.createElement("button"); lock.className = "ico"; lock.title = L.locked ? "Unlock layer" : "Lock layer"; lock.innerHTML = L.locked ? ICON.lock : ICON.unlock;
     lock.onclick = (e) => { e.stopPropagation(); History.push(); L.locked = !L.locked; changed("layers"); };
     const name = document.createElement("span"); name.className = "tl-name";
-    name.textContent = (L.clip ? "↳ " : "") + (L.kind === "media" ? (L.media.type === "audio" ? "♪ " : "▶ ") : "") + L.name + (L.mask ? (L.maskEdit ? " ◐ (editing mask)" : " ◐") : "");
+    name.textContent = (L.lgroup ? `⛓${L.lgroup.length === 1 ? L.lgroup : ""} ` : "") + (L.clip ? "↳ " : "") + (L.kind === "media" ? (L.media.type === "audio" ? "♪ " : "▶ ") : "") + L.name + (L.mask ? (L.maskEdit ? " ◐ (editing mask)" : " ◐") : "");
     if (L.clip) name.title = "Clipped to the layer below";
     name.title = "Double-click to rename";
     name.ondblclick = () => {

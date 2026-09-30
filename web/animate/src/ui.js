@@ -142,16 +142,16 @@ UI.buildProps = function () {
   // --- colour
   const applyFill = (v) => {
     s.grad = null; s.fill = v; if (typeof v === "string") s.paint.color = v;
-    if (editSel) { const cell = editableCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) o.fill = v; }); changed("fill"); }
+    if (editSel) { const cell = App.selCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) o.fill = v; }); changed("fill"); }
     UI.syncSwatch();
   };
-  const applyStroke = (v) => { s.strokeOn = !!v; if (v) s.stroke = v; if (editSel) { const cell = editableCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) { o.stroke = v; if (v && !o.sw) o.sw = s.sw; } }); changed("stroke"); } UI.syncSwatch(); };
+  const applyStroke = (v) => { s.strokeOn = !!v; if (v) s.stroke = v; if (editSel) { const cell = App.selCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) { o.stroke = v; if (v && !o.sw) o.sw = s.sw; } }); changed("stroke"); } UI.syncSwatch(); };
   const first = editSel ? sel[0] : null;
   const fillNow = first ? (typeof first.fill === "string" ? first.fill : null) : (s.grad ? null : s.fill);
   const colorSec = section("Colour",
     colorRow(t === "paint" || t === "bucket" ? "Paint" : "Fill", () => (t === "paint" || t === "bucket" ? s.paint.color : fillNow), (v) => { if (t === "paint" || t === "bucket") { s.paint.color = v || s.paint.color; s.fill = v || s.fill; UI.syncSwatch(); } else applyFill(v); }, { allowNone: !["paint", "bucket", "vbrush"].includes(t), record: !!editSel }),
     colorRow("Stroke", () => (first ? first.stroke : s.strokeOn ? s.stroke : null), applyStroke, { allowNone: true, record: !!editSel }),
-    slider("Stroke width", 0, 80, 0.5, () => (first ? first.sw || 0 : s.sw), (v) => { s.sw = v; if (editSel) { const cell = editableCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) o.sw = v; }); changed("sw"); } }, { record: !!editSel }),
+    slider("Stroke width", 0, 80, 0.5, () => (first ? first.sw || 0 : s.sw), (v) => { s.sw = v; if (editSel) { const cell = App.selCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) o.sw = v; }); changed("sw"); } }, { record: !!editSel }),
     h("div", { class: "row" }, btn("Gradient…", () => UI.gradientDialog()), s.grad ? h("span", { class: "hint" }, `${s.grad.type} gradient on`) : null),
     UI.recentSwatches()
   );
@@ -212,8 +212,8 @@ UI.buildProps = function () {
   if (editSel) {
     const o = first;
     const kids = [
-      slider("Opacity", 0, 1, 0.01, () => o.opacity ?? 1, (v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.opacity = v; }); changed("op"); }, { fmt: (v) => Math.round(v * 100) + "%" }),
-      select("Blend", BLENDS, () => o.blend || "source-over", (v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.blend = v; }); changed("blend"); }),
+      slider("Opacity", 0, 1, 0.01, () => o.opacity ?? 1, (v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.opacity = v; }); changed("op"); }, { fmt: (v) => Math.round(v * 100) + "%" }),
+      select("Blend", BLENDS, () => o.blend || "source-over", (v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.blend = v; }); changed("blend"); }),
       h("div", { class: "btnrow" }, btn("Duplicate", () => Cmd.duplicate()), btn("Repeat…", () => UI.repeatDialog()), btn("Delete", () => Cmd.delete())),
       h("div", { class: "btnrow" }, btn("Mirror copy ↔", () => Cmd.mirrorCopy(true)), btn("Mirror copy ↕", () => Cmd.mirrorCopy(false)), btn("To path", () => Cmd.toPath())),
       h("div", { class: "btnrow" }, btn("Group", () => Cmd.group()), btn("Ungroup", () => Cmd.ungroup())),
@@ -227,11 +227,11 @@ UI.buildProps = function () {
     ];
     const fb = sel.find((x) => x.type === "brush");
     if (fb) {
-      const setSel = (k, v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") x[k] = v; }); changed("brush-param"); };
+      const setSel = (k, v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") x[k] = v; }); changed("brush-param"); };
       kids.unshift(...UI.vbrushParams(fb.style || "pressure", (k) => fb[k], setSel, true));
     }
-    if (fb) kids.unshift(select("Brush style", Render.VBRUSHES, () => (sel.find((x) => x.type === "brush").style || "pressure"), (v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") { x.style = v; if (!x.seed) x.seed = 1 + Math.floor(Math.random() * 9999); } }); changed("style"); UI.buildProps(); }));
-    if (o.type === "text") kids.unshift(btn("Edit text", () => TextTool.edit(o)), slider("Text size", 8, 600, 1, () => o.size, (v) => { const c = editableCell(); c.objects.forEach((x) => { if (x.id === o.id) x.size = v; }); changed("size"); }));
+    if (fb) kids.unshift(select("Brush style", Render.VBRUSHES, () => (sel.find((x) => x.type === "brush").style || "pressure"), (v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") { x.style = v; if (!x.seed) x.seed = 1 + Math.floor(Math.random() * 9999); } }); changed("style"); UI.buildProps(); }));
+    if (o.type === "text") kids.unshift(btn("Edit text", () => TextTool.edit(o)), slider("Text size", 8, 600, 1, () => o.size, (v) => { const c = App.selCell(); c.objects.forEach((x) => { if (x.id === o.id) x.size = v; }); changed("size"); }));
     const grouped = sel.length > 1 && sel[0].group && sel.every((x) => x.group === sel[0].group);
     box.append(section(`Selection · ${grouped ? "group of " : ""}${sel.length} ${sel.length === 1 ? "object" : "objects"}`, ...kids));
   }
@@ -245,6 +245,11 @@ UI.buildProps = function () {
       h("div", { class: "btnrow" }, btn("Move up", () => Layers.move(1)), btn("Move down", () => Layers.move(-1))),
       check("Clipping mask: clip to the layer below", () => !!L.clip, () => Layers.toggleClip(), { record: false })
     ];
+    if (L.lgroup) {
+      const n = App.doc.layers.filter((M) => M.lgroup === L.lgroup).length;
+      kids.push(h("p", { class: "hint" }, `⛓ Layer group ${L.lgroup} (${n} layers): the select tool picks and moves shapes on all of them together.`),
+        h("div", { class: "btnrow" }, btn("Edit group…", () => UI.layerGroupDialog()), btn("Select all in group", () => { App.setTool("select"); Cmd.selectAll(); }), btn("Leave group", () => Layers.leaveGroup())));
+    } else kids.push(btn("Group layers…", () => UI.layerGroupDialog()));
     if (L.clip) kids.push(h("p", { class: "hint" }, "This layer only shows where the layer below it has paint or shapes."));
     if (!L.mask) kids.push(h("div", { class: "btnrow" }, btn("Add layer mask", () => Layers.addMask(false)), btn("Mask from selection", () => Layers.addMask(true))));
     else {
@@ -311,6 +316,25 @@ UI.maskMenu = function (x, y) {
   ]);
 };
 App.on("mask", () => { UI.syncMaskButton(); UI.buildProps(); });
+
+UI.layerGroupDialog = function () {
+  const d = App.doc, ai = App.state.layer, L = d.layers[ai];
+  const picks = new Set(d.layers.map((M, i) => i).filter((i) => i === ai || (L.lgroup && d.layers[i].lgroup === L.lgroup)));
+  const list = h("div", { class: "grouplist" });
+  for (let i = d.layers.length - 1; i >= 0; i--) {
+    const M = d.layers[i], id = "lg" + i;
+    const box = h("input", { type: "checkbox", id, checked: picks.has(i), disabled: i === ai || M.kind !== "draw" });
+    box.addEventListener("change", () => (box.checked ? picks.add(i) : picks.delete(i)));
+    const note = M.kind !== "draw" ? " (imported media)" : M.lgroup && M.lgroup !== L.lgroup ? ` (now in group ${M.lgroup})` : i === ai ? " (this layer)" : "";
+    list.append(h("label", { class: "check", for: id }, box, M.name + note));
+  }
+  const body = h("div", {}, h("p", { class: "hint" }, "Tick the layers to link with this one. With the select tool, clicking or dragging a box then picks shapes on all of them, and moving, scaling, rotating, flipping, aligning, recolouring, duplicating or deleting works on them together. Each shape stays on its own layer."), list);
+  const dlg = UI.dialog(L.lgroup ? `Layer group ${L.lgroup}` : "Group layers", body, [
+    L.lgroup ? btn("Ungroup all", () => { dlg.close(); Layers.setGroup([]); }) : null,
+    btn("Cancel", () => dlg.close()),
+    btn("Link layers", () => { dlg.close(); Layers.setGroup([...picks]); }, "primary")
+  ].filter(Boolean));
+};
 
 UI.repeatDialog = function () {
   if (!App.state.selection.length) { toast("Select the objects to repeat first."); return; }

@@ -359,7 +359,7 @@ Project.serialize = async function ({ embedMedia = true, asBlobs = false } = {})
   const enc = async (c) => (c ? (asBlobs ? await canvasToBlob(c) : c.toDataURL("image/png")) : null);
   const layers = [];
   for (const L of d.layers) {
-    const base = { id: L.id, name: L.name, kind: L.kind, visible: L.visible, locked: L.locked, opacity: L.opacity, blend: L.blend, clip: !!L.clip };
+    const base = { id: L.id, name: L.name, kind: L.kind, visible: L.visible, locked: L.locked, opacity: L.opacity, blend: L.blend, clip: !!L.clip, lgroup: L.lgroup || undefined };
     if (L.mask && L.mask.canvas) base.mask = { on: L.mask.on !== false, data: await enc(L.mask.canvas) };
     if (L.kind === "draw") {
       base.cells = [];

@@ -263,9 +263,33 @@ function drawHoverCursor(g) {
 
 // ---------------------------------------------------------------- helpers shared by tools
 function currentObjects() { const L = activeLayer(); return L && L.kind === "draw" ? Render.cellObjectsAt(L, App.state.frame) : []; }
-function selectedObjects() { const ids = new Set(App.state.selection); return currentObjects().filter((o) => ids.has(o.id)); }
+// ---- layer groups: linked layers whose shapes are selected and moved together
+/** The active layer plus the layers grouped with it (drawing layers that are shown and unlocked), bottom to top. */
+function linkedLayers() {
+  const d = App.doc, ai = App.state.layer, L = d.layers[ai]; if (!L) return [];
+  if (!L.lgroup) return [ai];
+  return d.layers.map((M, i) => i).filter((i) => i === ai || (d.layers[i].lgroup === L.lgroup && d.layers[i].kind === "draw" && d.layers[i].visible && !d.layers[i].locked));
+}
+App.linkedLayers = linkedLayers;
+function withLayer(i, fn) { const s = App.state.layer; App.state.layer = i; try { return fn(); } finally { App.state.layer = s; } }
+function objectsOf(i) { const L = App.doc.layers[i]; return L && L.kind === "draw" ? Render.cellObjectsAt(L, App.state.frame) : []; }
+/** Everything the select tool can pick: the shapes on the active layer and on layers grouped with it. */
+function selectableObjects() { return linkedLayers().flatMap(objectsOf); }
+function selectedObjects() { const ids = new Set(App.state.selection); return selectableObjects().filter((o) => ids.has(o.id)); }
+/** Editable cells (auto-key aware) of every linked layer that holds part of the selection. */
+function selCells() {
+  const ids = new Set(App.state.selection), out = [];
+  for (const i of linkedLayers()) {
+    if (!objectsOf(i).some((o) => ids.has(o.id))) continue;
+    const cell = withLayer(i, () => editableCell());
+    if (cell) out.push({ cell, i });
+  }
+  return out;
+}
+/** One list of the live selected-layer objects, for changing their properties in place. */
+App.selCell = () => ({ objects: selCells().flatMap((x) => x.cell.objects) });
 /** An object plus everything grouped with it. */
-function groupIds(o, objs = currentObjects()) { return o.group ? objs.filter((x) => x.group === o.group).map((x) => x.id) : [o.id]; }
+function groupIds(o, objs = selectableObjects()) { return o.group ? objs.filter((x) => x.group === o.group).map((x) => x.id) : [o.id]; }
 /** Gives copied objects fresh group ids so they don't join the originals' groups. */
 function regroup(objs) { const map = new Map(); for (const o of objs) if (o.group) { if (!map.has(o.group)) map.set(o.group, "g" + uid()); o.group = map.get(o.group); } return objs; }
 function layerEditable(msg = true) {
@@ -287,16 +311,15 @@ function selBounds(objs) {
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 App.selBounds = () => selBounds(selectedObjects());
-function hitTop(x, y) {
-  const tol = docLen(8), objs = currentObjects();
+function hitTop(x, y, objs = selectableObjects()) {
+  const tol = docLen(8);
   for (let i = objs.length - 1; i >= 0; i--) if (Render.hit(objs[i], x, y, tol)) return objs[i];
   return null;
 }
 /** Applies a matrix to the selected objects in the editable key (auto-key aware). */
 function transformSelection(delta, base) {
-  const cell = editableCell(); if (!cell) return;
   const ids = new Set(App.state.selection);
-  for (const o of cell.objects) if (ids.has(o.id)) o.m = M.mul(delta, base ? base.get(o.id) : o.m);
+  for (const { cell } of selCells()) for (const o of cell.objects) if (ids.has(o.id)) o.m = M.mul(delta, base ? base.get(o.id) : o.m);
   changed("transform");
 }
 App.transformSelection = (delta) => { History.push(); transformSelection(delta); };
@@ -467,7 +490,7 @@ tool("select", (() => {
           // clicking another layer's artwork switches to that layer
           const d = App.doc;
           for (let i = d.layers.length - 1; i >= 0 && !hit; i--) {
-            const L = d.layers[i]; if (i === App.state.layer || L.kind !== "draw" || !L.visible || L.locked) continue;
+            const L = d.layers[i]; if (linkedLayers().includes(i) || L.kind !== "draw" || !L.visible || L.locked) continue;
             const objs = Render.cellObjectsAt(L, App.state.frame);
             for (let j = objs.length - 1; j >= 0; j--) if (Render.hit(objs[j], p.x, p.y, docLen(8))) { App.state.layer = i; hit = objs[j]; App.emit("layers"); break; }
           }
@@ -521,7 +544,7 @@ tool("select", (() => {
       if (mode === "marquee" && marquee) {
         const x0 = Math.min(marquee.x0, marquee.x1), x1 = Math.max(marquee.x0, marquee.x1), y0 = Math.min(marquee.y0, marquee.y1), y1 = Math.max(marquee.y0, marquee.y1);
         if (x1 - x0 > docLen(3) || y1 - y0 > docLen(3)) {
-          const ids = currentObjects().filter((o) => { const b = Render.docBounds(o); return b.x < x1 && b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0; }).flatMap((o) => groupIds(o));
+          const ids = selectableObjects().filter((o) => { const b = Render.docBounds(o); return b.x < x1 && b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0; }).flatMap((o) => groupIds(o));
           App.state.selection = [...new Set([...App.state.selection, ...ids])];
           App.emit("selection");
         }
@@ -583,7 +606,7 @@ tool("direct", (() => {
         if (!drag) for (let i = po.nodes.length - 1; i >= 0; i--) { const [x, y] = at(po.nodes[i].x, po.nodes[i].y); if (Math.hypot(x - p.x, y - p.y) < tol) { this.activeNode = i; drag = { kind: "node" }; break; } }
         if (drag) { drag.start = p; drag.id = o.id; App.emit("selection"); return; }
       }
-      const hit = hitTop(p.x, p.y);
+      const hit = hitTop(p.x, p.y, currentObjects());
       App.state.selection = hit ? [hit.id] : []; this.activeNode = -1; App.emit("selection");
     },
     move(p) {
@@ -844,7 +867,7 @@ const TextTool = (App.TextTool = {
 tool("text", {
   down(p) {
     if (!layerEditable()) return;
-    const hit = hitTop(p.x, p.y);
+    const hit = hitTop(p.x, p.y, currentObjects());
     if (hit && hit.type === "text") TextTool.edit(hit); else TextTool.open(p.x, p.y, null);
   }
 });
@@ -1327,14 +1350,22 @@ tool("hand", {});
 const Cmd = (App.Cmd = {
   editSelected(fn) {
     if (!App.state.selection.length || !layerEditable()) return;
-    History.push(); const cell = editableCell(); const ids = new Set(App.state.selection);
-    cell.objects.forEach((o, i) => { if (ids.has(o.id)) { const r = fn(o); if (r) cell.objects[i] = r; } });
+    History.push(); const ids = new Set(App.state.selection);
+    for (const { cell } of selCells()) cell.objects.forEach((o, i) => { if (ids.has(o.id)) { const r = fn(o); if (r) cell.objects[i] = r; } });
     changed("edit");
   },
   delete() {
     if (!App.state.selection.length || !layerEditable()) return;
-    History.push(); const cell = editableCell(); const ids = new Set(App.state.selection);
-    cell.objects = cell.objects.filter((o) => !ids.has(o.id)); App.state.selection = []; changed("delete"); App.emit("selection");
+    History.push(); const ids = new Set(App.state.selection);
+    for (const { cell } of selCells()) cell.objects = cell.objects.filter((o) => !ids.has(o.id));
+    App.state.selection = []; changed("delete"); App.emit("selection");
+  },
+  /** Adds copies of the selection, each copy on the same layer as its original. make(selectedInCell) returns the copies. */
+  copyInPlace(make) {
+    const ids = new Set(App.state.selection), made = [];
+    History.push();
+    for (const { cell } of selCells()) { const copies = make(cell.objects.filter((o) => ids.has(o.id))); cell.objects.push(...copies); made.push(...copies); }
+    App.state.selection = made.map((o) => o.id); return made;
   },
   clipboard: [],
   copy() { Cmd.clipboard = selectedObjects().map(cloneObj); if (Cmd.clipboard.length) toast(`Copied ${Cmd.clipboard.length} ${Cmd.clipboard.length === 1 ? "object" : "objects"}.`); },
@@ -1344,7 +1375,11 @@ const Cmd = (App.Cmd = {
     const copies = regroup(Cmd.clipboard.map((o) => ({ ...cloneObj(o), id: uid(), m: inPlace ? o.m.slice() : M.mul(M.translate(20, 20), o.m) })));
     cell.objects.push(...copies); App.state.selection = copies.map((o) => o.id); changed("paste"); App.emit("selection");
   },
-  duplicate() { Cmd.copy(); Cmd.paste(false); },
+  duplicate() {
+    if (!App.state.selection.length || !layerEditable()) return;
+    Cmd.copyInPlace((sel) => regroup(sel.map((o) => ({ ...cloneObj(o), id: uid(), m: M.mul(M.translate(20, 20), o.m) }))));
+    changed("duplicate"); App.emit("selection");
+  },
   /**
    * Repeat copies: each copy i is moved by i·(dx, dy), turned by i·rotate and scaled by scale^i
    * around the pivot (selection centre or canvas centre); fade multiplies the opacity each step.
@@ -1353,15 +1388,17 @@ const Cmd = (App.Cmd = {
     const sel = selectedObjects(); if (!sel.length || !layerEditable()) return;
     const b = selBounds(sel), d = App.doc;
     const [px, py] = pivot === "canvas" ? [d.width / 2, d.height / 2] : [b.x + b.w / 2, b.y + b.h / 2];
-    History.push(); const cell = editableCell(); const made = [];
-    for (let i = 1; i <= clamp(Math.round(count), 1, 500); i++) {
-      const k = Math.pow(scale / 100, i);
-      const T = M.mul(M.translate(dx * i, dy * i), M.mul(M.rotate((rotate * i * Math.PI) / 180, px, py), M.scale(k, k, px, py)));
-      const step = regroup(sel.map((o) => ({ ...cloneObj(o), id: uid(), m: M.mul(T, o.m) })));
-      step.forEach((c, j) => { if (fade !== 100) c.opacity = (sel[j].opacity ?? 1) * Math.pow(fade / 100, i); });
-      made.push(...step);
-    }
-    cell.objects.push(...made); App.state.selection = made.map((o) => o.id);
+    const made = Cmd.copyInPlace((sel) => {
+      const out = [];
+      for (let i = 1; i <= clamp(Math.round(count), 1, 500); i++) {
+        const k = Math.pow(scale / 100, i);
+        const T = M.mul(M.translate(dx * i, dy * i), M.mul(M.rotate((rotate * i * Math.PI) / 180, px, py), M.scale(k, k, px, py)));
+        const step = regroup(sel.map((o) => ({ ...cloneObj(o), id: uid(), m: M.mul(T, o.m) })));
+        step.forEach((c, j) => { if (fade !== 100) c.opacity = (sel[j].opacity ?? 1) * Math.pow(fade / 100, i); });
+        out.push(...step);
+      }
+      return out;
+    });
     changed("repeat"); App.emit("selection");
     toast(`Made ${made.length} ${made.length === 1 ? "copy" : "copies"}.`);
   },
@@ -1372,22 +1409,22 @@ const Cmd = (App.Cmd = {
     const cx = pivot === "canvas" ? d.width / 2 : pivot === "centre" ? b.x + b.w / 2 : b.x + b.w;
     const cy = pivot === "canvas" ? d.height / 2 : pivot === "centre" ? b.y + b.h / 2 : b.y + b.h;
     const T = horizontal ? M.scale(-1, 1, cx, cy) : M.scale(1, -1, cx, cy);
-    History.push(); const cell = editableCell();
-    const made = regroup(sel.map((o) => ({ ...cloneObj(o), id: uid(), m: M.mul(T, o.m) })));
-    cell.objects.push(...made); App.state.selection = made.map((o) => o.id);
+    Cmd.copyInPlace((part) => regroup(part.map((o) => ({ ...cloneObj(o), id: uid(), m: M.mul(T, o.m) }))));
     changed("mirror"); App.emit("selection");
   },
-  selectAll() { App.state.selection = currentObjects().map((o) => o.id); App.emit("selection"); View.redraw(); },
+  selectAll() { App.state.selection = selectableObjects().map((o) => o.id); App.emit("selection"); View.redraw(); },
   arrange(dir) {
     if (!App.state.selection.length || !layerEditable()) return;
-    History.push(); const cell = editableCell(); const ids = new Set(App.state.selection);
-    const sel = cell.objects.filter((o) => ids.has(o.id)), rest = cell.objects.filter((o) => !ids.has(o.id));
-    if (dir === "front") cell.objects = [...rest, ...sel];
-    else if (dir === "back") cell.objects = [...sel, ...rest];
-    else {
-      const a = cell.objects;
-      if (dir === "forward") for (let i = a.length - 2; i >= 0; i--) { if (ids.has(a[i].id) && !ids.has(a[i + 1].id)) [a[i], a[i + 1]] = [a[i + 1], a[i]]; }
-      else for (let i = 1; i < a.length; i++) { if (ids.has(a[i].id) && !ids.has(a[i - 1].id)) [a[i], a[i - 1]] = [a[i - 1], a[i]]; }
+    History.push(); const ids = new Set(App.state.selection);
+    for (const { cell } of selCells()) {
+      const sel = cell.objects.filter((o) => ids.has(o.id)), rest = cell.objects.filter((o) => !ids.has(o.id));
+      if (dir === "front") cell.objects = [...rest, ...sel];
+      else if (dir === "back") cell.objects = [...sel, ...rest];
+      else {
+        const a = cell.objects;
+        if (dir === "forward") for (let i = a.length - 2; i >= 0; i--) { if (ids.has(a[i].id) && !ids.has(a[i + 1].id)) [a[i], a[i + 1]] = [a[i + 1], a[i]]; }
+        else for (let i = 1; i < a.length; i++) { if (ids.has(a[i].id) && !ids.has(a[i - 1].id)) [a[i], a[i - 1]] = [a[i - 1], a[i]]; }
+      }
     }
     changed("arrange");
   },
@@ -1442,6 +1479,7 @@ const Cmd = (App.Cmd = {
     if (!layerEditable()) return;
     const sel = selectedObjects();
     if (sel.length < 2) { toast("Select two or more shapes to merge."); return; }
+    if (selCells().length > 1) { toast("Merging works on shapes from one layer. Move them onto the same layer first."); return; }
     const shapes = sel.filter((o) => o.type !== "text" && o.type !== "image");
     if (shapes.length < 2) { toast("Text and images can't be merged — convert or remove them from the selection."); return; }
     if (typeof polygonClipping === "undefined") { toast("The shape library didn't load; check your connection and reload."); return; }
