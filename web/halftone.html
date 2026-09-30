@@ -176,6 +176,17 @@ dialog {
   border: 1px solid var(--rule); border-radius: var(--r); background: var(--panel); color: var(--ink);
   max-width: min(560px, calc(100% - 32px)); padding: 16px;
 }
+.transport { display: flex; align-items: center; gap: 10px; }
+.transport input[type=range] { flex: 1; }
+.transport .time { font-family: var(--font-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.play { width: 38px; height: 34px; padding: 0; display: grid; place-items: center; }
+.play svg { width: 16px; height: 16px; fill: currentColor; }
+.vid-offscreen { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+.grid2 { display: grid; grid-template-columns: auto 1fr; gap: 8px 10px; align-items: center; font-size: 13px; }
+.grid2 input[type=number] { width: 100%; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--r); padding: 5px 8px; min-width: 0; }
+.bar { height: 8px; border-radius: 99px; background: var(--rule); overflow: hidden; margin: 12px 0 8px; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
+dialog video { display: block; max-width: 100%; max-height: 60vh; margin: 10px 0; background: #000; }
 dialog img { display: block; max-width: 100%; max-height: 60vh; margin: 10px 0; background: #fff; }
 dialog::backdrop { background: rgba(0,0,0,.45); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -184,7 +195,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 <header class="mast">
   <div>
     <h1>Halftone <span>Press</span></h1>
-    <p>Turn a photo into a halftone dot screen: mono, duotone, CMYK rosettes or RGB. Export crisp vector SVG for Illustrator, or a PNG.</p>
+    <p>Turn a photo or video into a halftone dot screen: mono, duotone, CMYK rosettes or RGB. Export crisp vector SVG for Illustrator, a PNG, or a halftone MP4.</p>
   </div>
   <div class="regmark">Screen · Angle · Dot</div>
 </header>
@@ -194,11 +205,11 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     <fieldset>
       <legend>Source</legend>
       <div class="btn-row">
-        <button class="btn primary" id="pickBtn" type="button">Choose photo</button>
-        <input id="file" type="file" accept="image/*,.heic,.heif" hidden>
+        <button class="btn primary" id="pickBtn" type="button">Choose photo or video</button>
+        <input id="file" type="file" accept="image/*,video/*,.heic,.heif,.mp4,.mov,.m4v,.webm,.mkv" hidden>
         <button class="btn" id="sampleBtn" type="button">Use sample</button>
       </div>
-      <p class="hint">Opens your phone's photo library or files. You can also drop or paste an image onto the proof. Photos never leave your device.</p>
+      <p class="hint">Opens your phone's photo library or files — photos and videos both work. You can also drop a file or paste an image onto the proof. Nothing leaves your device.</p>
       <p class="hint">If the photo picker doesn't open inside the Claude app, open this page in Chrome or Safari instead.</p>
     </fieldset>
 
@@ -260,7 +271,24 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
         <button class="btn" id="pngBtn" type="button">Download PNG</button>
         <button class="btn" id="copyBtn" type="button">Copy SVG</button>
       </div>
+      <p class="hint" id="stillHint" hidden>With a video loaded, SVG and PNG save the frame you're looking at.</p>
       <p class="hint">Each ink is its own group in the SVG. Paste the copied SVG straight into Illustrator; set the ink groups to Multiply there if they overlap.</p>
+    </fieldset>
+    <fieldset id="videoExport" hidden>
+      <legend>Video export</legend>
+      <div class="grid2">
+        <label for="vFormat">Format</label>
+        <select id="vFormat"><option value="mp4">MP4 (plays everywhere)</option><option value="webm">WebM</option></select>
+        <label for="vWidth">Width</label>
+        <select id="vWidth"><option value="720">720 px</option><option value="1080" selected>1080 px</option><option value="1280">1280 px</option><option value="1920">1920 px</option></select>
+        <label for="vFps">Frame rate</label>
+        <select id="vFps"><option value="12">12 fps (choppy, print-like)</option><option value="15">15 fps</option><option value="24">24 fps</option><option value="25">25 fps</option><option value="30" selected>30 fps</option><option value="60">60 fps</option></select>
+        <label for="vStart">Start (s)</label><input id="vStart" type="number" min="0" step="0.1" value="0">
+        <label for="vEnd">End (s)</label><input id="vEnd" type="number" min="0" step="0.1" value="0">
+      </div>
+      <label class="check"><input id="vAudio" type="checkbox" checked> Keep the sound</label>
+      <div class="btn-row"><button class="btn primary" id="videoBtn" type="button">Export halftone video</button></div>
+      <p class="hint" id="videoEst"></p>
     </fieldset>
   </section>
 
@@ -275,7 +303,13 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     <div class="stage" id="stage">
       <div class="sheet" id="sheet"><canvas id="out" width="10" height="10" aria-label="Halftone preview"></canvas></div>
     </div>
+    <div class="transport" id="transport" hidden>
+      <button class="btn play" id="playBtn" type="button" aria-label="Play"><svg viewBox="0 0 16 16" id="playIcon"><path d="M4 2l10 6-10 6z"/></svg></button>
+      <input id="scrub" type="range" min="0" max="1" step="0.01" value="0" aria-label="Video position">
+      <span class="time" id="timeOut">0:00 / 0:00</span>
+    </div>
     <p class="stats" id="stats"></p>
+    <video id="vid" class="vid-offscreen" playsinline preload="auto" aria-hidden="true"></video>
   </section>
 </main>
 
@@ -283,9 +317,18 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   <strong>Save your image</strong>
   <p class="hint" id="saveHint">Downloads aren't available here. Long-press or right-click the image to save it.</p>
   <img id="saveImg" alt="Halftone export">
+  <video id="saveVid" controls playsinline hidden></video>
   <div class="btn-row"><button class="btn" id="closeDialog" type="button">Close</button></div>
 </dialog>
+<dialog id="progDialog">
+  <strong id="progTitle">Making your halftone video</strong>
+  <div class="bar"><i id="progBar"></i></div>
+  <p class="hint" id="progText">Starting…</p>
+  <div class="btn-row" style="margin-top:10px"><button class="btn" id="progCancel" type="button">Cancel</button></div>
+</dialog>
 <div class="toast" id="toast" hidden></div>
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/webm-muxer@5.1.4/build/webm-muxer.js"></script>
 
 <script>
 (() => {
@@ -316,6 +359,8 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   let sourceName = "Sample image";
   let screens = [];      // last computed dots: [{ink, angle, blend, dots: Float32Array [x,y,s,...], n}]
   let outH = 0;
+  const R = { W: 2000, cell: 14 };   // the width / cell size of the render in progress (smaller while a video plays)
+  function render(W) { R.W = W; R.cell = state.cell * W / state.outW; compute(); draw(); }
 
   // ------------------------------------------------------------------ sample image
   function makeSample() {
@@ -364,6 +409,8 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   async function loadFile(file) {
     if (!file) return;
     const name = file.name || "Your photo";
+    if (isVideoFile(file)) { loadVideo(file); return; }
+    leaveVideo();
     if (/\.(heic|heif)$/i.test(name) || /hei[cf]/i.test(file.type)) {
       // Safari can decode HEIC; other browsers can't, so fall through and explain if it fails.
     }
@@ -430,10 +477,10 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   }
 
   function compute() {
-    const W = state.outW;
+    const W = R.W;
     const H = Math.max(1, Math.round(W * source.height / source.width));
     outH = H;
-    const cell = state.cell;
+    const cell = R.cell;
     const gw = Math.max(1, Math.round(W / cell)), gh = Math.max(1, Math.round(H / cell));
     const px = sampleGrid(gw, gh);
     const sx = gw / W, sy = gh / H;
@@ -485,7 +532,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   // ------------------------------------------------------------------ geometry for each dot shape
   // Sizes chosen so coverage d fills d of the cell's area at dot scale 1.
   function dotGeometry(x, y, d, th) {
-    const cell = state.cell, k = state.dotScale;
+    const cell = R.cell, k = state.dotScale;
     const co = Math.cos(th), si = Math.sin(th);
     switch (state.shape) {
       case "circle": return { r: cell * 0.5642 * Math.sqrt(d) * k * 1.12 };
@@ -507,7 +554,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   // ------------------------------------------------------------------ canvas render
   const layer = document.createElement("canvas");
   function draw() {
-    const W = state.outW, H = outH;
+    const W = R.W, H = outH;
     if (out.width !== W || out.height !== H) { out.width = W; out.height = H; }
     if (layer.width !== W || layer.height !== H) { layer.width = W; layer.height = H; }
     ctx.globalCompositeOperation = "source-over";
@@ -532,20 +579,21 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     }
     ctx.globalCompositeOperation = "source-over";
     const dots = screens.reduce((n, s) => n + s.dots.length / 3, 0);
-    const lpi = (W / state.cell) / 12.375;
-    $("stats").textContent = `${W}×${H} px · ${screens.length} ${screens.length === 1 ? "ink" : "inks"} · ${Math.round(dots).toLocaleString()} dots · ≈ ${lpi.toFixed(0)} LPI on a 12.375″ LP sleeve`;
+    const lpi = (state.outW / state.cell) / 12.375;
+    $("stats").textContent = `${W}×${H} px${W !== state.outW ? " (preview)" : ""} · ${screens.length} ${screens.length === 1 ? "ink" : "inks"} · ${Math.round(dots).toLocaleString()} dots · ≈ ${lpi.toFixed(0)} LPI on a 12.375″ LP sleeve`;
   }
 
   let pending = 0;
   function schedule() {
-    if (!source) return;
+    if (!source || playing || exporting) return;
     cancelAnimationFrame(pending);
-    pending = requestAnimationFrame(() => { compute(); draw(); });
+    pending = requestAnimationFrame(() => render(state.outW));
   }
 
   // ------------------------------------------------------------------ SVG
   function buildSvg() {
-    const W = state.outW, H = outH, f = (v) => Math.round(v * 100) / 100;
+    fullRes();
+    const W = R.W, H = outH, f = (v) => Math.round(v * 100) / 100;
     const rgb = state.mode === "rgb";
     const parts = [`<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n`];
     if (!state.transparent) parts.push(`<rect id="paper" width="${W}" height="${H}" fill="${rgb ? state.paperRgb : state.paper}"/>\n`);
@@ -581,8 +629,11 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   }
 
   function baseName() {
-    return (sourceName || "halftone").replace(/\.[^.]+$/, "").replace(/[^\w-]+/g, "_").slice(0, 60) + `_halftone_${state.mode}`;
+    const at = isVideo ? `_${video.currentTime.toFixed(2).replace(".", "s")}` : "";
+    return (sourceName || "halftone").replace(/\.[^.]+$/, "").replace(/[^\w-]+/g, "_").slice(0, 60) + at + `_halftone_${state.mode}`;
   }
+  /** Stills are always saved at the full output width, even if a video preview was showing. */
+  function fullRes() { if (playing) pause(); if (source && R.W !== state.outW) render(state.outW); }
 
   // ------------------------------------------------------------------ downloads
   let downloads = null;
@@ -599,8 +650,10 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
       }
     }
     // Fallback: show the file so it can be saved by long-press / right-click.
-    const img = $("saveImg");
-    img.src = fallbackUrl || URL.createObjectURL(blob);
+    const img = $("saveImg"), vid = $("saveVid"), isVid = /^video\//.test(blob.type);
+    img.hidden = isVid; vid.hidden = !isVid;
+    if (isVid) { vid.src = URL.createObjectURL(blob); $("saveHint").textContent = "Downloads aren't available here. Use the video's menu (⋮) or long-press it to save it."; }
+    else { img.src = fallbackUrl || URL.createObjectURL(blob); $("saveHint").textContent = "Downloads aren't available here. Long-press or right-click the image to save it."; }
     $("saveDialog").showModal();
   }
 
@@ -613,6 +666,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   });
 
   $("pngBtn").addEventListener("click", () => {
+    fullRes();
     out.toBlob((blob) => { if (blob) offer(baseName() + ".png", blob); else toast("PNG export failed."); }, "image/png");
   });
 
@@ -626,7 +680,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
       toast("Copying isn't allowed here. Use Download SVG instead.");
     }
   });
-  $("closeDialog").addEventListener("click", () => $("saveDialog").close());
+  $("closeDialog").addEventListener("click", () => { $("saveDialog").close(); $("saveVid").pause(); });
 
   // ------------------------------------------------------------------ controls
   const sliders = {
@@ -692,7 +746,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 
   $("pickBtn").addEventListener("click", () => $("file").click());
   $("file").addEventListener("change", (e) => { const f = e.target.files && e.target.files[0]; if (f) loadFile(f); e.target.value = ""; });
-  $("sampleBtn").addEventListener("click", () => setSource(makeSample(), "Sample image"));
+  $("sampleBtn").addEventListener("click", () => { leaveVideo(); setSource(makeSample(), "Sample image"); });
 
   const stage = $("stage");
   stage.addEventListener("dragover", (e) => { e.preventDefault(); stage.classList.add("dragging"); });
@@ -725,6 +779,254 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     $("zoomBtn").setAttribute("aria-pressed", String(on));
     $("zoomBtn").textContent = on ? "Fit to view" : "Actual pixels";
   });
+
+  // ------------------------------------------------------------------ video
+  const video = $("vid");
+  const vsrc = document.createElement("canvas");
+  const PREVIEW_MAX = 1000;
+  let isVideo = false, videoFile = null, videoUrl = null, playing = false, exporting = false;
+
+  function isVideoFile(f) { return /^video\//.test(f.type || "") || /\.(mp4|m4v|mov|webm|mkv|avi|3gp|ogv)$/i.test(f.name || ""); }
+  const fmtTime = (t) => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s < 10 ? "0" : ""}${s.toFixed(1)}`; };
+
+  /** Copies the video's current picture into the source canvas the halftone is built from. */
+  function grabFrame() {
+    const w = video.videoWidth, h = video.videoHeight; if (!w || !h) return false;
+    const k = Math.min(1, 1600 / Math.max(w, h)), cw = Math.round(w * k), ch = Math.round(h * k);
+    if (vsrc.width !== cw || vsrc.height !== ch) { vsrc.width = cw; vsrc.height = ch; }
+    const g = vsrc.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(video, 0, 0, cw, ch);
+    source = vsrc; return true;
+  }
+  function updateTime() {
+    $("timeOut").textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
+    if (!scrubbing) $("scrub").value = String(video.currentTime);
+  }
+  function setPlayUi() {
+    $("playIcon").innerHTML = playing ? '<path d="M3 2h4v12H3zM9 2h4v12H9z"/>' : '<path d="M4 2l10 6-10 6z"/>';
+    $("playBtn").setAttribute("aria-label", playing ? "Pause" : "Play");
+  }
+  function nextFrame() {
+    if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(onVideoFrame);
+    else requestAnimationFrame(onVideoFrame);
+  }
+  function onVideoFrame() {
+    if (!playing) return;
+    if (grabFrame()) render(Math.min(state.outW, PREVIEW_MAX));
+    updateTime();
+    nextFrame();
+  }
+  function play() {
+    if (!isVideo || exporting) return;
+    if (video.ended || video.currentTime >= video.duration - 0.05) video.currentTime = 0;
+    const go = () => { playing = true; setPlayUi(); nextFrame(); };
+    video.play().then(go).catch(() => { video.muted = true; video.play().then(go).catch(() => toast("This video can't play here.")); });
+  }
+  function pause() { if (!video.paused) video.pause(); if (playing) { playing = false; setPlayUi(); } }
+  function refreshStill() { if (isVideo && grabFrame()) render(state.outW); updateTime(); }
+  video.addEventListener("pause", () => { if (exporting) return; playing = false; setPlayUi(); refreshStill(); });
+  video.addEventListener("ended", () => { playing = false; setPlayUi(); });
+
+  /** Seeks and waits until the new picture is really decoded. */
+  function seekExact(t) {
+    return new Promise((res) => {
+      const target = Math.min(Math.max(0, t), Math.max(0, (video.duration || 0) - 0.001));
+      if (Math.abs(video.currentTime - target) < 1e-4 && video.readyState >= 2) return res();
+      let done = false;
+      const finish = () => { if (done) return; done = true; video.removeEventListener("seeked", onSeek); clearTimeout(to); res(); };
+      const onSeek = () => { if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(() => finish()); setTimeout(finish, 80); };
+      const to = setTimeout(finish, 4000);
+      video.addEventListener("seeked", onSeek);
+      video.currentTime = target;
+    });
+  }
+
+  let scrubbing = false, seekBusy = false, seekWanted = null;
+  async function seekTo(t) {
+    seekWanted = t; if (seekBusy) return;
+    seekBusy = true;
+    while (seekWanted !== null) { const w = seekWanted; seekWanted = null; await seekExact(w); if (grabFrame()) render(Math.min(state.outW, PREVIEW_MAX)); updateTime(); }
+    seekBusy = false;
+    if (!scrubbing) refreshStill();
+  }
+  $("scrub").addEventListener("input", () => { scrubbing = true; pause(); seekTo(parseFloat($("scrub").value)); });
+  $("scrub").addEventListener("change", () => { scrubbing = false; if (!seekBusy) refreshStill(); });
+  $("playBtn").addEventListener("click", () => (playing ? pause() : play()));
+
+  async function loadVideo(file) {
+    const name = file.name || "Your video";
+    pause();
+    $("sourceChip").textContent = "Loading " + name + "…";
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    videoUrl = URL.createObjectURL(file);
+    video.muted = false;
+    video.src = videoUrl;
+    const ok = await new Promise((res) => {
+      const done = (v) => { video.removeEventListener("loadeddata", yes); video.removeEventListener("error", no); clearTimeout(to); res(v); };
+      const yes = () => done(true), no = () => done(false);
+      const to = setTimeout(() => done(video.readyState >= 2), 15000);
+      video.addEventListener("loadeddata", yes); video.addEventListener("error", no);
+      video.load();
+    });
+    if (!ok || !video.videoWidth) {
+      $("sourceChip").textContent = sourceName;
+      toast(/\.(mov|hevc)$/i.test(name) ? "This browser can't decode that video (often iPhone HEVC). Export it as MP4 (H.264) and try again." : "Couldn't open " + name + ". MP4 (H.264) or WebM work best.");
+      if (!isVideo) { video.removeAttribute("src"); video.load(); }
+      return;
+    }
+    // some recordings don't store their length; seeking to the end makes the browser work it out
+    if (!isFinite(video.duration)) {
+      await new Promise((res) => { const to = setTimeout(res, 5000); video.addEventListener("durationchange", function f() { if (isFinite(video.duration)) { video.removeEventListener("durationchange", f); clearTimeout(to); res(); } }); video.currentTime = 1e7; });
+      if (!isFinite(video.duration)) { toast("Couldn't work out how long this video is."); return; }
+    }
+    isVideo = true; videoFile = file; sourceName = name;
+    $("sourceChip").textContent = `${name} · ${video.videoWidth}×${video.videoHeight}`;
+    $("transport").hidden = false; $("videoExport").hidden = false; $("stillHint").hidden = false;
+    $("scrub").max = String(video.duration || 0);
+    $("vStart").value = "0"; $("vEnd").value = (video.duration || 0).toFixed(2);
+    $("vStart").max = $("vEnd").max = String(video.duration || 0);
+    updateEstimate();
+    await seekExact(0);
+    refreshStill();
+  }
+  function leaveVideo() {
+    if (!isVideo) return;
+    pause(); isVideo = false; videoFile = null;
+    $("transport").hidden = true; $("videoExport").hidden = true; $("stillHint").hidden = true;
+  }
+
+  function exportPlan() {
+    const dur = video.duration || 0, fps = parseInt($("vFps").value, 10);
+    let t0 = Math.min(Math.max(0, parseFloat($("vStart").value) || 0), dur);
+    let t1 = Math.min(Math.max(0, parseFloat($("vEnd").value) || dur), dur);
+    if (t1 <= t0) t1 = Math.min(dur, t0 + 1 / fps);
+    const Wv = parseInt($("vWidth").value, 10);
+    const even = (v) => Math.max(2, Math.round(v / 2) * 2);
+    return { fps, t0, t1, n: Math.max(1, Math.round((t1 - t0) * fps)), W: even(Wv), H: even(Wv * video.videoHeight / video.videoWidth), fmt: $("vFormat").value };
+  }
+  function updateEstimate() {
+    if (!isVideo) return;
+    const p = exportPlan();
+    $("videoEst").textContent = `${p.n} frames · ${p.W}×${p.H} · ${(p.t1 - p.t0).toFixed(1)} s. Dense screens and long clips take a while — every frame is re-screened.`;
+  }
+  for (const id of ["vFormat", "vWidth", "vFps", "vStart", "vEnd"]) $(id).addEventListener("change", updateEstimate);
+
+  async function decodeSound(t0, t1) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext; if (!AC || !window.OfflineAudioContext) return null;
+      const ac = new AC(); let buf;
+      try { buf = await ac.decodeAudioData(await videoFile.arrayBuffer()); } finally { ac.close && ac.close(); }
+      const len = Math.max(1, Math.ceil((t1 - t0) * 48000));
+      const off = new OfflineAudioContext(2, len, 48000);
+      const src = off.createBufferSource(); src.buffer = buf; src.connect(off.destination); src.start(0, t0, t1 - t0);
+      const r = await off.startRendering();
+      return { left: r.getChannelData(0), right: r.getChannelData(1) };
+    } catch (e) { return null; }   // no sound track, or a format the browser can't decode
+  }
+  async function pickVideoCodec(fmt, W, H, fps, bitrate) {
+    const avc = ["avc1.640034", "avc1.640033", "avc1.640028", "avc1.4D4028", "avc1.42E028", "avc1.42001F"];
+    const vp9 = ["vp09.00.40.08", "vp09.00.31.08", "vp09.00.10.08"];
+    const list = fmt === "mp4" ? [...avc, ...vp9] : [...vp9, "vp8"];
+    for (const codec of list) {
+      const cfg = { codec, width: W, height: H, bitrate, framerate: fps, latencyMode: "quality" };
+      if (codec.startsWith("avc")) cfg.avc = { format: "avc" };
+      try { if ((await VideoEncoder.isConfigSupported(cfg)).supported) return cfg; } catch (e) { /* try the next one */ }
+    }
+    return null;
+  }
+  async function pickAudioCodec(fmt) {
+    if (!window.AudioEncoder) return null;
+    for (const codec of fmt === "mp4" ? ["mp4a.40.2", "opus"] : ["opus"]) {
+      const cfg = { codec, sampleRate: 48000, numberOfChannels: 2, bitrate: 160000 };
+      try { if ((await AudioEncoder.isConfigSupported(cfg)).supported) return cfg; } catch (e) { /* next */ }
+    }
+    return null;
+  }
+
+  let cancelExport = false;
+  $("progCancel").addEventListener("click", () => { cancelExport = true; $("progText").textContent = "Cancelling…"; });
+  $("progDialog").addEventListener("cancel", (e) => e.preventDefault());
+  const prog = (f, msg) => { $("progBar").style.width = Math.round(Math.min(1, Math.max(0, f)) * 100) + "%"; if (msg) $("progText").textContent = msg; };
+
+  async function exportVideo() {
+    if (!isVideo || exporting) return;
+    pause();
+    const p = exportPlan();
+    if (!window.VideoEncoder || !window.VideoFrame) { toast("This browser can't make video files. Use a recent Chrome, Edge or Safari."); return; }
+    if (typeof Mp4Muxer === "undefined" || typeof WebMMuxer === "undefined") { toast("The video tools didn't load. Check your connection and reload the page."); return; }
+    const bitrate = Math.round(Math.min(40e6, Math.max(2e6, p.W * p.H * p.fps * 0.2)));
+    const vcfg = await pickVideoCodec(p.fmt, p.W, p.H, p.fps, bitrate);
+    if (!vcfg) { toast("This browser can't encode video at that size. Try a smaller width or WebM."); return; }
+    exporting = true; cancelExport = false;
+    $("progTitle").textContent = "Making your halftone video"; prog(0, "Preparing…"); $("progDialog").showModal();
+    try {
+      let audio = null, acfg = null;
+      if ($("vAudio").checked) {
+        prog(0, "Reading the sound…");
+        audio = await decodeSound(p.t0, p.t1);
+        if (audio) acfg = await pickAudioCodec(p.fmt);
+        if (audio && !acfg) toast("This browser can't encode sound, so the video will be silent.");
+      }
+      const vMux = vcfg.codec.startsWith("avc") ? "avc" : vcfg.codec.startsWith("vp09") ? "vp9" : "vp8";
+      let muxer, target;
+      if (p.fmt === "mp4") {
+        target = new Mp4Muxer.ArrayBufferTarget();
+        muxer = new Mp4Muxer.Muxer({ target, video: { codec: vMux, width: p.W, height: p.H, frameRate: p.fps }, audio: acfg ? { codec: acfg.codec.startsWith("mp4a") ? "aac" : "opus", sampleRate: 48000, numberOfChannels: 2 } : undefined, fastStart: "in-memory", firstTimestampBehavior: "offset" });
+      } else {
+        target = new WebMMuxer.ArrayBufferTarget();
+        muxer = new WebMMuxer.Muxer({ target, video: { codec: vMux === "vp9" ? "V_VP9" : "V_VP8", width: p.W, height: p.H, frameRate: p.fps }, audio: acfg ? { codec: "A_OPUS", sampleRate: 48000, numberOfChannels: 2 } : undefined, firstTimestampBehavior: "offset" });
+      }
+      let err = null;
+      const venc = new VideoEncoder({ output: (c, m) => muxer.addVideoChunk(c, m), error: (e) => (err = e) });
+      venc.configure(vcfg);
+      const fc = document.createElement("canvas"); fc.width = p.W; fc.height = p.H;
+      const fg = fc.getContext("2d", { alpha: false });
+      const paper = state.mode === "rgb" ? state.paperRgb : state.paper;
+      const us = 1e6 / p.fps, keyEvery = Math.max(1, Math.round(p.fps * 2)), t0 = performance.now();
+      for (let i = 0; i < p.n; i++) {
+        if (cancelExport || err) break;
+        await seekExact(p.t0 + (i + 0.5) / p.fps);
+        grabFrame(); render(p.W);
+        fg.fillStyle = paper; fg.fillRect(0, 0, p.W, p.H);   // video has no transparency: dots sit on the paper colour
+        fg.drawImage(out, 0, 0, p.W, p.H);
+        const vf = new VideoFrame(fc, { timestamp: Math.round(i * us), duration: Math.round(us) });
+        venc.encode(vf, { keyFrame: i % keyEvery === 0 }); vf.close();
+        while (venc.encodeQueueSize > 6) await new Promise((r) => setTimeout(r, 4));
+        const el = (performance.now() - t0) / 1000, left = (el / (i + 1)) * (p.n - i - 1);
+        prog((i + 1) / p.n, `Frame ${i + 1} of ${p.n} · about ${left < 60 ? Math.ceil(left) + " s" : Math.ceil(left / 60) + " min"} left`);
+      }
+      if (cancelExport) { try { venc.close(); } catch (e) { /* already closed */ } toast("Export cancelled."); return; }
+      await venc.flush(); venc.close();
+      if (err) throw err;
+      if (acfg && audio) {
+        prog(1, "Adding the sound…");
+        let aerr = null;
+        const aenc = new AudioEncoder({ output: (ch, m) => muxer.addAudioChunk(ch, m), error: (e) => (aerr = e) });
+        aenc.configure(acfg);
+        const block = 4800, total = audio.left.length;
+        for (let s = 0; s < total; s += block) {
+          const len = Math.min(block, total - s), buf = new Float32Array(len * 2);
+          buf.set(audio.left.subarray(s, s + len), 0); buf.set(audio.right.subarray(s, s + len), len);
+          const ad = new AudioData({ format: "f32-planar", sampleRate: 48000, numberOfFrames: len, numberOfChannels: 2, timestamp: Math.round((s / 48000) * 1e6), data: buf });
+          aenc.encode(ad); ad.close();
+        }
+        await aenc.flush(); aenc.close();
+        if (aerr) toast("The sound couldn't be encoded; the video is silent.");
+      }
+      muxer.finalize();
+      const blob = new Blob([target.buffer], { type: p.fmt === "mp4" ? "video/mp4" : "video/webm" });
+      $("progDialog").close();
+      const name = (sourceName || "video").replace(/\.[^.]+$/, "").replace(/[^\w-]+/g, "_").slice(0, 60) + `_halftone_${state.mode}.${p.fmt}`;
+      await offer(name, blob);
+    } catch (e) {
+      console.error(e);
+      toast("Video export failed: " + (e && e.message ? e.message : e));
+    } finally {
+      exporting = false;
+      if ($("progDialog").open) $("progDialog").close();
+      refreshStill();
+    }
+  }
+  $("videoBtn").addEventListener("click", exportVideo);
 
   let toastTimer = 0;
   function toast(msg) {
