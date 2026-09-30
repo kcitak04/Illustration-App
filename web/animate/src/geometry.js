@@ -177,6 +177,49 @@ Geo.cutObject = function (o, region, rb) {
   return null;
 };
 
+// ---------------------------------------------------------------- back to editable paths
+/** Turns closed polygon rings into path nodes: straight runs become corners, gentle bends smooth curves. */
+function ringsToNodes(rings, eps) {
+  const nodes = [];
+  for (const flat of rings) {
+    let pts = [];
+    for (let i = 0; i < flat.length; i += 2) pts.push([flat[i], flat[i + 1]]);
+    const a = pts[0], z = pts[pts.length - 1];
+    if (pts.length > 1 && Math.hypot(a[0] - z[0], a[1] - z[1]) < 1e-6) pts.pop();
+    if (pts.length < 3) continue;
+    // simplify a closed ring in two halves split at the point farthest from the start
+    let far = 1, fd = -1;
+    pts.forEach((q, i) => { const dd = Math.hypot(q[0] - a[0], q[1] - a[1]); if (dd > fd) { fd = dd; far = i; } });
+    pts = rdp(pts.slice(0, far + 1), eps).slice(0, -1).concat(rdp(pts.slice(far).concat([pts[0]]), eps).slice(0, -1));
+    if (pts.length < 3) continue;
+    const n = pts.length;
+    pts.forEach((q, i) => {
+      const prev = pts[(i - 1 + n) % n], next = pts[(i + 1) % n];
+      const a1 = Math.atan2(q[1] - prev[1], q[0] - prev[0]), a2 = Math.atan2(next[1] - q[1], next[0] - q[0]);
+      let turn = Math.abs(a2 - a1); if (turn > Math.PI) turn = Math.PI * 2 - turn;
+      const node = { x: q[0], y: q[1], ix: q[0], iy: q[1], ox: q[0], oy: q[1], smooth: false };
+      if (turn < Math.PI / 6 && n > 4) {
+        const tx = (next[0] - prev[0]) / 6, ty = (next[1] - prev[1]) / 6;
+        Object.assign(node, { ix: q[0] - tx, iy: q[1] - ty, ox: q[0] + tx, oy: q[1] + ty, smooth: true });
+      }
+      if (i === 0 && nodes.length) node.start = true;
+      nodes.push(node);
+    });
+  }
+  return nodes;
+}
+/** Editable path version of a merged / cut shape or a vector brush stroke (null if it can't be converted). */
+Geo.toPath = function (o) {
+  let polys, m;
+  if (o.type === "rings") { polys = o.polys; m = o.m.slice(); }
+  else if (o.type === "brush") { polys = fillGeom(o).map((P) => P.map((r) => r.flat())); m = M.id(); }
+  else return null;
+  const eps = 0.4 / Math.max(1e-6, M.scaleFactor(m));
+  const nodes = ringsToNodes(polys.flat(), eps);
+  if (nodes.length < 3) return null;
+  return { ...baseProps(o, o.id), m, type: "path", closed: true, nodes, stroke: o.type === "brush" ? null : o.stroke || null, sw: o.type === "brush" ? 0 : o.sw || 0 };
+};
+
 // ---------------------------------------------------------------- merging (pathfinder)
 /** The outline of a stroke as a filled area (round caps and joins). */
 function strokeGeom(o) {

@@ -28,11 +28,17 @@ Render.localPath = function (o, p = new Path2D()) {
       p.closePath(); break;
     }
     case "path": {
+      // a node with start: true begins a new sub-path (compound paths, e.g. a shape with holes)
       const N = o.nodes; if (!N.length) break;
-      p.moveTo(N[0].x, N[0].y);
       const seg = (a, b) => (a.ox === a.x && a.oy === a.y && b.ix === b.x && b.iy === b.y) ? p.lineTo(b.x, b.y) : p.bezierCurveTo(a.ox, a.oy, b.ix, b.iy, b.x, b.y);
-      for (let i = 1; i < N.length; i++) seg(N[i - 1], N[i]);
-      if (o.closed && N.length > 1) { seg(N[N.length - 1], N[0]); p.closePath(); }
+      const closeSub = (a, b) => { if (o.closed && b > a) { seg(N[b], N[a]); p.closePath(); } };
+      let s0 = 0;
+      p.moveTo(N[0].x, N[0].y);
+      for (let i = 1; i < N.length; i++) {
+        if (N[i].start) { closeSub(s0, i - 1); s0 = i; p.moveTo(N[i].x, N[i].y); }
+        else seg(N[i - 1], N[i]);
+      }
+      closeSub(s0, N.length - 1);
       break;
     }
     case "brush": brushOutline(o, p); break;
@@ -175,7 +181,8 @@ Render.drawObj = function (ctx, o) {
   ctx.restore();
 };
 
-Render.fillRule = (o) => (o.type === "rings" ? "evenodd" : "nonzero");
+Render.isCompound = (o) => o.type === "path" && o.nodes.some((n, i) => i > 0 && n.start);
+Render.fillRule = (o) => (o.type === "rings" || Render.isCompound(o) ? "evenodd" : "nonzero");
 
 const hitCtx = document.createElement("canvas").getContext("2d");
 Render.hit = function (o, x, y, tol) {
@@ -222,7 +229,7 @@ function lerpObj(a, b, t) {
     if (["rect", "ellipse", "poly", "image"].includes(a.type)) { o.w = lerp(a.w, b.w, t); o.h = lerp(a.h, b.h, t); if (a.type === "rect") o.r = lerp(a.r || 0, b.r || 0, t); if (a.type === "poly") o.inner = lerp(a.inner, b.inner, t); }
     if (a.type === "text") o.size = lerp(a.size, b.size, t);
     if (a.type === "path" && a.nodes.length === b.nodes.length) {
-      o.nodes = a.nodes.map((n, i) => { const m = b.nodes[i]; return { x: lerp(n.x, m.x, t), y: lerp(n.y, m.y, t), ix: lerp(n.ix, m.ix, t), iy: lerp(n.iy, m.iy, t), ox: lerp(n.ox, m.ox, t), oy: lerp(n.oy, m.oy, t) }; });
+      o.nodes = a.nodes.map((n, i) => { const m = b.nodes[i]; return { x: lerp(n.x, m.x, t), y: lerp(n.y, m.y, t), ix: lerp(n.ix, m.ix, t), iy: lerp(n.iy, m.iy, t), ox: lerp(n.ox, m.ox, t), oy: lerp(n.oy, m.oy, t), smooth: n.smooth, start: n.start }; });
     }
     if (a.type === "brush" && a.pts.length === b.pts.length) o.pts = a.pts.map((v, i) => lerp(v, b.pts[i], t));
     if (a.type === "rings" && a.polys.length === b.polys.length && a.polys.every((P, i) => P.length === b.polys[i].length && P.every((r, j) => r.length === b.polys[i][j].length)))

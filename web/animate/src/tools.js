@@ -468,11 +468,15 @@ function toPathObj(o) {
   } else if (o.type === "poly") {
     nodes = []; const n = o.star ? o.n * 2 : o.n;
     for (let i = 0; i < n; i++) { const r = o.star && i % 2 ? o.inner : 1, a = (Math.PI * 2 * i) / n - Math.PI / 2; nodes.push(N(o.w / 2 + Math.cos(a) * r * o.w / 2, o.h / 2 + Math.sin(a) * r * o.h / 2)); }
+  } else if (o.type === "rings" || o.type === "brush") {
+    try { return Geo.toPath(o); } catch (e) { return null; }
   } else return null;
   const { w, h, r, n, star, inner, ...rest } = o;
   return { ...rest, type: "path", nodes, closed: true };
 }
 App.toPathObj = toPathObj;
+/** First and last node index of the sub-path that node i belongs to. */
+function subRange(N, i) { let a = i; while (a > 0 && !N[a].start) a--; let b = i + 1; while (b < N.length && !N[b].start) b++; return [a, b - 1]; }
 tool("direct", (() => {
   let drag = null, pushed = false;
   const target = () => { const s = selectedObjects(); return s.length === 1 ? s[0] : null; };
@@ -480,7 +484,9 @@ tool("direct", (() => {
     activeNode: -1,
     down(p) {
       pushed = false; drag = null;
-      const o = target();
+      let o = target();
+      // merged / cut shapes and brush strokes become editable paths the first time you edit them directly
+      if (o && (o.type === "rings" || o.type === "brush") && layerEditable(false)) { Cmd.toPath(); o = target(); }
       if (o && (o.type === "path" || ["rect", "ellipse", "poly"].includes(o.type))) {
         const po = toPathObj(o), tol = docLen(10);
         const at = (x, y) => M.apply(o.m, x, y);
@@ -516,13 +522,13 @@ tool("direct", (() => {
       History.push(); const cell = editableCell(); const po = cell.objects.find((x) => x.id === o.id); const m = po.nodes[this.activeNode];
       if (m.ix !== m.x || m.ox !== m.x || m.iy !== m.y || m.oy !== m.y) { m.ix = m.ox = m.x; m.iy = m.oy = m.y; m.smooth = false; }
       else {
-        const N = po.nodes, i = this.activeNode, a = N[(i - 1 + N.length) % N.length], b = N[(i + 1) % N.length];
+        const N = po.nodes, i = this.activeNode, [s0, e0] = subRange(N, i), a = N[i > s0 ? i - 1 : e0], b = N[i < e0 ? i + 1 : s0];
         const tx = (b.x - a.x) / 6, ty = (b.y - a.y) / 6; m.ix = m.x - tx; m.iy = m.y - ty; m.ox = m.x + tx; m.oy = m.y + ty; m.smooth = true;
       }
       changed("nodes");
     },
     overlay(g) {
-      const o = target(); if (!o) return;
+      const o = target(); if (!o || o.type === "rings" || o.type === "brush") return;
       const po = toPathObj(o); if (!po) return;
       const acc = "#2f80ff";
       po.nodes.forEach((n, i) => {
@@ -975,11 +981,17 @@ const Cmd = (App.Cmd = {
     App.transformSelection(M.translate(dx, dy));
   },
   nudge(dx, dy) { if (App.state.selection.length) App.transformSelection(M.translate(dx, dy)); },
-  toPath() { Cmd.editSelected((o) => toPathObj(o) || undefined); },
+  toPath() {
+    const sel = selectedObjects();
+    if (sel.length && !sel.some((o) => toPathObj(o))) { toast("Text and images can't become paths."); return; }
+    Cmd.editSelected((o) => toPathObj(o) || undefined);
+    App.emit("selection");
+    if (sel.some((o) => o.type === "rings" || o.type === "brush")) toast("Converted to an editable path — use Direct selection (A) to move its points.");
+  },
   addNode() {
     const t = registry.direct, o = selectedObjects()[0]; if (!o || o.type !== "path") return;
     Cmd.editSelected((po) => {
-      const i = Math.max(0, t.activeNode), j = (i + 1) % po.nodes.length; if (!po.closed && j === 0) return;
+      const i = Math.max(0, t.activeNode), [s0, e0] = subRange(po.nodes, i), j = i < e0 ? i + 1 : s0; if (!po.closed && j === s0) return;
       const a = po.nodes[i], b = po.nodes[j], mid = (u, v) => (u + v) / 2;
       const q0x = mid(a.x, a.ox), q0y = mid(a.y, a.oy), q1x = mid(a.ox, b.ix), q1y = mid(a.oy, b.iy), q2x = mid(b.ix, b.x), q2y = mid(b.iy, b.y);
       const r0x = mid(q0x, q1x), r0y = mid(q0y, q1y), r1x = mid(q1x, q2x), r1y = mid(q1y, q2y);
@@ -990,7 +1002,11 @@ const Cmd = (App.Cmd = {
   },
   deleteNode() {
     const t = registry.direct; const o = selectedObjects()[0]; if (!o || o.type !== "path" || t.activeNode < 0) return;
-    Cmd.editSelected((po) => { po.nodes.splice(t.activeNode, 1); t.activeNode = -1; });
+    Cmd.editSelected((po) => {
+      const N = po.nodes, i = t.activeNode;
+      if (N[i].start && N[i + 1] && !N[i + 1].start) N[i + 1].start = true;
+      N.splice(i, 1); t.activeNode = -1;
+    });
   },
   toggleClosed() { Cmd.editSelected((o) => { if (o.type === "path") o.closed = !o.closed; }); },
   group() {

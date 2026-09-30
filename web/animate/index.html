@@ -529,11 +529,17 @@ Render.localPath = function (o, p = new Path2D()) {
       p.closePath(); break;
     }
     case "path": {
+      // a node with start: true begins a new sub-path (compound paths, e.g. a shape with holes)
       const N = o.nodes; if (!N.length) break;
-      p.moveTo(N[0].x, N[0].y);
       const seg = (a, b) => (a.ox === a.x && a.oy === a.y && b.ix === b.x && b.iy === b.y) ? p.lineTo(b.x, b.y) : p.bezierCurveTo(a.ox, a.oy, b.ix, b.iy, b.x, b.y);
-      for (let i = 1; i < N.length; i++) seg(N[i - 1], N[i]);
-      if (o.closed && N.length > 1) { seg(N[N.length - 1], N[0]); p.closePath(); }
+      const closeSub = (a, b) => { if (o.closed && b > a) { seg(N[b], N[a]); p.closePath(); } };
+      let s0 = 0;
+      p.moveTo(N[0].x, N[0].y);
+      for (let i = 1; i < N.length; i++) {
+        if (N[i].start) { closeSub(s0, i - 1); s0 = i; p.moveTo(N[i].x, N[i].y); }
+        else seg(N[i - 1], N[i]);
+      }
+      closeSub(s0, N.length - 1);
       break;
     }
     case "brush": brushOutline(o, p); break;
@@ -676,7 +682,8 @@ Render.drawObj = function (ctx, o) {
   ctx.restore();
 };
 
-Render.fillRule = (o) => (o.type === "rings" ? "evenodd" : "nonzero");
+Render.isCompound = (o) => o.type === "path" && o.nodes.some((n, i) => i > 0 && n.start);
+Render.fillRule = (o) => (o.type === "rings" || Render.isCompound(o) ? "evenodd" : "nonzero");
 
 const hitCtx = document.createElement("canvas").getContext("2d");
 Render.hit = function (o, x, y, tol) {
@@ -723,7 +730,7 @@ function lerpObj(a, b, t) {
     if (["rect", "ellipse", "poly", "image"].includes(a.type)) { o.w = lerp(a.w, b.w, t); o.h = lerp(a.h, b.h, t); if (a.type === "rect") o.r = lerp(a.r || 0, b.r || 0, t); if (a.type === "poly") o.inner = lerp(a.inner, b.inner, t); }
     if (a.type === "text") o.size = lerp(a.size, b.size, t);
     if (a.type === "path" && a.nodes.length === b.nodes.length) {
-      o.nodes = a.nodes.map((n, i) => { const m = b.nodes[i]; return { x: lerp(n.x, m.x, t), y: lerp(n.y, m.y, t), ix: lerp(n.ix, m.ix, t), iy: lerp(n.iy, m.iy, t), ox: lerp(n.ox, m.ox, t), oy: lerp(n.oy, m.oy, t) }; });
+      o.nodes = a.nodes.map((n, i) => { const m = b.nodes[i]; return { x: lerp(n.x, m.x, t), y: lerp(n.y, m.y, t), ix: lerp(n.ix, m.ix, t), iy: lerp(n.iy, m.iy, t), ox: lerp(n.ox, m.ox, t), oy: lerp(n.oy, m.oy, t), smooth: n.smooth, start: n.start }; });
     }
     if (a.type === "brush" && a.pts.length === b.pts.length) o.pts = a.pts.map((v, i) => lerp(v, b.pts[i], t));
     if (a.type === "rings" && a.polys.length === b.polys.length && a.polys.every((P, i) => P.length === b.polys[i].length && P.every((r, j) => r.length === b.polys[i][j].length)))
@@ -977,6 +984,49 @@ Geo.cutObject = function (o, region, rb) {
   }
   if (hasStroke) return cutStroke(o, region);
   return null;
+};
+
+// ---------------------------------------------------------------- back to editable paths
+/** Turns closed polygon rings into path nodes: straight runs become corners, gentle bends smooth curves. */
+function ringsToNodes(rings, eps) {
+  const nodes = [];
+  for (const flat of rings) {
+    let pts = [];
+    for (let i = 0; i < flat.length; i += 2) pts.push([flat[i], flat[i + 1]]);
+    const a = pts[0], z = pts[pts.length - 1];
+    if (pts.length > 1 && Math.hypot(a[0] - z[0], a[1] - z[1]) < 1e-6) pts.pop();
+    if (pts.length < 3) continue;
+    // simplify a closed ring in two halves split at the point farthest from the start
+    let far = 1, fd = -1;
+    pts.forEach((q, i) => { const dd = Math.hypot(q[0] - a[0], q[1] - a[1]); if (dd > fd) { fd = dd; far = i; } });
+    pts = rdp(pts.slice(0, far + 1), eps).slice(0, -1).concat(rdp(pts.slice(far).concat([pts[0]]), eps).slice(0, -1));
+    if (pts.length < 3) continue;
+    const n = pts.length;
+    pts.forEach((q, i) => {
+      const prev = pts[(i - 1 + n) % n], next = pts[(i + 1) % n];
+      const a1 = Math.atan2(q[1] - prev[1], q[0] - prev[0]), a2 = Math.atan2(next[1] - q[1], next[0] - q[0]);
+      let turn = Math.abs(a2 - a1); if (turn > Math.PI) turn = Math.PI * 2 - turn;
+      const node = { x: q[0], y: q[1], ix: q[0], iy: q[1], ox: q[0], oy: q[1], smooth: false };
+      if (turn < Math.PI / 6 && n > 4) {
+        const tx = (next[0] - prev[0]) / 6, ty = (next[1] - prev[1]) / 6;
+        Object.assign(node, { ix: q[0] - tx, iy: q[1] - ty, ox: q[0] + tx, oy: q[1] + ty, smooth: true });
+      }
+      if (i === 0 && nodes.length) node.start = true;
+      nodes.push(node);
+    });
+  }
+  return nodes;
+}
+/** Editable path version of a merged / cut shape or a vector brush stroke (null if it can't be converted). */
+Geo.toPath = function (o) {
+  let polys, m;
+  if (o.type === "rings") { polys = o.polys; m = o.m.slice(); }
+  else if (o.type === "brush") { polys = fillGeom(o).map((P) => P.map((r) => r.flat())); m = M.id(); }
+  else return null;
+  const eps = 0.4 / Math.max(1e-6, M.scaleFactor(m));
+  const nodes = ringsToNodes(polys.flat(), eps);
+  if (nodes.length < 3) return null;
+  return { ...baseProps(o, o.id), m, type: "path", closed: true, nodes, stroke: o.type === "brush" ? null : o.stroke || null, sw: o.type === "brush" ? 0 : o.sw || 0 };
 };
 
 // ---------------------------------------------------------------- merging (pathfinder)
@@ -1930,11 +1980,15 @@ function toPathObj(o) {
   } else if (o.type === "poly") {
     nodes = []; const n = o.star ? o.n * 2 : o.n;
     for (let i = 0; i < n; i++) { const r = o.star && i % 2 ? o.inner : 1, a = (Math.PI * 2 * i) / n - Math.PI / 2; nodes.push(N(o.w / 2 + Math.cos(a) * r * o.w / 2, o.h / 2 + Math.sin(a) * r * o.h / 2)); }
+  } else if (o.type === "rings" || o.type === "brush") {
+    try { return Geo.toPath(o); } catch (e) { return null; }
   } else return null;
   const { w, h, r, n, star, inner, ...rest } = o;
   return { ...rest, type: "path", nodes, closed: true };
 }
 App.toPathObj = toPathObj;
+/** First and last node index of the sub-path that node i belongs to. */
+function subRange(N, i) { let a = i; while (a > 0 && !N[a].start) a--; let b = i + 1; while (b < N.length && !N[b].start) b++; return [a, b - 1]; }
 tool("direct", (() => {
   let drag = null, pushed = false;
   const target = () => { const s = selectedObjects(); return s.length === 1 ? s[0] : null; };
@@ -1942,7 +1996,9 @@ tool("direct", (() => {
     activeNode: -1,
     down(p) {
       pushed = false; drag = null;
-      const o = target();
+      let o = target();
+      // merged / cut shapes and brush strokes become editable paths the first time you edit them directly
+      if (o && (o.type === "rings" || o.type === "brush") && layerEditable(false)) { Cmd.toPath(); o = target(); }
       if (o && (o.type === "path" || ["rect", "ellipse", "poly"].includes(o.type))) {
         const po = toPathObj(o), tol = docLen(10);
         const at = (x, y) => M.apply(o.m, x, y);
@@ -1978,13 +2034,13 @@ tool("direct", (() => {
       History.push(); const cell = editableCell(); const po = cell.objects.find((x) => x.id === o.id); const m = po.nodes[this.activeNode];
       if (m.ix !== m.x || m.ox !== m.x || m.iy !== m.y || m.oy !== m.y) { m.ix = m.ox = m.x; m.iy = m.oy = m.y; m.smooth = false; }
       else {
-        const N = po.nodes, i = this.activeNode, a = N[(i - 1 + N.length) % N.length], b = N[(i + 1) % N.length];
+        const N = po.nodes, i = this.activeNode, [s0, e0] = subRange(N, i), a = N[i > s0 ? i - 1 : e0], b = N[i < e0 ? i + 1 : s0];
         const tx = (b.x - a.x) / 6, ty = (b.y - a.y) / 6; m.ix = m.x - tx; m.iy = m.y - ty; m.ox = m.x + tx; m.oy = m.y + ty; m.smooth = true;
       }
       changed("nodes");
     },
     overlay(g) {
-      const o = target(); if (!o) return;
+      const o = target(); if (!o || o.type === "rings" || o.type === "brush") return;
       const po = toPathObj(o); if (!po) return;
       const acc = "#2f80ff";
       po.nodes.forEach((n, i) => {
@@ -2437,11 +2493,17 @@ const Cmd = (App.Cmd = {
     App.transformSelection(M.translate(dx, dy));
   },
   nudge(dx, dy) { if (App.state.selection.length) App.transformSelection(M.translate(dx, dy)); },
-  toPath() { Cmd.editSelected((o) => toPathObj(o) || undefined); },
+  toPath() {
+    const sel = selectedObjects();
+    if (sel.length && !sel.some((o) => toPathObj(o))) { toast("Text and images can't become paths."); return; }
+    Cmd.editSelected((o) => toPathObj(o) || undefined);
+    App.emit("selection");
+    if (sel.some((o) => o.type === "rings" || o.type === "brush")) toast("Converted to an editable path — use Direct selection (A) to move its points.");
+  },
   addNode() {
     const t = registry.direct, o = selectedObjects()[0]; if (!o || o.type !== "path") return;
     Cmd.editSelected((po) => {
-      const i = Math.max(0, t.activeNode), j = (i + 1) % po.nodes.length; if (!po.closed && j === 0) return;
+      const i = Math.max(0, t.activeNode), [s0, e0] = subRange(po.nodes, i), j = i < e0 ? i + 1 : s0; if (!po.closed && j === s0) return;
       const a = po.nodes[i], b = po.nodes[j], mid = (u, v) => (u + v) / 2;
       const q0x = mid(a.x, a.ox), q0y = mid(a.y, a.oy), q1x = mid(a.ox, b.ix), q1y = mid(a.oy, b.iy), q2x = mid(b.ix, b.x), q2y = mid(b.iy, b.y);
       const r0x = mid(q0x, q1x), r0y = mid(q0y, q1y), r1x = mid(q1x, q2x), r1y = mid(q1y, q2y);
@@ -2452,7 +2514,11 @@ const Cmd = (App.Cmd = {
   },
   deleteNode() {
     const t = registry.direct; const o = selectedObjects()[0]; if (!o || o.type !== "path" || t.activeNode < 0) return;
-    Cmd.editSelected((po) => { po.nodes.splice(t.activeNode, 1); t.activeNode = -1; });
+    Cmd.editSelected((po) => {
+      const N = po.nodes, i = t.activeNode;
+      if (N[i].start && N[i + 1] && !N[i + 1].start) N[i + 1].start = true;
+      N.splice(i, 1); t.activeNode = -1;
+    });
   },
   toggleClosed() { Cmd.editSelected((o) => { if (o.type === "path") o.closed = !o.closed; }); },
   group() {
@@ -3754,7 +3820,7 @@ function exportSvgFrame() {
           const b = Render.textBox(o), anchor = o.align === "center" ? "middle" : o.align === "right" ? "end" : "start";
           body += `<text ${tf} font-family="${esc(o.font)}" font-size="${o.size}" font-weight="${o.weight || 400}"${o.italic ? ' font-style="italic"' : ""} text-anchor="${anchor}" dominant-baseline="text-before-edge" ${paint(o.fill)}${stroke}${common}>` +
             b.lines.map((l, i) => `<tspan x="0" y="${+(i * b.lh).toFixed(2)}">${esc(l)}</tspan>`).join("") + "</text>\n";
-        } else { const p = new SvgPath(); Render.localPath(o, p); body += `<path ${tf} d="${p}" ${paint(o.fill)}${o.type === "rings" ? ' fill-rule="evenodd"' : ""}${stroke}${common}/>\n`; }
+        } else { const p = new SvgPath(); Render.localPath(o, p); body += `<path ${tf} d="${p}" ${paint(o.fill)}${Render.fillRule(o) === "evenodd" ? ' fill-rule="evenodd"' : ""}${stroke}${common}/>\n`; }
       }
     }
     body += "</g>\n";
