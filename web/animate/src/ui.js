@@ -191,13 +191,17 @@ UI.buildProps = function () {
       select("Blend", BLENDS, () => o.blend || "source-over", (v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.blend = v; }); changed("blend"); }),
       h("div", { class: "btnrow" }, btn("Duplicate", () => Cmd.duplicate()), btn("Repeat…", () => UI.repeatDialog()), btn("Delete", () => Cmd.delete())),
       h("div", { class: "btnrow" }, btn("Mirror copy ↔", () => Cmd.mirrorCopy(true)), btn("Mirror copy ↕", () => Cmd.mirrorCopy(false)), btn("To path", () => Cmd.toPath())),
+      h("div", { class: "btnrow" }, btn("Group", () => Cmd.group()), btn("Ungroup", () => Cmd.ungroup())),
+      h("p", { class: "hint" }, "Merge shapes into one:"),
+      h("div", { class: "btnrow" }, btn("Unite", () => Cmd.merge("unite")), btn("Subtract", () => Cmd.merge("subtract")), btn("Intersect", () => Cmd.merge("intersect")), btn("Exclude", () => Cmd.merge("exclude"))),
       h("div", { class: "btnrow" }, btn("Front", () => Cmd.arrange("front")), btn("Forward", () => Cmd.arrange("forward")), btn("Backward", () => Cmd.arrange("backward")), btn("Back", () => Cmd.arrange("back"))),
       h("div", { class: "btnrow" }, btn("Flip ↔", () => Cmd.flip(true)), btn("Flip ↕", () => Cmd.flip(false)), btn("Rotate 90°", () => Cmd.rotate(90))),
       h("div", { class: "btnrow" }, btn("Align left", () => Cmd.align("l", null)), btn("Centre", () => Cmd.align("c", "m")), btn("Align right", () => Cmd.align("r", null))),
       h("div", { class: "btnrow" }, btn("Align top", () => Cmd.align(null, "t")), btn("Middle", () => Cmd.align(null, "m")), btn("Align bottom", () => Cmd.align(null, "b")))
     ];
     if (o.type === "text") kids.unshift(btn("Edit text", () => TextTool.edit(o)), slider("Text size", 8, 600, 1, () => o.size, (v) => { const c = editableCell(); c.objects.forEach((x) => { if (x.id === o.id) x.size = v; }); changed("size"); }));
-    box.append(section(`Selection · ${sel.length} ${sel.length === 1 ? "object" : "objects"}`, ...kids));
+    const grouped = sel.length > 1 && sel[0].group && sel.every((x) => x.group === sel[0].group);
+    box.append(section(`Selection · ${grouped ? "group of " : ""}${sel.length} ${sel.length === 1 ? "object" : "objects"}`, ...kids));
   }
 
   // --- layer
@@ -432,7 +436,7 @@ UI.docSettings = function () {
 UI.help = function () {
   const rows = [["Space + drag / two fingers", "Pan"], ["Ctrl + wheel / pinch", "Zoom"], ["Enter", "Play / stop"], [", and .", "Previous / next frame"], ["Shift + , and .", "Previous / next key"],
     ["F6", "New blank key"], ["F7", "Duplicate key"], ["F5", "Hold one more frame"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Two-finger tap", "Undo"],
-    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Ctrl+Shift+D", "Repeat copies…"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
+    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Ctrl+Shift+D", "Repeat copies…"], ["Ctrl+G / Ctrl+Shift+G", "Group / ungroup"], ["Ctrl+M", "Merge (unite) shapes"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
   const tbl = h("table", { class: "keys" }, rows.map(([k, v]) => h("tr", {}, h("td", {}, h("kbd", {}, k)), h("td", {}, v))));
   const tools = h("table", { class: "keys" }, TOOLS.map(([, t]) => h("tr", {}, h("td", {}, t))));
   UI.dialog("Shortcuts", h("div", { class: "cols" }, tbl, tools), []);
@@ -538,6 +542,8 @@ UI.bindKeys = function () {
     if (mod && k.toLowerCase() === "y") { e.preventDefault(); History.doRedo(); return; }
     if (mod && k.toLowerCase() === "c") { Cmd.copy(); return; }
     if (mod && k.toLowerCase() === "v") { e.preventDefault(); Cmd.paste(true); return; }
+    if (mod && k.toLowerCase() === "g") { e.preventDefault(); e.shiftKey ? Cmd.ungroup() : Cmd.group(); return; }
+    if (mod && k.toLowerCase() === "m") { e.preventDefault(); Cmd.merge("unite"); return; }
     if (mod && e.shiftKey && k.toLowerCase() === "d") { e.preventDefault(); UI.repeatDialog(); return; }
     if (mod && k.toLowerCase() === "d") { e.preventDefault(); Cmd.duplicate(); return; }
     if (mod && k.toLowerCase() === "a") { e.preventDefault(); Cmd.selectAll(); return; }

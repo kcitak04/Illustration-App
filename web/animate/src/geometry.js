@@ -122,7 +122,7 @@ function insideRegion(region, x, y) {
 }
 
 // ---------------------------------------------------------------- cutting
-const baseProps = (o, id) => ({ id, m: M.id(), fill: o.fill ? cloneObj(o.fill) : null, stroke: o.stroke || null, sw: o.sw || 0, opacity: o.opacity ?? 1, blend: o.blend || "source-over", cap: o.cap, join: o.join });
+const baseProps = (o, id) => ({ id, group: o.group, m: M.id(), fill: o.fill ? cloneObj(o.fill) : null, stroke: o.stroke || null, sw: o.sw || 0, opacity: o.opacity ?? 1, blend: o.blend || "source-over", cap: o.cap, join: o.join });
 
 /** Splits the outline of a stroke-only object into the runs the eraser did not touch. */
 function cutStroke(o, region) {
@@ -175,6 +175,40 @@ Geo.cutObject = function (o, region, rb) {
   }
   if (hasStroke) return cutStroke(o, region);
   return null;
+};
+
+// ---------------------------------------------------------------- merging (pathfinder)
+/** The outline of a stroke as a filled area (round caps and joins). */
+function strokeGeom(o) {
+  const r = ((o.sw || 0) * M.scaleFactor(o.m)) / 2;
+  if (r <= 0) return [];
+  const trails = Geo.flatten(o).map((s) => (s.closed ? s.pts.concat([s.pts[0]]) : s.pts).map(([x, y]) => [x, y, r]));
+  return Geo.eraserRegion(trails);
+}
+/** Everything an object covers (fill + stroke) as a MultiPolygon, or null for text / images. */
+Geo.areaOf = function (o) {
+  if (o.type === "text" || o.type === "image") return null;
+  const parts = [];
+  if (o.fill) parts.push(fillGeom(o));
+  if (o.stroke && o.sw > 0 && o.type !== "brush") parts.push(strokeGeom(o));
+  const nonEmpty = parts.filter((g) => g.length);
+  if (!nonEmpty.length) return [];
+  return nonEmpty.length === 1 ? nonEmpty[0] : polygonClipping.union(...nonEmpty);
+};
+/**
+ * Combines objects (bottom-to-top order) into one filled shape.
+ * op: unite | subtract (the back one minus the rest) | intersect | exclude
+ */
+Geo.combine = function (objs, op) {
+  const areas = objs.map(Geo.areaOf);
+  let res;
+  if (op === "subtract") res = polygonClipping.difference(areas[0], ...areas.slice(1));
+  else if (op === "intersect") res = polygonClipping.intersection(...areas);
+  else if (op === "exclude") res = polygonClipping.xor(...areas);
+  else res = polygonClipping.union(...areas);
+  const src = op === "subtract" ? objs[0] : objs[objs.length - 1];
+  const fill = src.fill ? cloneObj(src.fill) : src.stroke || "#111";
+  return { ...baseProps(src, uid()), group: undefined, type: "rings", fill, stroke: null, sw: 0, polys: res.map((P) => P.map((r) => r.flat())) };
 };
 
 /** Erases the region from every vector object of a cell. Returns the ids that are gone or changed. */
