@@ -156,8 +156,19 @@ UI.buildProps = function () {
 
   // --- tool options
   const opts = [];
-  if (t === "vbrush") opts.push(slider("Size", 1, 300, 1, () => s.brush.size, (v) => (s.brush.size = v), { record: false }), slider("Pressure", 0, 1, 0.01, () => s.brush.pressure, (v) => (s.brush.pressure = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), slider("Smoothing", 0, 1, 0.01, () => s.brush.smooth, (v) => (s.brush.smooth = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), check("Tapered ends", () => s.brush.taper, (v) => (s.brush.taper = v), { record: false }));
-  if (t === "paint") opts.push(slider("Size", 1, 400, 1, () => s.paint.size, (v) => (s.paint.size = v), { record: false }), slider("Hardness", 0, 1, 0.01, () => s.paint.hardness, (v) => (s.paint.hardness = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), slider("Opacity", 0.05, 1, 0.01, () => s.paint.opacity, (v) => (s.paint.opacity = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), slider("Flow", 0.02, 1, 0.01, () => s.paint.flow, (v) => (s.paint.flow = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), check("Pressure changes size", () => s.paint.pressureSize, (v) => (s.paint.pressureSize = v), { record: false }), check("Pressure changes opacity", () => s.paint.pressureOpacity, (v) => (s.paint.pressureOpacity = v), { record: false }));
+  if (t === "vbrush") opts.push(UI.brushPicker(Render.VBRUSHES, s.brush.style || "pressure", (id) => { s.brush.style = id; }, (cv, id) => UI.vbrushPreview(cv, id)), slider("Size", 1, 300, 1, () => s.brush.size, (v) => (s.brush.size = v), { record: false }), slider("Pressure", 0, 1, 0.01, () => s.brush.pressure, (v) => (s.brush.pressure = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), slider("Smoothing", 0, 1, 0.01, () => s.brush.smooth, (v) => (s.brush.smooth = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), check("Tapered ends", () => s.brush.taper, (v) => (s.brush.taper = v), { record: false }));
+  if (t === "paint") {
+    const kind = s.paint.brush || "round", pct = { record: false, fmt: (v) => Math.round(v * 100) + "%" };
+    opts.push(UI.brushPicker(Object.entries(App.PAINT_BRUSHES).map(([id, b]) => [id, b.name]), kind, (id) => App.setPaintBrush(id), (cv, id) => App.paintPreview(cv, id, s.paint.color)),
+      slider("Size", 1, 400, 1, () => s.paint.size, (v) => (s.paint.size = v), { record: false }));
+    if (["round", "marker"].includes(kind)) opts.push(slider("Hardness", 0, 1, 0.01, () => s.paint.hardness, (v) => (s.paint.hardness = v), pct));
+    if (kind !== "smudge") opts.push(slider("Opacity", 0.05, 1, 0.01, () => s.paint.opacity, (v) => (s.paint.opacity = v), pct));
+    opts.push(slider(kind === "smudge" ? "Strength" : "Flow", 0.02, 1, 0.01, () => s.paint.flow, (v) => (s.paint.flow = v), pct));
+    if (kind === "oil") opts.push(slider("Colour mixing", 0, 1, 0.01, () => s.paint.mix ?? 0.35, (v) => (s.paint.mix = v), pct));
+    const hints = { oil: "Picks up the paint already on this layer and blends it into the stroke.", smudge: "Drags the painted pixels on this layer along with your stroke.", watercolor: "Build it up in layers: each stroke is translucent with a darker rim.", marker: "Overlapping in one stroke stays even; a new stroke on top darkens it." };
+    if (hints[kind]) opts.push(h("p", { class: "hint" }, hints[kind]));
+  }
+  if (t === "paint") opts.push( check("Pressure changes size", () => s.paint.pressureSize, (v) => (s.paint.pressureSize = v), { record: false }), check("Pressure changes opacity", () => s.paint.pressureOpacity, (v) => (s.paint.pressureOpacity = v), { record: false }));
   if (t === "eraser") {
     const hints = {
       all: "Rubs out painted pixels and cuts through vector shapes and lines where you erase.",
@@ -199,6 +210,7 @@ UI.buildProps = function () {
       h("div", { class: "btnrow" }, btn("Align left", () => Cmd.align("l", null)), btn("Centre", () => Cmd.align("c", "m")), btn("Align right", () => Cmd.align("r", null))),
       h("div", { class: "btnrow" }, btn("Align top", () => Cmd.align(null, "t")), btn("Middle", () => Cmd.align(null, "m")), btn("Align bottom", () => Cmd.align(null, "b")))
     ];
+    if (sel.some((x) => x.type === "brush")) kids.unshift(select("Brush style", Render.VBRUSHES, () => (sel.find((x) => x.type === "brush").style || "pressure"), (v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") { x.style = v; if (!x.seed) x.seed = 1 + Math.floor(Math.random() * 9999); } }); changed("style"); }));
     if (o.type === "text") kids.unshift(btn("Edit text", () => TextTool.edit(o)), slider("Text size", 8, 600, 1, () => o.size, (v) => { const c = editableCell(); c.objects.forEach((x) => { if (x.id === o.id) x.size = v; }); changed("size"); }));
     const grouped = sel.length > 1 && sel[0].group && sel.every((x) => x.group === sel[0].group);
     box.append(section(`Selection · ${grouped ? "group of " : ""}${sel.length} ${sel.length === 1 ? "object" : "objects"}`, ...kids));
@@ -271,6 +283,27 @@ UI.repeatDialog = function () {
     btn("Motion trail", () => { Object.assign(r, { count: 5, dx: -30, dy: 0, rotate: 0, scale: 100, fade: 70, pivot: "selection" }); dlg.close(); UI.repeatDialog(); }));
   body.prepend(h("p", { class: "hint" }, "Presets"), presets);
   const dlg = UI.dialog("Repeat copies", body, [btn("Cancel", () => dlg.close()), btn("Make copies", () => { dlg.close(); Cmd.repeat(r); }, "primary")]);
+};
+
+// ---------------------------------------------------------------- brush pickers
+/** A grid of brush tiles, each with a little sample stroke. */
+UI.brushPicker = function (items, current, pick, draw) {
+  const grid = h("div", { class: "brushgrid", role: "radiogroup", "aria-label": "Brush" });
+  for (const [id, name] of items) {
+    const cv = h("canvas", { width: 132, height: 40, "aria-hidden": "true" });
+    const b = h("button", { type: "button", class: "brushtile" + (id === current ? " on" : ""), role: "radio", "aria-checked": String(id === current), title: name, onclick: () => { pick(id); UI.buildProps(); } }, cv, h("span", {}, name));
+    grid.append(b);
+    requestAnimationFrame(() => { try { draw(cv, id); } catch (e) { /* preview only */ } });
+  }
+  return grid;
+};
+UI.vbrushPreview = function (cv, style) {
+  const g = cv.getContext("2d"), W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  const pts = [];
+  for (let i = 0; i <= 40; i++) { const t = i / 40; pts.push(8 + t * (W - 16), H / 2 + Math.sin(t * Math.PI * 2) * H * 0.22, 0.3 + 0.7 * Math.sin(t * Math.PI)); }
+  const fill = App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke || "#111");
+  Render.drawObj(g, { type: "brush", pts, size: 9, pressure: 0.8, taper: true, style, seed: 7, m: M.id(), fill, opacity: 1 });
 };
 
 UI.syncSwatch = function () {

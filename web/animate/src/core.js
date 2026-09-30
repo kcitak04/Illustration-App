@@ -99,8 +99,8 @@ App.state = {
 App.style = {
   fill: "#1d4ed8", stroke: "#111827", strokeOn: false, sw: 6, opacity: 1, blend: "source-over",
   grad: null,             // {type:'linear'|'radial', c1, c2, angle}
-  brush: { size: 18, pressure: 0.8, smooth: 0.5, taper: true },
-  paint: { size: 24, hardness: 0.7, opacity: 1, flow: 1, pressureSize: true, pressureOpacity: false, color: "#111827" },
+  brush: { size: 18, pressure: 0.8, smooth: 0.5, taper: true, style: "pressure" },
+  paint: { brush: "round", size: 24, hardness: 0.7, opacity: 1, flow: 1, mix: 0.35, pressureSize: true, pressureOpacity: false, color: "#111827" },
   eraser: { size: 40, mode: "all" },   // all | pixels | cut (parts of vectors) | objects (whole vectors)
   sym: { mode: "off", n: 6, cx: null, cy: null },   // off | x | y | xy | radial | kaleido; centre null = canvas centre
   repeat: { count: 3, dx: 40, dy: 0, rotate: 0, scale: 100, fade: 100, pivot: "selection" },

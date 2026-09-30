@@ -57,35 +57,127 @@ Render.localPath = function (o, p = new Path2D()) {
   return p;
 };
 
-/** Variable-width outline of a pressure brush stroke (pts = x,y,p triplets). */
+/** Vector brush styles (the brush object's `style`). */
+Render.VBRUSHES = [
+  ["pressure", "Pressure"], ["uniform", "Monoline"], ["taper", "Ink taper"], ["calligraphy", "Calligraphy"], ["rough", "Rough edge"],
+  ["bristle", "Dry bristle"], ["dotted", "Dotted"], ["dashed", "Dashed"], ["spray", "Spray"], ["splatter", "Splatter"]
+];
+/** Repeatable pseudo-random number in 0..1 (brush textures must look the same on every redraw). */
+function hash(n) { n = Math.sin(n * 127.1 + 311.7) * 43758.5453; return n - Math.floor(n); }
+
+/** A filled ribbon through points a..b of xs/ys with half-widths rs, round at both ends. */
+function ribbon(p, xs, ys, rs, a, b) {
+  const n = b - a + 1;
+  if (n < 1) return;
+  if (n === 1) { p.moveTo(xs[a] + rs[a], ys[a]); p.arc(xs[a], ys[a], rs[a], 0, Math.PI * 2); return; }
+  const lx = [], ly = [], rx = [], ry = [];
+  for (let k = 0; k < n; k++) {
+    const i = a + k, i0 = Math.max(a, i - 1), i1 = Math.min(b, i + 1);
+    let tx = xs[i1] - xs[i0], ty = ys[i1] - ys[i0];
+    const len = Math.hypot(tx, ty) || 1; tx /= len; ty /= len;
+    const r = rs[i];
+    lx[k] = xs[i] - ty * r; ly[k] = ys[i] + tx * r;
+    rx[k] = xs[i] + ty * r; ry[k] = ys[i] - tx * r;
+  }
+  const e = n - 1;
+  p.moveTo(lx[0], ly[0]);
+  for (let k = 1; k < n - 1; k++) p.quadraticCurveTo(lx[k], ly[k], (lx[k] + lx[k + 1]) / 2, (ly[k] + ly[k + 1]) / 2);
+  p.lineTo(lx[e], ly[e]);
+  const ae = Math.atan2(ly[e] - ys[b], lx[e] - xs[b]);
+  p.arc(xs[b], ys[b], rs[b], ae, ae - Math.PI, true);
+  for (let k = n - 2; k >= 1; k--) p.quadraticCurveTo(rx[k], ry[k], (rx[k] + rx[k - 1]) / 2, (ry[k] + ry[k - 1]) / 2);
+  p.lineTo(rx[0], ry[0]);
+  const a0 = Math.atan2(ry[0] - ys[a], rx[0] - xs[a]);
+  p.arc(xs[a], ys[a], rs[a], a0, a0 - Math.PI, true);
+  p.closePath();
+}
+const dot = (p, x, y, r) => { p.moveTo(x + r, y); p.arc(x, y, r, 0, Math.PI * 2); };
+
+/** Outline of a vector brush stroke (pts = x,y,pressure triplets) in the stroke's style. */
 function brushOutline(o, p) {
   const pts = o.pts, n = pts.length / 3;
   if (!n) return;
-  const w = (i) => {
-    let r = (o.size * ((1 - o.pressure) + o.pressure * pts[i * 3 + 2])) / 2;
-    if (o.taper && n > 6) { const k = 4; if (i < k) r *= 0.35 + (0.65 * i) / k; if (i > n - 1 - k) r *= 0.35 + (0.65 * (n - 1 - i)) / k; }
-    return Math.max(0.3, r);
-  };
-  if (n === 1) { p.arc(pts[0], pts[1], w(0), 0, Math.PI * 2); return; }
-  const lx = [], ly = [], rx = [], ry = [];
+  const st = o.style || "pressure", seed = o.seed || 1, size = o.size;
+  const xs = new Array(n), ys = new Array(n), rs = new Array(n);
+  for (let i = 0; i < n; i++) { xs[i] = pts[i * 3]; ys[i] = pts[i * 3 + 1]; }
+  const tapered = (o.taper || st === "taper") && n > 6, tk = st === "taper" ? Math.max(4, Math.round(n / 3)) : 4, tmin = st === "taper" ? 0.06 : 0.35;
   for (let i = 0; i < n; i++) {
-    const a = Math.max(0, i - 1), b = Math.min(n - 1, i + 1);
-    let tx = pts[b * 3] - pts[a * 3], ty = pts[b * 3 + 1] - pts[a * 3 + 1];
-    const len = Math.hypot(tx, ty) || 1; tx /= len; ty /= len;
-    const r = w(i);
-    lx[i] = pts[i * 3] - ty * r; ly[i] = pts[i * 3 + 1] + tx * r;
-    rx[i] = pts[i * 3] + ty * r; ry[i] = pts[i * 3 + 1] - tx * r;
+    let r = st === "uniform" ? size / 2 : (size * ((1 - o.pressure) + o.pressure * pts[i * 3 + 2])) / 2;
+    if (tapered && st !== "uniform") { if (i < tk) r *= tmin + ((1 - tmin) * i) / tk; if (i > n - 1 - tk) r *= tmin + ((1 - tmin) * (n - 1 - i)) / tk; }
+    if (st === "calligraphy") {
+      // a flat nib held at 45°: thick across it, hairline along it
+      const i0 = Math.max(0, i - 1), i1 = Math.min(n - 1, i + 1);
+      let tx = xs[i1] - xs[i0], ty = ys[i1] - ys[i0]; const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
+      r *= 0.1 + 0.9 * Math.abs(tx * Math.SQRT1_2 - ty * Math.SQRT1_2);
+    }
+    if (st === "rough") r *= 0.6 + 0.8 * hash(seed + i * 1.37);
+    rs[i] = Math.max(0.3, r);
   }
-  p.moveTo(lx[0], ly[0]);
-  for (let i = 1; i < n - 1; i++) p.quadraticCurveTo(lx[i], ly[i], (lx[i] + lx[i + 1]) / 2, (ly[i] + ly[i + 1]) / 2);
-  p.lineTo(lx[n - 1], ly[n - 1]);
-  const e = n - 1, ae = Math.atan2(ly[e] - pts[e * 3 + 1], lx[e] - pts[e * 3]);
-  p.arc(pts[e * 3], pts[e * 3 + 1], w(e), ae, ae - Math.PI, true);
-  for (let i = n - 2; i >= 1; i--) p.quadraticCurveTo(rx[i], ry[i], (rx[i] + rx[i - 1]) / 2, (ry[i] + ry[i - 1]) / 2);
-  p.lineTo(rx[0], ry[0]);
-  const a0 = Math.atan2(ry[0] - pts[1], rx[0] - pts[0]);
-  p.arc(pts[0], pts[1], w(0), a0, a0 - Math.PI, true);
-  p.closePath();
+  // running length along the stroke
+  const L = new Float64Array(n);
+  for (let i = 1; i < n; i++) L[i] = L[i - 1] + Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
+  const at = (d) => { // point + index at distance d
+    let i = 1; while (i < n - 1 && L[i] < d) i++;
+    const seg = L[i] - L[i - 1] || 1, t = Math.min(1, Math.max(0, (d - L[i - 1]) / seg));
+    return [xs[i - 1] + (xs[i] - xs[i - 1]) * t, ys[i - 1] + (ys[i] - ys[i - 1]) * t, rs[i - 1] + (rs[i] - rs[i - 1]) * t];
+  };
+  switch (st) {
+    case "dotted": {
+      const gap = Math.max(1, size * 1.6);
+      for (let d = 0; d <= L[n - 1] + 1e-6; d += gap) { const [x, y, r] = at(d); dot(p, x, y, r * 0.8); }
+      break;
+    }
+    case "dashed": {
+      const dash = Math.max(2, size * 2.4), period = dash + Math.max(1, size * 1.4);
+      let a = -1;
+      for (let i = 0; i <= n; i++) {
+        const on = i < n && L[i] % period < dash;
+        if (on && a < 0) a = i;
+        if (!on && a >= 0) { ribbon(p, xs, ys, rs, a, i - 1); a = -1; }
+      }
+      break;
+    }
+    case "spray": {
+      const count = Math.max(3, Math.min(16, Math.round(size / 3)));
+      for (let i = 0; i < n; i++) for (let k = 0; k < count; k++) {
+        const h = seed * 13 + i * 31 + k * 7, ang = hash(h) * Math.PI * 2, dist = Math.sqrt(hash(h + 1)) * rs[i] * 1.8;
+        dot(p, xs[i] + Math.cos(ang) * dist, ys[i] + Math.sin(ang) * dist, Math.max(0.5, size * 0.06 * (0.5 + hash(h + 2))));
+      }
+      break;
+    }
+    case "splatter": {
+      for (let i = 0; i < n; i++) rs[i] *= 0.7;
+      ribbon(p, xs, ys, rs, 0, n - 1);
+      for (let i = 0; i < n; i++) {
+        const h = seed * 17 + i * 23;
+        if (hash(h) < 0.6) continue;
+        const ang = hash(h + 1) * Math.PI * 2, dist = size * (0.6 + hash(h + 2) * 1.3);
+        dot(p, xs[i] + Math.cos(ang) * dist, ys[i] + Math.sin(ang) * dist, Math.max(0.5, size * (0.05 + 0.14 * hash(h + 3))));
+      }
+      break;
+    }
+    case "bristle": {
+      const K = 7;
+      for (let k = 0; k < K; k++) {
+        const off = (k / (K - 1) - 0.5) * 1.8, thick = 0.07 + 0.13 * hash(seed + k * 5.3);
+        const bx = new Array(n), by = new Array(n), br = new Array(n);
+        for (let i = 0; i < n; i++) {
+          const i0 = Math.max(0, i - 1), i1 = Math.min(n - 1, i + 1);
+          let tx = xs[i1] - xs[i0], ty = ys[i1] - ys[i0]; const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
+          bx[i] = xs[i] - ty * off * rs[i]; by[i] = ys[i] + tx * off * rs[i]; br[i] = Math.max(0.3, rs[i] * thick * 2);
+        }
+        // dry-brush gaps: each bristle skips a few stretches
+        let a = -1;
+        for (let i = 0; i <= n; i++) {
+          const on = i < n && hash(seed * 3 + k * 41 + Math.floor(i / 4)) > 0.28;
+          if (on && a < 0) a = i;
+          if (!on && a >= 0) { ribbon(p, bx, by, br, a, i - 1); a = -1; }
+        }
+      }
+      break;
+    }
+    default: ribbon(p, xs, ys, rs, 0, n - 1);
+  }
 }
 
 const measureCtx = document.createElement("canvas").getContext("2d");
@@ -120,7 +212,8 @@ Render.localBounds = function (o) {
     case "brush": {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       for (let i = 0; i < o.pts.length; i += 3) { x0 = Math.min(x0, o.pts[i]); y0 = Math.min(y0, o.pts[i + 1]); x1 = Math.max(x1, o.pts[i]); y1 = Math.max(y1, o.pts[i + 1]); }
-      const r = o.size / 2; return { x: x0 - r, y: y0 - r, w: x1 - x0 + 2 * r, h: y1 - y0 + 2 * r };
+      const r = o.style === "spray" || o.style === "splatter" ? o.size * 1.9 : o.size / 2;
+      return { x: x0 - r, y: y0 - r, w: x1 - x0 + 2 * r, h: y1 - y0 + 2 * r };
     }
   }
   return { x: 0, y: 0, w: 1, h: 1 };
