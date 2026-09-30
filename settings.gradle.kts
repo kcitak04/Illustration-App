@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "CoverStudio"
 include(":app")
+include(":frames")

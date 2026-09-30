@@ -29,10 +29,12 @@ jobs:
           mkdir -p out
           cp app/build/outputs/apk/release/app-release.apk out/CoverStudio.apk
           cp app/build/outputs/apk/debug/app-debug.apk out/CoverStudio-debug.apk
+          cp frames/build/outputs/apk/release/frames-release.apk out/FrameStudio.apk
+          cp frames/build/outputs/apk/debug/frames-debug.apk out/FrameStudio-debug.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: CoverStudio-apk
+          name: android-apks
           path: out/*.apk
 
       # Every push to main refreshes a "latest" release so the APK can be downloaded straight from a phone.
@@ -41,10 +43,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Cover Studio (latest build)
+          name: Cover Studio + Frame Studio (latest build)
           prerelease: true
           make_latest: true
-          files: out/CoverStudio.apk
+          files: |
+            out/CoverStudio.apk
+            out/FrameStudio.apk
           body: |
-            Latest build of Cover Studio from ${{ github.sha }}.
-            On your Android phone: download **CoverStudio.apk**, open it, and allow "Install unknown apps" for your browser when asked.
+            Latest builds from ${{ github.sha }}.
+            - **CoverStudio.apk**: vector + photo editor for album covers.
+            - **FrameStudio.apk**: animation studio (vector + paint tools, timeline, video import, MP4/GIF export).
+            On your Android phone: download the APK, open it, and allow "Install unknown apps" for your browser when asked.

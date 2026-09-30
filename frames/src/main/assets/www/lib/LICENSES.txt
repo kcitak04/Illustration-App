@@ -1,0 +1,1 @@
+Bundled libraries (MIT): mp4-muxer 5.2.2 and webm-muxer 5.1.4 by Vanilagy, gifenc 1.0.3 by Matt DesLauriers.

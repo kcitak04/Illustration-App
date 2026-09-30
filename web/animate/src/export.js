@@ -371,7 +371,26 @@ function exportSvgFrame() {
 }
 
 // ---------------------------------------------------------------- saving files
+/** In the Android app: stream the file to the phone's storage through the native bridge. */
+async function saveViaAndroid(filename, blob) {
+  const bridge = window.AndroidBridge;
+  const id = bridge.begin(filename, blob.type || "application/octet-stream");
+  if (!id) throw new Error("Couldn't create the file on this phone.");
+  const CH = 768 * 1024;
+  for (let o = 0; o < blob.size; o += CH) {
+    const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(blob.slice(o, o + CH)); });
+    if (!bridge.append(id, b64)) throw new Error("Writing the file failed.");
+  }
+  const where = bridge.finish(id);
+  if (!where) throw new Error("Saving failed.");
+  const [uri, folder] = where.split("|");
+  UI.dialog("Saved", h("div", {}, h("p", { class: "hint", style: "margin:12px" }, `${filename} (${(blob.size / 1e6).toFixed(2)} MB) is in ${folder} on your phone.`)), [
+    btn("Share…", () => bridge.share(uri, blob.type || "application/octet-stream")),
+    btn("Done", (e) => e.target.closest("dialog").close(), "primary")
+  ]);
+}
 async function offer(filename, blob) {
+  if (window.AndroidBridge) { try { await saveViaAndroid(filename, blob); } catch (e) { toast(e.message || "Saving failed."); } return; }
   if (downloads) {
     try { await downloads.save({ filename, data: blob }); toast("Saved " + filename); return; }
     catch (e) {
@@ -488,6 +507,7 @@ Exporter.run = async function (o) {
   if (o.format === "svg") { await offer(name, exportSvgFrame()); return; }
   const prog = UI.progress("Exporting…");
   const wasFrame = App.state.frame;
+  window.AndroidBridge?.keepAwake(true);
   try {
     let blob;
     if (o.format === "frame") {
@@ -506,8 +526,10 @@ Exporter.run = async function (o) {
     App.state.frame = wasFrame; Media.sync(wasFrame, false); View.redraw();
     if (!blob) { toast("Export cancelled."); return; }
     const realExt = blob.type === "video/webm" && o.format === "mp4" ? "webm" : ext;
+    window.AndroidBridge?.keepAwake(false);
     await offer(`${o.name}.${realExt}`, blob);
   } catch (e) {
+    window.AndroidBridge?.keepAwake(false);
     prog.close(); App.state.frame = wasFrame; Media.sync(wasFrame, false);
     toast("Export failed: " + (e.message || e), 6000);
   }

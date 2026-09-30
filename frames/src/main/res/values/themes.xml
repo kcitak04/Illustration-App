@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="FramesTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#4D8DFF</item>
+        <item name="android:windowBackground">@color/frames_bg</item>
+        <item name="android:statusBarColor">#16171B</item>
+        <item name="android:navigationBarColor">#16171B</item>
+    </style>
+    <color name="frames_bg">#16171B</color>
+    <color name="frames_icon_bg">#1B2A4A</color>
+</resources>

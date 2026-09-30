@@ -49,6 +49,20 @@ function fileMenu(e) {
   ]);
 }
 
+/** Android back button: close the top-most popup / dialog / panel; returns false to leave the app. */
+window.__androidBack = function () {
+  if (document.querySelector(".popup")) { UI.closePopup(); return true; }
+  const dlgs = [...document.querySelectorAll("dialog[open]")];
+  if (dlgs.length) { dlgs[dlgs.length - 1].close(); return true; }
+  if (!$("textEditor").hidden) { TextTool.cancel(); return true; }
+  if (document.body.classList.contains("props-open")) { UI.closeProps(); return true; }
+  if (App.state.playing) { Player.stop(); return true; }
+  Autosave.save();
+  return false;
+};
+/** Called by the Android app when it goes to the background. */
+window.__androidPause = function () { if (App.state.playing) Player.stop(); Autosave.save(); };
+
 async function start() {
   App.doc = demoDoc();
   App.state.layer = 1; App.state.tool = "select";
