@@ -361,7 +361,7 @@ function exportSvgFrame() {
           const b = Render.textBox(o), anchor = o.align === "center" ? "middle" : o.align === "right" ? "end" : "start";
           body += `<text ${tf} font-family="${esc(o.font)}" font-size="${o.size}" font-weight="${o.weight || 400}"${o.italic ? ' font-style="italic"' : ""} text-anchor="${anchor}" dominant-baseline="text-before-edge" ${paint(o.fill)}${stroke}${common}>` +
             b.lines.map((l, i) => `<tspan x="0" y="${+(i * b.lh).toFixed(2)}">${esc(l)}</tspan>`).join("") + "</text>\n";
-        } else { const p = new SvgPath(); Render.localPath(o, p); body += `<path ${tf} d="${p}" ${paint(o.fill)}${stroke}${common}/>\n`; }
+        } else { const p = new SvgPath(); Render.localPath(o, p); body += `<path ${tf} d="${p}" ${paint(o.fill)}${o.type === "rings" ? ' fill-rule="evenodd"' : ""}${stroke}${common}/>\n`; }
       }
     }
     body += "</g>\n";

@@ -90,16 +90,39 @@ function paint() {
   // overlays in screen space
   g.save();
   Tools.current()?.overlay?.(g);
+  if (!s.playing) drawSymmetryGuides(g);
   drawSelectionOverlay(g);
   drawHoverCursor(g);
   g.restore();
 }
+const liveBufs = [document.createElement("canvas"), document.createElement("canvas")];
+function liveBuf(i) {
+  const c = liveBufs[i], d = App.doc;
+  if (c.width !== d.width || c.height !== d.height) { c.width = d.width; c.height = d.height; }
+  const x = c.getContext("2d"); x.setTransform(1, 0, 0, 1, 0, 0); x.globalAlpha = 1; x.globalCompositeOperation = "source-over"; x.clearRect(0, 0, c.width, c.height);
+  return x;
+}
+function applyLive(x) { x.save(); x.globalAlpha = Paint.live.alpha; x.globalCompositeOperation = Paint.live.erase ? "destination-out" : "source-over"; x.drawImage(Paint.buffer, 0, 0); x.restore(); }
 function drawActiveLayerLive(g, L) {
   g.save(); g.globalAlpha = L.opacity; if (L.blend && L.blend !== "source-over") g.globalCompositeOperation = L.blend;
   if (L.kind === "draw") {
-    const r = Render.cellRasterAt(L, App.state.frame); if (r) g.drawImage(r, 0, 0);
-    if (Paint.live) { g.save(); g.globalAlpha *= Paint.live.alpha; g.globalCompositeOperation = Paint.live.erase ? "destination-out" : "source-over"; g.drawImage(Paint.buffer, 0, 0); g.restore(); }
-    for (const o of Render.cellObjectsAt(L, App.state.frame)) Render.drawObj(g, o);
+    const f = App.state.frame, lv = Paint.live;
+    if (!lv) {
+      const r = Render.cellRasterAt(L, f); if (r) g.drawImage(r, 0, 0);
+      for (const o of Render.cellObjectsAt(L, f)) Render.drawObj(g, o);
+    } else {
+      // paint into an off-screen copy of the layer so erasing never punches through the layers below
+      const a = liveBuf(0);
+      const r = Render.cellRasterAt(L, f); if (r) a.drawImage(r, 0, 0);
+      if (lv.pixels) applyLive(a);
+      const objs = Render.cellObjectsAt(L, f);
+      if (lv.vectors && objs.length) {
+        const b = liveBuf(1);
+        for (const o of objs) Render.drawObj(b, o);
+        applyLive(b); a.drawImage(liveBufs[1], 0, 0);
+      } else for (const o of objs) Render.drawObj(a, o);
+      g.drawImage(liveBufs[0], 0, 0);
+    }
   } else Media.draw(g, L, App.state.frame);
   g.restore();
 }
@@ -210,9 +233,13 @@ function drawHoverCursor(g) {
   const t = App.state.tool;
   const r = t === "paint" ? App.style.paint.size / 2 : t === "eraser" ? App.style.eraser.size / 2 : t === "vbrush" ? App.style.brush.size / 2 : 0;
   if (!r) return;
-  const [sx, sy] = toScreen(hover.x, hover.y);
-  g.lineWidth = 1; g.strokeStyle = "rgba(0,0,0,.7)"; g.beginPath(); g.arc(sx, sy, r * App.state.zoom + 1, 0, 7); g.stroke();
-  g.strokeStyle = "rgba(255,255,255,.9)"; g.beginPath(); g.arc(sx, sy, r * App.state.zoom, 0, 7); g.stroke();
+  Sym.all().forEach((T, i) => {
+    const [sx, sy] = toScreen(...M.apply(T, hover.x, hover.y));
+    g.globalAlpha = i ? 0.5 : 1;
+    g.lineWidth = 1; g.strokeStyle = "rgba(0,0,0,.7)"; g.beginPath(); g.arc(sx, sy, r * App.state.zoom + 1, 0, 7); g.stroke();
+    g.strokeStyle = "rgba(255,255,255,.9)"; g.beginPath(); g.arc(sx, sy, r * App.state.zoom, 0, 7); g.stroke();
+  });
+  g.globalAlpha = 1;
 }
 
 // ---------------------------------------------------------------- helpers shared by tools
@@ -278,6 +305,54 @@ function drawSelectionOverlay(g) {
     if (i === 8) { g.beginPath(); g.arc(x, y, 6, 0, 7); g.fill(); g.stroke(); }
     else { g.fillRect(x - 5, y - 5, 10, 10); g.strokeRect(x - 5, y - 5, 10, 10); }
   });
+}
+
+// ---------------------------------------------------------------- symmetry
+const SYM_TOOLS = ["pen", "pencil", "vbrush", "paint", "eraser", "rect", "ellipse", "poly", "line"];
+const Sym = (App.Sym = {
+  on: () => App.style.sym.mode !== "off",
+  center() { const s = App.style.sym, d = App.doc; return [s.cx ?? d.width / 2, s.cy ?? d.height / 2]; },
+  /** The mirror / rotation matrices to repeat a stroke with (identity not included). */
+  transforms() {
+    const s = App.style.sym; if (s.mode === "off") return [];
+    const [cx, cy] = Sym.center(), out = [];
+    if (s.mode === "x") out.push(M.scale(-1, 1, cx, cy));
+    else if (s.mode === "y") out.push(M.scale(1, -1, cx, cy));
+    else if (s.mode === "xy") out.push(M.scale(-1, 1, cx, cy), M.scale(1, -1, cx, cy), M.scale(-1, -1, cx, cy));
+    else {
+      const n = clamp(Math.round(s.n) || 6, 2, 32);
+      for (let k = 1; k < n; k++) out.push(M.rotate((Math.PI * 2 * k) / n, cx, cy));
+      if (s.mode === "kaleido") for (let k = 0; k < n; k++) out.push(M.mul(M.rotate((Math.PI * 2 * k) / n, cx, cy), M.scale(-1, 1, cx, cy)));
+    }
+    return out;
+  },
+  all() { return [M.id(), ...Sym.transforms()]; }
+});
+/** Adds mirrored copies of a freshly drawn object; returns their ids. */
+function addMirrors(cell, o) {
+  const ids = [];
+  for (const T of Sym.transforms()) { const c = { ...cloneObj(o), id: uid(), m: M.mul(T, o.m) }; cell.objects.push(c); ids.push(c.id); }
+  return ids;
+}
+function syncMirrors(cell, o, ids) {
+  const Ts = Sym.transforms();
+  ids.forEach((id, i) => { const j = cell.objects.findIndex((x) => x.id === id); if (j >= 0 && Ts[i]) cell.objects[j] = { ...cloneObj(o), id, m: M.mul(Ts[i], o.m) }; });
+}
+function drawSymmetryGuides(g) {
+  if (!Sym.on() || !SYM_TOOLS.includes(App.state.tool)) return;
+  const s = App.style.sym, d = App.doc, [cx, cy] = Sym.center(), R = Math.hypot(d.width, d.height);
+  const acc = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#2f80ff";
+  const line = (a) => { const [x0, y0] = toScreen(cx - Math.cos(a) * R, cy - Math.sin(a) * R), [x1, y1] = toScreen(cx + Math.cos(a) * R, cy + Math.sin(a) * R); g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); };
+  const ray = (a) => { const [x0, y0] = toScreen(cx, cy), [x1, y1] = toScreen(cx + Math.cos(a) * R, cy + Math.sin(a) * R); g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); };
+  g.save();
+  g.beginPath(); const [a0, b0] = toScreen(0, 0), [a1, b1] = toScreen(d.width, d.height); g.rect(a0, b0, a1 - a0, b1 - b0); g.clip();
+  g.globalAlpha = 0.75; g.strokeStyle = acc; g.lineWidth = 1; g.setLineDash([6, 5]);
+  if (s.mode === "x" || s.mode === "xy") line(Math.PI / 2);
+  if (s.mode === "y" || s.mode === "xy") line(0);
+  if (s.mode === "radial" || s.mode === "kaleido") { const n = clamp(Math.round(s.n) || 6, 2, 32); for (let k = 0; k < n; k++) ray(-Math.PI / 2 + (Math.PI * 2 * k) / n); }
+  g.setLineDash([]); g.globalAlpha = 1;
+  const [px, py] = toScreen(cx, cy); g.fillStyle = "#fff"; g.beginPath(); g.arc(px, py, 4, 0, 7); g.fill(); g.stroke();
+  g.restore();
 }
 
 // ---------------------------------------------------------------- the tools
@@ -469,7 +544,7 @@ tool("pen", (() => {
     if (!obj) return;
     const cell = editableCell();
     if (obj.nodes.length < 2) cell.objects = cell.objects.filter((o) => o.id !== obj.id);
-    else App.state.selection = [obj.id];
+    else { const live = cell.objects.find((o) => o.id === obj.id) || obj; App.state.selection = [obj.id, ...addMirrors(cell, live)]; }
     obj = null; node = null; changed("pen"); App.emit("selection");
   };
   return {
@@ -507,6 +582,11 @@ tool("pen", (() => {
       const [a, b] = toScreen(last.x, last.y), [c, d] = toScreen(last.ox, last.oy), [e, f] = toScreen(hover.x, hover.y);
       g.strokeStyle = "#2f80ff"; g.beginPath(); g.moveTo(a, b); g.bezierCurveTo(c, d, e, f, e, f); g.stroke();
       for (const n of obj.nodes) { const [x, y] = toScreen(n.x, n.y); g.fillStyle = "#fff"; g.fillRect(x - 3.5, y - 3.5, 7, 7); g.strokeRect(x - 3.5, y - 3.5, 7, 7); }
+      // symmetry preview: the copies appear when the path is finished
+      for (const T of Sym.transforms()) {
+        g.save(); g.translate(App.state.panX, App.state.panY); g.scale(App.state.zoom, App.state.zoom); g.transform(...T);
+        g.globalAlpha = 0.6; g.lineWidth = 1.5 / App.state.zoom; g.setLineDash([4 / App.state.zoom, 3 / App.state.zoom]); g.stroke(Render.localPath(obj)); g.restore();
+      }
     }
   };
 })());
@@ -540,7 +620,7 @@ tool("pencil", (() => {
       History.push();
       const st = styleProps();
       const o = { id: uid(), type: "path", nodes, closed, m: M.id(), ...st, stroke: App.style.strokeOn ? App.style.stroke : (typeof App.style.fill === "string" ? App.style.fill : "#111"), fill: closed && App.style.pencilFill ? st.fill : null };
-      editableCell().objects.push(o);
+      const cell = editableCell(); cell.objects.push(o); addMirrors(cell, o);
       pts = null; changed("pencil");
     },
     cancel() { pts = null; },
@@ -548,14 +628,14 @@ tool("pencil", (() => {
       if (!pts) return;
       g.strokeStyle = App.style.strokeOn ? App.style.stroke : (typeof App.style.fill === "string" ? App.style.fill : "#111");
       g.lineWidth = Math.max(1, App.style.sw * App.state.zoom); g.lineCap = "round"; g.lineJoin = "round";
-      g.beginPath(); pts.forEach(([x, y], i) => { const [a, b] = toScreen(x, y); i ? g.lineTo(a, b) : g.moveTo(a, b); }); g.stroke();
+      for (const T of Sym.all()) { g.beginPath(); pts.forEach(([x, y], i) => { const [a, b] = toScreen(...M.apply(T, x, y)); i ? g.lineTo(a, b) : g.moveTo(a, b); }); g.stroke(); }
     }
   };
 })());
 
 // ---- Vector brush: pressure-sensitive filled strokes (stay editable & tweenable)
 tool("vbrush", (() => {
-  let obj = null, sm = null;
+  let obj = null, sm = null, ids = [];
   return {
     down(p) {
       if (!layerEditable()) return;
@@ -563,7 +643,10 @@ tool("vbrush", (() => {
       const b = App.style.brush;
       obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
       sm = { x: p.x, y: p.y, p: p.p };
-      editableCell().objects.push(obj); changed("brush");
+      const cell = editableCell(); cell.objects.push(obj);
+      const copies = Sym.transforms().map((T) => ({ ...obj, id: uid(), m: T, pts: obj.pts }));
+      cell.objects.push(...copies); ids = [obj.id, ...copies.map((c) => c.id)];
+      changed("brush");
     },
     move(p) {
       if (!obj) return;
@@ -572,7 +655,7 @@ tool("vbrush", (() => {
       const n = obj.pts.length;
       if (Math.hypot(sm.x - obj.pts[n - 3], sm.y - obj.pts[n - 2]) < Math.max(docLen(1), obj.size * 0.05)) return;
       obj.pts.push(sm.x, sm.y, sm.p);
-      const cell = editableCell(); const live = cell.objects.find((o) => o.id === obj.id); if (live) live.pts = obj.pts;
+      const cell = editableCell(); for (const o of cell.objects) if (ids.includes(o.id)) o.pts = obj.pts;
       changed("brush");
     },
     up() { obj = null; },
@@ -582,7 +665,7 @@ tool("vbrush", (() => {
 
 // ---- Shapes
 function shapeTool(kind) {
-  let obj = null, start = null;
+  let obj = null, start = null, mids = [];
   return {
     down(p) {
       if (!layerEditable()) return;
@@ -599,7 +682,7 @@ function shapeTool(kind) {
         if (kind === "rect") obj.r = sh.radius;
         if (kind === "poly") { obj.n = sh.points; obj.star = sh.star; obj.inner = sh.inner; }
         if (kind === "line") { obj.nodes = []; obj.closed = false; obj.fill = null; obj.stroke = App.style.strokeOn ? App.style.stroke : (typeof App.style.fill === "string" ? App.style.fill : "#111"); obj.sw = Math.max(1, App.style.sw); }
-        editableCell().objects.push(obj);
+        const cell = editableCell(); cell.objects.push(obj); mids = addMirrors(cell, obj);
       }
       const live = editableCell().objects.find((o) => o.id === obj.id) || obj;
       if (kind === "line") {
@@ -612,9 +695,10 @@ function shapeTool(kind) {
         if (p.alt) { x0 = start.x - w; y0 = start.y - h; w *= 2; h *= 2; }
         live.w = Math.max(1, w); live.h = Math.max(1, h); live.m = M.translate(x0, y0);
       }
+      if (mids.length) syncMirrors(editableCell(), live, mids);
       changed("shape");
     },
-    up() { if (obj) { App.state.selection = [obj.id]; App.emit("selection"); } obj = null; start = null; },
+    up() { if (obj) { App.state.selection = [obj.id, ...mids]; App.emit("selection"); } obj = null; start = null; mids = []; },
     cancel() { if (obj) History.doUndo(); obj = null; start = null; }
   };
 }
@@ -674,29 +758,37 @@ function stamp(color, hardness) {
   stampCache.set(key, c); return c;
 }
 function paintTool(erase) {
-  let last = null, cell = null, leftover = 0;
+  let last = null, cell = null, leftover = 0, trails = null;
   const cfg = () => (erase ? { size: App.style.eraser.size, hardness: 0.8, opacity: 1, flow: 1, pressureSize: true, pressureOpacity: false, color: "#000" } : App.style.paint);
+  const mode = () => (erase ? App.style.eraser.mode || "all" : "pixels");
   const dab = (g, x, y, p) => {
     const c = cfg(); const size = Math.max(0.5, c.size * (c.pressureSize ? 0.15 + 0.85 * p : 1));
     g.globalAlpha = clamp(c.flow * (c.pressureOpacity ? p : 1), 0.01, 1);
-    g.drawImage(stamp(erase ? "#000" : c.color, c.hardness), x - size / 2, y - size / 2, size, size);
+    const st = stamp(erase ? "#000" : c.color, c.hardness);
+    Sym.all().forEach((T, i) => {
+      const [px, py] = M.apply(T, x, y);
+      g.drawImage(st, px - size / 2, py - size / 2, size, size);
+      if (trails) (trails[i] = trails[i] || []).push([px, py, size / 2]);
+    });
   };
   return {
     down(p) {
-      if (erase && App.style.eraser.mode === "objects") { this.eraseObjects(p, true); return; }
+      if (erase && mode() === "objects") { this.eraseObjects(p, true); return; }
       if (!layerEditable()) return;
       History.push();
       cell = editableCell();
-      rasterForPaint(cell);
+      const m = mode(), pixels = m === "pixels" || m === "all", vectors = m === "cut" || m === "all";
+      if (pixels && (cell.raster || !erase)) rasterForPaint(cell);
       buildStrokeCache();
       const d = App.doc, b = Paint.buffer;
       if (b.width !== d.width || b.height !== d.height) { b.width = d.width; b.height = d.height; }
       const g = b.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, d.width, d.height);
-      Paint.live = { alpha: cfg().opacity, erase };
+      Paint.live = { alpha: cfg().opacity, erase, pixels, vectors };
+      trails = vectors ? [] : null;
       last = p; leftover = 0; dab(g, p.x, p.y, p.p); changed("paint");
     },
     move(p) {
-      if (erase && App.style.eraser.mode === "objects") { if (this._erasing) this.eraseObjects(p, false); return; }
+      if (erase && mode() === "objects") { if (this._erasing) this.eraseObjects(p, false); return; }
       if (!last || !cell) return;
       const g = Paint.buffer.getContext("2d");
       const dist = Math.hypot(p.x - last.x, p.y - last.y);
@@ -708,16 +800,27 @@ function paintTool(erase) {
     up() {
       this._erasing = false;
       if (!cell || !Paint.live) { cell = null; return; }
-      const g = cell.raster.getContext("2d");
-      g.save(); g.globalAlpha = Paint.live.alpha; g.globalCompositeOperation = erase ? "destination-out" : "source-over";
-      g.drawImage(Paint.buffer, 0, 0); g.restore();
-      Paint.live = null; cell = null; last = null; changed("paint");
+      const lv = Paint.live;
+      if (lv.pixels && cell.raster) {
+        const g = cell.raster.getContext("2d");
+        g.save(); g.globalAlpha = lv.alpha; g.globalCompositeOperation = erase ? "destination-out" : "source-over";
+        g.drawImage(Paint.buffer, 0, 0); g.restore();
+      }
+      if (lv.vectors && trails && cell.objects.length) {
+        try {
+          const res = Geo.cutCell(cell, Geo.eraserRegion(trails));
+          if (res.removed.length) App.state.selection = App.state.selection.filter((id) => !res.removed.includes(id));
+          if (res.changed) App.emit("selection");
+        } catch (e) { console.warn("vector erase failed", e); }
+      }
+      Paint.live = null; cell = null; last = null; trails = null; changed("paint");
     },
-    cancel() { if (cell) { Paint.live = null; cell = null; History.doUndo(); } },
+    cancel() { if (cell) { Paint.live = null; cell = null; trails = null; History.doUndo(); } },
     eraseObjects(p, first) {
       if (!layerEditable(first)) return;
       const tol = Math.max(App.style.eraser.size / 2, docLen(4));
-      const hits = currentObjects().filter((o) => Render.hit(o, p.x, p.y, tol)).map((o) => o.id);
+      const spots = Sym.all().map((T) => M.apply(T, p.x, p.y));
+      const hits = currentObjects().filter((o) => spots.some(([x, y]) => Render.hit(o, x, y, tol))).map((o) => o.id);
       if (first) this._erasing = true;
       if (!hits.length) return;
       if (!this._pushed || first) { History.push(); this._pushed = true; }
@@ -812,6 +915,40 @@ const Cmd = (App.Cmd = {
     cell.objects.push(...copies); App.state.selection = copies.map((o) => o.id); changed("paste"); App.emit("selection");
   },
   duplicate() { Cmd.copy(); Cmd.paste(false); },
+  /**
+   * Repeat copies: each copy i is moved by i·(dx, dy), turned by i·rotate and scaled by scale^i
+   * around the pivot (selection centre or canvas centre); fade multiplies the opacity each step.
+   */
+  repeat({ count = 3, dx = 40, dy = 0, rotate = 0, scale = 100, fade = 100, pivot = "selection" } = {}) {
+    const sel = selectedObjects(); if (!sel.length || !layerEditable()) return;
+    const b = selBounds(sel), d = App.doc;
+    const [px, py] = pivot === "canvas" ? [d.width / 2, d.height / 2] : [b.x + b.w / 2, b.y + b.h / 2];
+    History.push(); const cell = editableCell(); const made = [];
+    for (let i = 1; i <= clamp(Math.round(count), 1, 500); i++) {
+      const k = Math.pow(scale / 100, i);
+      const T = M.mul(M.translate(dx * i, dy * i), M.mul(M.rotate((rotate * i * Math.PI) / 180, px, py), M.scale(k, k, px, py)));
+      for (const o of sel) {
+        const c = { ...cloneObj(o), id: uid(), m: M.mul(T, o.m) };
+        if (fade !== 100) c.opacity = (o.opacity ?? 1) * Math.pow(fade / 100, i);
+        made.push(c);
+      }
+    }
+    cell.objects.push(...made); App.state.selection = made.map((o) => o.id);
+    changed("repeat"); App.emit("selection");
+    toast(`Made ${made.length} ${made.length === 1 ? "copy" : "copies"}.`);
+  },
+  /** Mirrored copy: flipped across the selection's edge (so it sits beside it) or the canvas centre line. */
+  mirrorCopy(horizontal, pivot = "edge") {
+    const sel = selectedObjects(); if (!sel.length || !layerEditable()) return;
+    const b = selBounds(sel), d = App.doc;
+    const cx = pivot === "canvas" ? d.width / 2 : pivot === "centre" ? b.x + b.w / 2 : b.x + b.w;
+    const cy = pivot === "canvas" ? d.height / 2 : pivot === "centre" ? b.y + b.h / 2 : b.y + b.h;
+    const T = horizontal ? M.scale(-1, 1, cx, cy) : M.scale(1, -1, cx, cy);
+    History.push(); const cell = editableCell();
+    const made = sel.map((o) => ({ ...cloneObj(o), id: uid(), m: M.mul(T, o.m) }));
+    cell.objects.push(...made); App.state.selection = made.map((o) => o.id);
+    changed("mirror"); App.emit("selection");
+  },
   selectAll() { App.state.selection = currentObjects().map((o) => o.id); App.emit("selection"); View.redraw(); },
   arrange(dir) {
     if (!App.state.selection.length || !layerEditable()) return;

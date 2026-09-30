@@ -20,6 +20,7 @@ const ICON = {
   eye: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><circle cx="12" cy="12" r="2.8" fill="currentColor"/>',
   eyeOff: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><path d="M4 4l16 16"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
+  sym: '<path d="M12 2v20" stroke-dasharray="2 2.2"/><path d="M9 6L3 12l6 6z"/><path d="M15 6l6 6-6 6z" fill="currentColor"/>',
   unlock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018-1"/>'
 };
 for (const k of Object.keys(ICON)) ICON[k] = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[k]}</svg>`;
@@ -109,7 +110,9 @@ UI.buildToolbar = function () {
     h("span", { class: "sw fill", style: `background:${typeof App.style.fill === "string" ? App.style.fill : "#888"}` }),
     h("span", { class: "sw stroke", style: `border-color:${App.style.strokeOn ? App.style.stroke : "transparent"}` }));
   sw.onclick = () => UI.openProps();
-  bar.append(sw);
+  const sb = h("button", { class: "tool symbtn", type: "button", "aria-label": "Symmetry", html: ICON.sym, onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); window.innerWidth <= 900 ? UI.symmetryMenu(r.left, r.bottom + 6) : UI.symmetryMenu(r.right + 6, r.top); } });
+  bar.append(sb, sw);
+  UI.syncSymButton();
 };
 App.setTool = function (name) {
   if (App.state.tool === "pen" && name !== "pen") Tools.get("pen").finish();
@@ -155,7 +158,18 @@ UI.buildProps = function () {
   const opts = [];
   if (t === "vbrush") opts.push(slider("Size", 1, 300, 1, () => s.brush.size, (v) => (s.brush.size = v), { record: false }), slider("Pressure", 0, 1, 0.01, () => s.brush.pressure, (v) => (s.brush.pressure = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), slider("Smoothing", 0, 1, 0.01, () => s.brush.smooth, (v) => (s.brush.smooth = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), check("Tapered ends", () => s.brush.taper, (v) => (s.brush.taper = v), { record: false }));
   if (t === "paint") opts.push(slider("Size", 1, 400, 1, () => s.paint.size, (v) => (s.paint.size = v), { record: false }), slider("Hardness", 0, 1, 0.01, () => s.paint.hardness, (v) => (s.paint.hardness = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), slider("Opacity", 0.05, 1, 0.01, () => s.paint.opacity, (v) => (s.paint.opacity = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), slider("Flow", 0.02, 1, 0.01, () => s.paint.flow, (v) => (s.paint.flow = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), check("Pressure changes size", () => s.paint.pressureSize, (v) => (s.paint.pressureSize = v), { record: false }), check("Pressure changes opacity", () => s.paint.pressureOpacity, (v) => (s.paint.pressureOpacity = v), { record: false }));
-  if (t === "eraser") opts.push(slider("Size", 2, 400, 1, () => s.eraser.size, (v) => (s.eraser.size = v), { record: false }), select("Erases", [["pixels", "Painted pixels"], ["objects", "Whole vector objects"]], () => s.eraser.mode, (v) => (s.eraser.mode = v), { record: false }), h("p", { class: "hint" }, "Tip: flip your stylus to use its eraser end with any tool."));
+  if (t === "eraser") {
+    const hints = {
+      all: "Rubs out painted pixels and cuts through vector shapes and lines where you erase.",
+      pixels: "Only rubs out painted pixels; vector shapes stay untouched.",
+      cut: "Cuts away just the part of vector shapes and lines you erase over. Painted pixels stay.",
+      objects: "Removes every vector shape or line you touch, as a whole."
+    };
+    const hint = h("p", { class: "hint" }, hints[s.eraser.mode] || hints.all);
+    opts.push(slider("Size", 2, 400, 1, () => s.eraser.size, (v) => (s.eraser.size = v), { record: false }),
+      select("Erases", [["all", "Everything (pixels + vectors)"], ["pixels", "Painted pixels only"], ["cut", "Parts of vectors"], ["objects", "Whole vector objects"]], () => s.eraser.mode, (v) => { s.eraser.mode = v; hint.textContent = hints[v]; UI.syncSymButton(); }, { record: false }),
+      hint, h("p", { class: "hint" }, "Tip: flip your stylus to use its eraser end with any tool."));
+  }
   if (t === "bucket") opts.push(slider("Tolerance", 0, 128, 1, () => s.bucket.tolerance, (v) => (s.bucket.tolerance = v), { record: false }), h("p", { class: "hint" }, "Click inside a vector shape to recolour it, or anywhere else to flood-fill pixels. Lines drawn with any tool act as borders."));
   if (t === "rect") opts.push(slider("Corner radius", 0, 400, 1, () => s.shape.radius, (v) => { s.shape.radius = v; if (editSel) Cmd.editSelected((o) => { if (o.type === "rect") o.r = v; }); }, { record: false }));
   if (t === "poly") opts.push(slider("Points", 3, 24, 1, () => s.shape.points, (v) => (s.shape.points = v), { record: false }), check("Star", () => s.shape.star, (v) => (s.shape.star = v), { record: false }), slider("Inner radius", 0.1, 0.95, 0.01, () => s.shape.inner, (v) => (s.shape.inner = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }));
@@ -167,6 +181,7 @@ UI.buildProps = function () {
   if (t === "select") opts.push(check("Keep proportions when scaling", () => !!s.keepRatio, (v) => (s.keepRatio = v), { record: false }));
   if (["rect", "ellipse", "poly", "line", "pen", "pencil", "vbrush", "text"].includes(t)) opts.push(slider("Opacity", 0, 1, 0.01, () => s.opacity, (v) => (s.opacity = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }));
   if (opts.length) box.append(section("Tool", ...opts));
+  if (SYM_TOOLS.includes(t)) box.append(UI.symmetrySection());
 
   // --- selection
   if (editSel) {
@@ -174,7 +189,8 @@ UI.buildProps = function () {
     const kids = [
       slider("Opacity", 0, 1, 0.01, () => o.opacity ?? 1, (v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.opacity = v; }); changed("op"); }, { fmt: (v) => Math.round(v * 100) + "%" }),
       select("Blend", BLENDS, () => o.blend || "source-over", (v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.blend = v; }); changed("blend"); }),
-      h("div", { class: "btnrow" }, btn("Duplicate", () => Cmd.duplicate()), btn("Delete", () => Cmd.delete()), btn("To path", () => Cmd.toPath())),
+      h("div", { class: "btnrow" }, btn("Duplicate", () => Cmd.duplicate()), btn("Repeat…", () => UI.repeatDialog()), btn("Delete", () => Cmd.delete())),
+      h("div", { class: "btnrow" }, btn("Mirror copy ↔", () => Cmd.mirrorCopy(true)), btn("Mirror copy ↕", () => Cmd.mirrorCopy(false)), btn("To path", () => Cmd.toPath())),
       h("div", { class: "btnrow" }, btn("Front", () => Cmd.arrange("front")), btn("Forward", () => Cmd.arrange("forward")), btn("Backward", () => Cmd.arrange("backward")), btn("Back", () => Cmd.arrange("back"))),
       h("div", { class: "btnrow" }, btn("Flip ↔", () => Cmd.flip(true)), btn("Flip ↕", () => Cmd.flip(false)), btn("Rotate 90°", () => Cmd.rotate(90))),
       h("div", { class: "btnrow" }, btn("Align left", () => Cmd.align("l", null)), btn("Centre", () => Cmd.align("c", "m")), btn("Align right", () => Cmd.align("r", null))),
@@ -195,6 +211,64 @@ UI.buildProps = function () {
     box.append(section(`Layer · ${L.name}`, ...kids));
   }
 };
+// ---------------------------------------------------------------- symmetry & repeat copies
+const SYM_MODES = [["off", "Off"], ["x", "Left ↔ right"], ["y", "Top ↕ bottom"], ["xy", "Four-way"], ["radial", "Radial (rotate)"], ["kaleido", "Kaleidoscope (rotate + mirror)"]];
+UI.symmetrySection = function () {
+  const sy = App.style.sym, d = App.doc;
+  const set = (fn) => { fn(); UI.syncSymButton(); View.redraw(); UI.buildProps(); };
+  const kids = [select("Symmetry", SYM_MODES, () => sy.mode, (v) => set(() => (sy.mode = v)), { record: false })];
+  if (sy.mode === "radial" || sy.mode === "kaleido") kids.push(slider("Segments", 2, 24, 1, () => sy.n, (v) => { sy.n = v; View.redraw(); }, { record: false }));
+  if (sy.mode !== "off") {
+    kids.push(
+      numberField("Centre X", () => Math.round(sy.cx ?? d.width / 2), (v) => { sy.cx = v; View.redraw(); }, { record: false }),
+      numberField("Centre Y", () => Math.round(sy.cy ?? d.height / 2), (v) => { sy.cy = v; View.redraw(); }, { record: false }),
+      h("div", { class: "btnrow" }, btn("Canvas centre", () => set(() => { sy.cx = sy.cy = null; })), btn("Selection centre", () => { const b = App.selBounds(); if (!b) { toast("Select something first."); return; } set(() => { sy.cx = b.x + b.w / 2; sy.cy = b.y + b.h / 2; }); })),
+      h("p", { class: "hint" }, "Everything you draw with the pen, pencil, brushes, shapes and eraser is repeated across the dashed guides.")
+    );
+  }
+  return section("Symmetry", ...kids);
+};
+UI.syncSymButton = function () {
+  const b = document.querySelector(".tool.symbtn"); if (!b) return;
+  const on = App.style.sym.mode !== "off";
+  b.classList.toggle("active", on);
+  b.title = on ? `Symmetry: ${SYM_MODES.find((m) => m[0] === App.style.sym.mode)[1]}` : "Symmetry: off";
+};
+UI.symmetryMenu = function (x, y) {
+  const sy = App.style.sym;
+  const pick = (mode, n) => () => { sy.mode = mode; if (n) sy.n = n; UI.syncSymButton(); View.redraw(); UI.buildProps(); if (mode !== "off" && !SYM_TOOLS.includes(App.state.tool)) toast("Symmetry works with the pen, pencil, brushes, shapes and eraser."); };
+  UI.popup(x, y, [
+    [(sy.mode === "off" ? "✓ " : "") + "Off", pick("off")], ["-"],
+    [(sy.mode === "x" ? "✓ " : "") + "Mirror left ↔ right", pick("x")],
+    [(sy.mode === "y" ? "✓ " : "") + "Mirror top ↕ bottom", pick("y")],
+    [(sy.mode === "xy" ? "✓ " : "") + "Four-way mirror", pick("xy")], ["-"],
+    ["Radial × 3", pick("radial", 3)], ["Radial × 6", pick("radial", 6)], ["Radial × 8", pick("radial", 8)],
+    ["Kaleidoscope × 6", pick("kaleido", 6)], ["Kaleidoscope × 8", pick("kaleido", 8)], ["-"],
+    ["More options…", () => UI.openProps()]
+  ]);
+};
+UI.repeatDialog = function () {
+  if (!App.state.selection.length) { toast("Select the objects to repeat first."); return; }
+  const r = App.style.repeat;
+  const body = h("div", {},
+    numberField("Copies", () => r.count, (v) => (r.count = v), { min: 1, max: 500, record: false }),
+    numberField("Move X (px)", () => r.dx, (v) => (r.dx = v), { record: false }),
+    numberField("Move Y (px)", () => r.dy, (v) => (r.dy = v), { record: false }),
+    numberField("Rotate each (°)", () => r.rotate, (v) => (r.rotate = v), { min: -360, max: 360, record: false }),
+    numberField("Scale each (%)", () => r.scale, (v) => (r.scale = v), { min: 1, max: 1000, record: false }),
+    numberField("Opacity each (%)", () => r.fade, (v) => (r.fade = v), { min: 0, max: 100, record: false }),
+    select("Turn & scale around", [["selection", "Selection centre"], ["canvas", "Canvas centre"]], () => r.pivot, (v) => (r.pivot = v), { record: false }),
+    h("p", { class: "hint" }, "Each copy moves, turns and scales one more step than the one before. For a ring of copies, use Rotate = 360 ÷ (copies + 1) around the canvas centre.")
+  );
+  const presets = h("div", { class: "btnrow" },
+    btn("Row", () => { Object.assign(r, { count: 4, dx: 60, dy: 0, rotate: 0, scale: 100, fade: 100, pivot: "selection" }); dlg.close(); UI.repeatDialog(); }),
+    btn("Ring of 6", () => { Object.assign(r, { count: 5, dx: 0, dy: 0, rotate: 60, scale: 100, fade: 100, pivot: "canvas" }); dlg.close(); UI.repeatDialog(); }),
+    btn("Spiral", () => { Object.assign(r, { count: 12, dx: 0, dy: 0, rotate: 30, scale: 92, fade: 100, pivot: "canvas" }); dlg.close(); UI.repeatDialog(); }),
+    btn("Motion trail", () => { Object.assign(r, { count: 5, dx: -30, dy: 0, rotate: 0, scale: 100, fade: 70, pivot: "selection" }); dlg.close(); UI.repeatDialog(); }));
+  body.prepend(h("p", { class: "hint" }, "Presets"), presets);
+  const dlg = UI.dialog("Repeat copies", body, [btn("Cancel", () => dlg.close()), btn("Make copies", () => { dlg.close(); Cmd.repeat(r); }, "primary")]);
+};
+
 UI.syncSwatch = function () {
   const f = document.querySelector(".sw.fill"), s = document.querySelector(".sw.stroke");
   if (f) f.style.background = App.state.tool === "paint" ? App.style.paint.color : typeof App.style.fill === "string" ? App.style.fill : "#888";
@@ -358,7 +432,7 @@ UI.docSettings = function () {
 UI.help = function () {
   const rows = [["Space + drag / two fingers", "Pan"], ["Ctrl + wheel / pinch", "Zoom"], ["Enter", "Play / stop"], [", and .", "Previous / next frame"], ["Shift + , and .", "Previous / next key"],
     ["F6", "New blank key"], ["F7", "Duplicate key"], ["F5", "Hold one more frame"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Two-finger tap", "Undo"],
-    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
+    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Ctrl+Shift+D", "Repeat copies…"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
   const tbl = h("table", { class: "keys" }, rows.map(([k, v]) => h("tr", {}, h("td", {}, h("kbd", {}, k)), h("td", {}, v))));
   const tools = h("table", { class: "keys" }, TOOLS.map(([, t]) => h("tr", {}, h("td", {}, t))));
   UI.dialog("Shortcuts", h("div", { class: "cols" }, tbl, tools), []);
@@ -464,6 +538,7 @@ UI.bindKeys = function () {
     if (mod && k.toLowerCase() === "y") { e.preventDefault(); History.doRedo(); return; }
     if (mod && k.toLowerCase() === "c") { Cmd.copy(); return; }
     if (mod && k.toLowerCase() === "v") { e.preventDefault(); Cmd.paste(true); return; }
+    if (mod && e.shiftKey && k.toLowerCase() === "d") { e.preventDefault(); UI.repeatDialog(); return; }
     if (mod && k.toLowerCase() === "d") { e.preventDefault(); Cmd.duplicate(); return; }
     if (mod && k.toLowerCase() === "a") { e.preventDefault(); Cmd.selectAll(); return; }
     if (mod && k.toLowerCase() === "s") { e.preventDefault(); App.Exporter.saveProject(); return; }

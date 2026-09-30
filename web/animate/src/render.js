@@ -36,6 +36,15 @@ Render.localPath = function (o, p = new Path2D()) {
       break;
     }
     case "brush": brushOutline(o, p); break;
+    case "rings":
+      // polygons left after partial erasing: [[outer, hole, …], …], each ring a flat x,y list
+      for (const poly of o.polys) for (const r of poly) {
+        if (r.length < 6) continue;
+        p.moveTo(r[0], r[1]);
+        for (let i = 2; i < r.length; i += 2) p.lineTo(r[i], r[i + 1]);
+        p.closePath();
+      }
+      break;
     case "image": p.rect(0, 0, o.w, o.h); break;
     case "text": { const b = textBox(o); p.rect(b.x, b.y, b.w, b.h); break; }
   }
@@ -96,6 +105,12 @@ Render.localBounds = function (o) {
       for (const n of o.nodes) for (const [x, y] of [[n.x, n.y], [n.ix, n.iy], [n.ox, n.oy]]) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
       return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
     }
+    case "rings": {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const poly of o.polys) for (const r of poly) for (let i = 0; i < r.length; i += 2) { x0 = Math.min(x0, r[i]); y0 = Math.min(y0, r[i + 1]); x1 = Math.max(x1, r[i]); y1 = Math.max(y1, r[i + 1]); }
+      if (x0 === Infinity) return { x: 0, y: 0, w: 1, h: 1 };
+      return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+    }
     case "brush": {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       for (let i = 0; i < o.pts.length; i += 3) { x0 = Math.min(x0, o.pts[i]); y0 = Math.min(y0, o.pts[i + 1]); x1 = Math.max(x1, o.pts[i]); y1 = Math.max(y1, o.pts[i + 1]); }
@@ -150,7 +165,7 @@ Render.drawObj = function (ctx, o) {
   } else {
     const p = Render.localPath(o);
     const fs = fillStyleFor(ctx, o);
-    if (fs) { ctx.fillStyle = fs; ctx.fill(p, "nonzero"); }
+    if (fs) { ctx.fillStyle = fs; ctx.fill(p, Render.fillRule(o)); }
     if (o.stroke && o.sw > 0 && o.type !== "brush") {
       ctx.lineWidth = o.sw; ctx.strokeStyle = o.stroke;
       ctx.lineCap = o.cap || "round"; ctx.lineJoin = o.join || "round";
@@ -160,6 +175,8 @@ Render.drawObj = function (ctx, o) {
   ctx.restore();
 };
 
+Render.fillRule = (o) => (o.type === "rings" ? "evenodd" : "nonzero");
+
 const hitCtx = document.createElement("canvas").getContext("2d");
 Render.hit = function (o, x, y, tol) {
   const b = Render.docBounds(o);
@@ -168,7 +185,7 @@ Render.hit = function (o, x, y, tol) {
   if (o.type === "text" || o.type === "image") { const lb = Render.localBounds(o); return lx >= lb.x && ly >= lb.y && lx <= lb.x + lb.w && ly <= lb.y + lb.h; }
   const p = Render.localPath(o);
   const s = M.scaleFactor(o.m);
-  if (o.fill && hitCtx.isPointInPath(p, lx, ly)) return true;
+  if (o.fill && hitCtx.isPointInPath(p, lx, ly, Render.fillRule(o))) return true;
   hitCtx.lineWidth = ((o.stroke ? o.sw : 0) + (2 * tol) / s);
   hitCtx.lineCap = "round"; hitCtx.lineJoin = "round";
   return hitCtx.isPointInStroke(p, lx, ly);
@@ -208,6 +225,8 @@ function lerpObj(a, b, t) {
       o.nodes = a.nodes.map((n, i) => { const m = b.nodes[i]; return { x: lerp(n.x, m.x, t), y: lerp(n.y, m.y, t), ix: lerp(n.ix, m.ix, t), iy: lerp(n.iy, m.iy, t), ox: lerp(n.ox, m.ox, t), oy: lerp(n.oy, m.oy, t) }; });
     }
     if (a.type === "brush" && a.pts.length === b.pts.length) o.pts = a.pts.map((v, i) => lerp(v, b.pts[i], t));
+    if (a.type === "rings" && a.polys.length === b.polys.length && a.polys.every((P, i) => P.length === b.polys[i].length && P.every((r, j) => r.length === b.polys[i][j].length)))
+      o.polys = a.polys.map((P, i) => P.map((r, j) => r.map((v, k) => lerp(v, b.polys[i][j][k], t))));
   }
   return o;
 }

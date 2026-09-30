@@ -64,6 +64,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .tool svg { width: 21px; height: 21px; }
 .tool:hover { background: var(--panel-2); }
 .tool.on { background: var(--accent); color: var(--accent-ink); }
+.tool.symbtn { margin-top: 6px; border-top: 1px solid var(--rule); border-radius: 0 0 6px 6px; }
+.tool.symbtn.active { color: var(--accent); background: var(--panel-2); box-shadow: inset 0 0 0 2px var(--accent); border-radius: 6px; }
 .swatches { position: relative; width: 38px; height: 40px; flex: 0 0 auto; margin-top: 6px; cursor: pointer; }
 .sw { position: absolute; width: 24px; height: 24px; border-radius: 4px; }
 .sw.fill { left: 2px; top: 2px; border: 1px solid var(--rule); z-index: 2; }
@@ -163,6 +165,7 @@ kbd { font-family: var(--font-mono); font-size: 11px; background: var(--panel-2)
   .work { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .toolbar { flex-direction: row; overflow-x: auto; overflow-y: hidden; }
   .swatches { margin-top: 0; margin-left: 6px; }
+  .tool.symbtn { margin-top: 0; margin-left: 6px; border-top: 0; border-left: 1px solid var(--rule); border-radius: 0 6px 6px 0; }
   .props { position: fixed; right: 16px; top: 60px; bottom: 16px; width: min(330px, calc(100% - 32px)); z-index: 30; box-shadow: 0 10px 40px rgba(0,0,0,.45); display: none; }
   body.props-open .props { display: block; }
   #propsClose { display: inline-block; }
@@ -259,6 +262,7 @@ kbd { font-family: var(--font-mono); font-size: 11px; background: var(--panel-2)
 
 <script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/webm-muxer@5.1.4/build/webm-muxer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/polygon-clipping@0.15.7/dist/polygon-clipping.umd.min.js"></script>
 <script>
 /*BUNDLE*/
 </script>
