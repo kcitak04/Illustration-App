@@ -1,0 +1,856 @@
+// ============================================================================
+// tools.js — the canvas view (zoom / pan / stylus input) and every drawing tool
+// ============================================================================
+const View = (App.View = {});
+const stage = () => $("stage");
+let vctx = null;
+let viewW = 0, viewH = 0, dpr = 1;
+let penSeen = false;
+
+View.init = function () {
+  vctx = stage().getContext("2d");
+  const ro = new ResizeObserver(() => View.resize());
+  ro.observe($("canvasWrap"));
+  View.resize(); View.fit();
+  bindInput();
+  requestAnimationFrame(loop);
+};
+View.resize = function () {
+  const wrap = $("canvasWrap"); dpr = window.devicePixelRatio || 1;
+  viewW = wrap.clientWidth; viewH = wrap.clientHeight;
+  stage().width = Math.round(viewW * dpr); stage().height = Math.round(viewH * dpr);
+  View.redraw();
+};
+View.fit = function () {
+  const d = App.doc, pad = 28;
+  const z = Math.min((viewW - pad * 2) / d.width, (viewH - pad * 2) / d.height);
+  App.state.zoom = Math.max(0.02, z);
+  App.state.panX = (viewW - d.width * App.state.zoom) / 2; App.state.panY = (viewH - d.height * App.state.zoom) / 2;
+  View.redraw(); App.emit("zoom");
+};
+View.zoomAt = function (factor, sx = viewW / 2, sy = viewH / 2) {
+  const s = App.state, nz = clamp(s.zoom * factor, 0.02, 32);
+  s.panX = sx - (sx - s.panX) * (nz / s.zoom); s.panY = sy - (sy - s.panY) * (nz / s.zoom); s.zoom = nz;
+  View.redraw(); App.emit("zoom");
+};
+View.actual = function () { View.zoomAt(1 / App.state.zoom); };
+const toDoc = (sx, sy) => [(sx - App.state.panX) / App.state.zoom, (sy - App.state.panY) / App.state.zoom];
+const toScreen = (x, y) => [x * App.state.zoom + App.state.panX, y * App.state.zoom + App.state.panY];
+const docLen = (px) => px / App.state.zoom;
+
+let needs = true, lastDirty = -1;
+View.redraw = () => { needs = true; };
+function loop() {
+  if (needs || lastDirty !== App.state.dirty) { needs = false; lastDirty = App.state.dirty; paint(); }
+  requestAnimationFrame(loop);
+}
+
+// cached layers under / over the active one while a stroke is in progress
+let strokeCache = null;
+function buildStrokeCache() {
+  const d = App.doc, f = App.state.frame, ai = App.state.layer;
+  const mk = () => { const c = document.createElement("canvas"); c.width = d.width; c.height = d.height; return c; };
+  const under = mk(), over = mk();
+  const ug = under.getContext("2d"), og = over.getContext("2d");
+  if (!d.transparent) { ug.fillStyle = d.background; ug.fillRect(0, 0, d.width, d.height); }
+  const saved = d.layers;
+  d.layers = saved.slice(0, ai); Render.frame(ug, f, { background: false });
+  d.layers = saved.slice(ai + 1); Render.frame(og, f, { background: false });
+  d.layers = saved;
+  strokeCache = { under, over };
+}
+
+const checker = (() => {
+  const c = document.createElement("canvas"); c.width = c.height = 16;
+  const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, 16, 16); g.fillStyle = "#d8d8d8"; g.fillRect(0, 0, 8, 8); g.fillRect(8, 8, 8, 8);
+  return c;
+})();
+
+function paint() {
+  const s = App.state, d = App.doc, g = vctx;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--pasteboard").trim() || "#2b2d33";
+  g.fillRect(0, 0, viewW, viewH);
+  g.save();
+  g.translate(s.panX, s.panY); g.scale(s.zoom, s.zoom);
+  g.shadowColor = "rgba(0,0,0,.35)"; g.shadowBlur = 18; g.fillStyle = "#fff"; g.fillRect(0, 0, d.width, d.height); g.shadowBlur = 0;
+  if (d.transparent) { g.save(); g.scale(1 / s.zoom, 1 / s.zoom); g.fillStyle = g.createPattern(checker, "repeat"); g.fillRect(0, 0, d.width * s.zoom, d.height * s.zoom); g.restore(); }
+  g.beginPath(); g.rect(0, 0, d.width, d.height); g.clip();
+  g.imageSmoothingQuality = "high";
+  const L = activeLayer();
+  if (strokeCache && L) {
+    g.drawImage(strokeCache.under, 0, 0);
+    drawActiveLayerLive(g, L);
+    g.drawImage(strokeCache.over, 0, 0);
+  } else {
+    Render.frame(g, s.frame);
+  }
+  if (!s.playing) Render.onion(g, s.frame);
+  g.restore();
+  // overlays in screen space
+  g.save();
+  Tools.current()?.overlay?.(g);
+  drawSelectionOverlay(g);
+  drawHoverCursor(g);
+  g.restore();
+}
+function drawActiveLayerLive(g, L) {
+  g.save(); g.globalAlpha = L.opacity; if (L.blend && L.blend !== "source-over") g.globalCompositeOperation = L.blend;
+  if (L.kind === "draw") {
+    const r = Render.cellRasterAt(L, App.state.frame); if (r) g.drawImage(r, 0, 0);
+    if (Paint.live) { g.save(); g.globalAlpha *= Paint.live.alpha; g.globalCompositeOperation = Paint.live.erase ? "destination-out" : "source-over"; g.drawImage(Paint.buffer, 0, 0); g.restore(); }
+    for (const o of Render.cellObjectsAt(L, App.state.frame)) Render.drawObj(g, o);
+  } else Media.draw(g, L, App.state.frame);
+  g.restore();
+}
+
+// ---------------------------------------------------------------- input routing
+let pointers = new Map(), gesture = null, spaceDown = false;
+function bindInput() {
+  const c = stage();
+  c.addEventListener("pointerdown", onDown);
+  c.addEventListener("pointermove", onMove);
+  c.addEventListener("pointerup", onUp);
+  c.addEventListener("pointercancel", onUp);
+  c.addEventListener("pointerleave", () => { hover = null; View.redraw(); });
+  c.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) View.zoomAt(Math.exp(-e.deltaY * 0.01), e.offsetX, e.offsetY);
+    else { App.state.panX -= e.deltaX; App.state.panY -= e.deltaY; View.redraw(); }
+  }, { passive: false });
+  c.addEventListener("dblclick", (e) => Tools.current()?.dbl?.(sample(e)));
+  c.addEventListener("contextmenu", (e) => e.preventDefault());
+  window.addEventListener("keydown", (e) => { if (e.code === "Space" && !isTyping(e)) { spaceDown = true; } });
+  window.addEventListener("keyup", (e) => { if (e.code === "Space") spaceDown = false; });
+}
+const isTyping = (e) => e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) && e.target.type !== "range";
+function sample(e) {
+  const r = stage().getBoundingClientRect();
+  const sx = e.clientX - r.left, sy = e.clientY - r.top;
+  const [x, y] = toDoc(sx, sy);
+  let p = e.pointerType === "pen" ? (e.pressure || 0.5) : e.pointerType === "touch" ? 0.7 : 0.75;
+  if (e.pointerType === "mouse" && e.buttons === 0) p = 0.75;
+  return { x, y, sx, sy, p, shift: e.shiftKey, alt: e.altKey, meta: e.ctrlKey || e.metaKey, type: e.pointerType, button: e.button, barrel: (e.buttons & 2) !== 0 && e.pointerType === "pen", eraserEnd: (e.buttons & 32) !== 0 };
+}
+
+function onDown(e) {
+  stage().setPointerCapture(e.pointerId);
+  if (e.pointerType === "pen") penSeen = true;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
+  const touches = [...pointers.values()].filter((p) => p.type === "touch");
+  // two fingers: pinch-zoom / pan (cancels a finger stroke that just started)
+  if (touches.length >= 2) {
+    if (gesture && gesture.kind === "tool") { Tools.current()?.cancel?.(); strokeCache = null; }
+    gesture = { kind: "pinch", start: pinchInfo(), panX: App.state.panX, panY: App.state.panY, zoom: App.state.zoom, t0: performance.now(), moved: false };
+    return;
+  }
+  if (e.button === 1 || spaceDown || App.state.tool === "hand" || (e.pointerType === "touch" && penSeen && App.settings.palm)) {
+    gesture = { kind: "pan", x: e.clientX, y: e.clientY, panX: App.state.panX, panY: App.state.panY };
+    return;
+  }
+  if (App.state.playing) App.Player.stop();
+  const smp = sample(e);
+  let tool = Tools.current();
+  if (smp.eraserEnd) tool = Tools.get("eraser");
+  else if (smp.barrel || e.button === 2) tool = Tools.get("eyedropper");
+  gesture = { kind: "tool", tool, id: e.pointerId };
+  tool?.down?.(smp);
+}
+function onMove(e) {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
+  const smp = sample(e);
+  hover = e.pointerType !== "touch" ? smp : null;
+  if (!gesture) { Tools.current()?.hover?.(smp); View.redraw(); return; }
+  if (gesture.kind === "pinch") {
+    const now = pinchInfo(), st = gesture.start;
+    if (!now || !st) return;
+    const z = clamp(gesture.zoom * (now.d / st.d), 0.02, 32);
+    const r = stage().getBoundingClientRect();
+    const cx = st.cx - r.left, cy = st.cy - r.top;
+    App.state.zoom = z;
+    App.state.panX = cx - (cx - gesture.panX) * (z / gesture.zoom) + (now.cx - st.cx);
+    App.state.panY = cy - (cy - gesture.panY) * (z / gesture.zoom) + (now.cy - st.cy);
+    if (Math.abs(now.d - st.d) > 10 || Math.hypot(now.cx - st.cx, now.cy - st.cy) > 10) gesture.moved = true;
+    View.redraw(); App.emit("zoom"); return;
+  }
+  if (gesture.kind === "pan") {
+    App.state.panX = gesture.panX + e.clientX - gesture.x; App.state.panY = gesture.panY + e.clientY - gesture.y; View.redraw(); return;
+  }
+  if (gesture.kind === "tool" && e.pointerId === gesture.id) {
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ce of evs.length ? evs : [e]) gesture.tool?.move?.(sample(ce));
+    View.redraw();
+  }
+}
+function onUp(e) {
+  pointers.delete(e.pointerId);
+  if (!gesture) return;
+  if (gesture.kind === "pinch") {
+    if (pointers.size === 0) {
+      // quick two-finger tap = undo, three-finger tap = redo
+      if (!gesture.moved && performance.now() - gesture.t0 < 280) History.doUndo();
+      gesture = null;
+    }
+    return;
+  }
+  if (gesture.kind === "tool" && e.pointerId === gesture.id) gesture.tool?.up?.(sample(e));
+  gesture = null;
+  strokeCache = null;
+  View.redraw();
+}
+function pinchInfo() {
+  const t = [...pointers.values()].filter((p) => p.type === "touch");
+  if (t.length < 2) return null;
+  return { cx: (t[0].x + t[1].x) / 2, cy: (t[0].y + t[1].y) / 2, d: Math.hypot(t[0].x - t[1].x, t[0].y - t[1].y) || 1 };
+}
+
+let hover = null;
+function drawHoverCursor(g) {
+  if (!hover) return;
+  const t = App.state.tool;
+  const r = t === "paint" ? App.style.paint.size / 2 : t === "eraser" ? App.style.eraser.size / 2 : t === "vbrush" ? App.style.brush.size / 2 : 0;
+  if (!r) return;
+  const [sx, sy] = toScreen(hover.x, hover.y);
+  g.lineWidth = 1; g.strokeStyle = "rgba(0,0,0,.7)"; g.beginPath(); g.arc(sx, sy, r * App.state.zoom + 1, 0, 7); g.stroke();
+  g.strokeStyle = "rgba(255,255,255,.9)"; g.beginPath(); g.arc(sx, sy, r * App.state.zoom, 0, 7); g.stroke();
+}
+
+// ---------------------------------------------------------------- helpers shared by tools
+function currentObjects() { const L = activeLayer(); return L && L.kind === "draw" ? Render.cellObjectsAt(L, App.state.frame) : []; }
+function selectedObjects() { const ids = new Set(App.state.selection); return currentObjects().filter((o) => ids.has(o.id)); }
+function layerEditable(msg = true) {
+  const L = activeLayer();
+  if (!L) return false;
+  if (L.kind !== "draw") { if (msg) toast("Select a drawing layer to draw on (this one holds imported media)."); return false; }
+  if (L.locked) { if (msg) toast("This layer is locked."); return false; }
+  if (!L.visible) { if (msg) toast("This layer is hidden."); return false; }
+  return true;
+}
+function styleProps() {
+  const s = App.style;
+  return { fill: s.grad ? { ...s.grad } : s.fill, stroke: s.strokeOn ? s.stroke : null, sw: s.sw, opacity: s.opacity, blend: s.blend };
+}
+function selBounds(objs) {
+  if (!objs.length) return null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const o of objs) { const b = Render.docBounds(o); x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h); }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+App.selBounds = () => selBounds(selectedObjects());
+function hitTop(x, y) {
+  const tol = docLen(8), objs = currentObjects();
+  for (let i = objs.length - 1; i >= 0; i--) if (Render.hit(objs[i], x, y, tol)) return objs[i];
+  return null;
+}
+/** Applies a matrix to the selected objects in the editable key (auto-key aware). */
+function transformSelection(delta, base) {
+  const cell = editableCell(); if (!cell) return;
+  const ids = new Set(App.state.selection);
+  for (const o of cell.objects) if (ids.has(o.id)) o.m = M.mul(delta, base ? base.get(o.id) : o.m);
+  changed("transform");
+}
+App.transformSelection = (delta) => { History.push(); transformSelection(delta); };
+
+function handlePoints(b) {
+  const rot = docLen(26);
+  return [[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h], [b.x + b.w / 2, b.y], [b.x + b.w, b.y + b.h / 2], [b.x + b.w / 2, b.y + b.h], [b.x, b.y + b.h / 2], [b.x + b.w / 2, b.y - rot]];
+}
+function drawSelectionOverlay(g) {
+  const objs = selectedObjects(); if (!objs.length || App.state.playing) return;
+  const acc = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#2f80ff";
+  g.strokeStyle = acc; g.lineWidth = 1;
+  // object outlines
+  for (const o of objs) {
+    g.save(); g.translate(App.state.panX, App.state.panY); g.scale(App.state.zoom, App.state.zoom); g.transform(...o.m);
+    g.lineWidth = 1 / (App.state.zoom * M.scaleFactor(o.m)); g.strokeStyle = acc;
+    if (o.type === "text" || o.type === "image") { const b = Render.localBounds(o); g.strokeRect(b.x, b.y, b.w, b.h); }
+    else g.stroke(Render.localPath(o));
+    g.restore();
+  }
+  if (App.state.tool !== "select") return;
+  const b = selBounds(objs);
+  const [x0, y0] = toScreen(b.x, b.y), [x1, y1] = toScreen(b.x + b.w, b.y + b.h);
+  g.setLineDash([4, 3]); g.strokeRect(x0, y0, x1 - x0, y1 - y0); g.setLineDash([]);
+  const hp = handlePoints(b).map(([x, y]) => toScreen(x, y));
+  g.beginPath(); g.moveTo(hp[4][0], hp[4][1]); g.lineTo(hp[8][0], hp[8][1]); g.stroke();
+  hp.forEach(([x, y], i) => {
+    g.fillStyle = "#fff"; g.strokeStyle = acc;
+    if (i === 8) { g.beginPath(); g.arc(x, y, 6, 0, 7); g.fill(); g.stroke(); }
+    else { g.fillRect(x - 5, y - 5, 10, 10); g.strokeRect(x - 5, y - 5, 10, 10); }
+  });
+}
+
+// ---------------------------------------------------------------- the tools
+const Tools = (App.Tools = {});
+const registry = {};
+Tools.get = (n) => registry[n];
+Tools.current = () => registry[App.state.tool];
+function tool(name, def) { registry[name] = def; }
+
+// ---- Select / transform
+tool("select", (() => {
+  let mode = null, start = null, base = null, bounds = null, handle = -1, pushed = false, marquee = null;
+  return {
+    down(p) {
+      start = p; pushed = false; marquee = null; mode = null;
+      const b = App.selBounds();
+      if (b) {
+        const hp = handlePoints(b);
+        for (let i = hp.length - 1; i >= 0; i--) if (Math.hypot(hp[i][0] - p.x, hp[i][1] - p.y) < docLen(12)) { handle = i; mode = i === 8 ? "rotate" : "scale"; break; }
+      }
+      if (!mode) {
+        let hit = hitTop(p.x, p.y);
+        if (!hit) {
+          // clicking another layer's artwork switches to that layer
+          const d = App.doc;
+          for (let i = d.layers.length - 1; i >= 0 && !hit; i--) {
+            const L = d.layers[i]; if (i === App.state.layer || L.kind !== "draw" || !L.visible || L.locked) continue;
+            const objs = Render.cellObjectsAt(L, App.state.frame);
+            for (let j = objs.length - 1; j >= 0; j--) if (Render.hit(objs[j], p.x, p.y, docLen(8))) { App.state.layer = i; hit = objs[j]; App.emit("layers"); break; }
+          }
+        }
+        if (hit) {
+          if (p.shift) { const s = new Set(App.state.selection); s.has(hit.id) ? s.delete(hit.id) : s.add(hit.id); App.state.selection = [...s]; }
+          else if (!App.state.selection.includes(hit.id)) App.state.selection = [hit.id];
+          mode = "move";
+        } else if (b && p.x >= b.x && p.y >= b.y && p.x <= b.x + b.w && p.y <= b.y + b.h) mode = "move";
+        else { if (!p.shift) App.state.selection = []; mode = "marquee"; marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }; }
+        App.emit("selection");
+      }
+      bounds = App.selBounds();
+      base = new Map(selectedObjects().map((o) => [o.id, o.m.slice()]));
+    },
+    move(p) {
+      if (!mode) return;
+      if (mode === "marquee") { marquee.x1 = p.x; marquee.y1 = p.y; return; }
+      if (!layerEditable(false)) return;
+      const dx = p.x - start.x, dy = p.y - start.y;
+      if (!pushed) { if (Math.hypot(dx, dy) < docLen(2)) return; History.push(); pushed = true; }
+      const b = bounds; let delta;
+      if (mode === "move") {
+        let mx = dx, my = dy;
+        if (p.shift) { if (Math.abs(dx) > Math.abs(dy)) my = 0; else mx = 0; }
+        // snap to artboard centre
+        const d = App.doc, tol = docLen(6), cx = b.x + b.w / 2 + mx, cy = b.y + b.h / 2 + my;
+        if (Math.abs(cx - d.width / 2) < tol) mx += d.width / 2 - cx;
+        if (Math.abs(cy - d.height / 2) < tol) my += d.height / 2 - cy;
+        delta = M.translate(mx, my);
+      } else if (mode === "rotate") {
+        const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+        let a = Math.atan2(p.y - cy, p.x - cx) - Math.atan2(start.y - cy, start.x - cx);
+        if (p.shift) a = Math.round(a / (Math.PI / 12)) * (Math.PI / 12);
+        delta = M.rotate(a, cx, cy);
+      } else {
+        const i = handle;
+        const ax = [0, 3, 7].includes(i) ? b.x + b.w : [1, 2, 5].includes(i) ? b.x : b.x + b.w / 2;
+        const ay = [0, 1, 4].includes(i) ? b.y + b.h : [2, 3, 6].includes(i) ? b.y : b.y + b.h / 2;
+        const hx = [0, 3, 7].includes(i) ? b.x : [1, 2, 5].includes(i) ? b.x + b.w : b.x + b.w / 2;
+        const hy = [0, 1, 4].includes(i) ? b.y : [2, 3, 6].includes(i) ? b.y + b.h : b.y + b.h / 2;
+        let sx = i === 4 || i === 6 ? 1 : (p.x - (p.alt ? b.x + b.w / 2 : ax)) / ((hx - (p.alt ? b.x + b.w / 2 : ax)) || 1e-6);
+        let sy = i === 5 || i === 7 ? 1 : (p.y - (p.alt ? b.y + b.h / 2 : ay)) / ((hy - (p.alt ? b.y + b.h / 2 : ay)) || 1e-6);
+        if (i < 4 && (p.shift || App.style.keepRatio)) { const k = Math.abs(sx) > Math.abs(sy) ? sx : sy; sx = k; sy = k; }
+        delta = M.scale(sx || 1e-3, sy || 1e-3, p.alt ? b.x + b.w / 2 : ax, p.alt ? b.y + b.h / 2 : ay);
+      }
+      transformSelection(delta, base);
+    },
+    up() {
+      if (mode === "marquee" && marquee) {
+        const x0 = Math.min(marquee.x0, marquee.x1), x1 = Math.max(marquee.x0, marquee.x1), y0 = Math.min(marquee.y0, marquee.y1), y1 = Math.max(marquee.y0, marquee.y1);
+        if (x1 - x0 > docLen(3) || y1 - y0 > docLen(3)) {
+          const ids = currentObjects().filter((o) => { const b = Render.docBounds(o); return b.x < x1 && b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0; }).map((o) => o.id);
+          App.state.selection = [...new Set([...App.state.selection, ...ids])];
+          App.emit("selection");
+        }
+      }
+      mode = null; marquee = null;
+    },
+    dbl(p) { const hit = hitTop(p.x, p.y); if (hit && hit.type === "text") TextTool.edit(hit); },
+    overlay(g) {
+      if (!marquee) return;
+      const [a, b] = toScreen(marquee.x0, marquee.y0), [c, d] = toScreen(marquee.x1, marquee.y1);
+      g.strokeStyle = "#2f80ff"; g.setLineDash([5, 4]); g.strokeRect(a, b, c - a, d - b); g.setLineDash([]);
+      g.fillStyle = "rgba(47,128,255,.08)"; g.fillRect(a, b, c - a, d - b);
+    }
+  };
+})());
+
+// ---- Direct selection: edit anchor points and handles
+function toPathObj(o) {
+  if (o.type === "path") return o;
+  let nodes;
+  const N = (x, y) => ({ x, y, ix: x, iy: y, ox: x, oy: y });
+  if (o.type === "rect") nodes = [N(0, 0), N(o.w, 0), N(o.w, o.h), N(0, o.h)];
+  else if (o.type === "ellipse") {
+    const k = 0.5523, rx = o.w / 2, ry = o.h / 2;
+    nodes = [
+      { x: rx, y: 0, ix: rx - rx * k, iy: 0, ox: rx + rx * k, oy: 0 }, { x: o.w, y: ry, ix: o.w, iy: ry - ry * k, ox: o.w, oy: ry + ry * k },
+      { x: rx, y: o.h, ix: rx + rx * k, iy: o.h, ox: rx - rx * k, oy: o.h }, { x: 0, y: ry, ix: 0, iy: ry + ry * k, ox: 0, oy: ry - ry * k }];
+  } else if (o.type === "poly") {
+    nodes = []; const n = o.star ? o.n * 2 : o.n;
+    for (let i = 0; i < n; i++) { const r = o.star && i % 2 ? o.inner : 1, a = (Math.PI * 2 * i) / n - Math.PI / 2; nodes.push(N(o.w / 2 + Math.cos(a) * r * o.w / 2, o.h / 2 + Math.sin(a) * r * o.h / 2)); }
+  } else return null;
+  const { w, h, r, n, star, inner, ...rest } = o;
+  return { ...rest, type: "path", nodes, closed: true };
+}
+App.toPathObj = toPathObj;
+tool("direct", (() => {
+  let drag = null, pushed = false;
+  const target = () => { const s = selectedObjects(); return s.length === 1 ? s[0] : null; };
+  return {
+    activeNode: -1,
+    down(p) {
+      pushed = false; drag = null;
+      const o = target();
+      if (o && (o.type === "path" || ["rect", "ellipse", "poly"].includes(o.type))) {
+        const po = toPathObj(o), tol = docLen(10);
+        const at = (x, y) => M.apply(o.m, x, y);
+        const n = po.nodes[this.activeNode];
+        if (n) {
+          const [ix, iy] = at(n.ix, n.iy), [ox, oy] = at(n.ox, n.oy);
+          if (Math.hypot(ox - p.x, oy - p.y) < tol && (n.ox !== n.x || n.oy !== n.y)) drag = { kind: "out" };
+          else if (Math.hypot(ix - p.x, iy - p.y) < tol && (n.ix !== n.x || n.iy !== n.y)) drag = { kind: "in" };
+        }
+        if (!drag) for (let i = po.nodes.length - 1; i >= 0; i--) { const [x, y] = at(po.nodes[i].x, po.nodes[i].y); if (Math.hypot(x - p.x, y - p.y) < tol) { this.activeNode = i; drag = { kind: "node" }; break; } }
+        if (drag) { drag.start = p; drag.id = o.id; App.emit("selection"); return; }
+      }
+      const hit = hitTop(p.x, p.y);
+      App.state.selection = hit ? [hit.id] : []; this.activeNode = -1; App.emit("selection");
+    },
+    move(p) {
+      if (!drag || !layerEditable(false)) return;
+      if (!pushed) { if (Math.hypot(p.x - drag.start.x, p.y - drag.start.y) < docLen(2)) return; History.push(); pushed = true; }
+      const cell = editableCell(); const idx = cell.objects.findIndex((x) => x.id === drag.id); if (idx < 0) return;
+      let o = cell.objects[idx];
+      if (o.type !== "path") { o = toPathObj(o); cell.objects[idx] = o; }
+      const n = o.nodes[this.activeNode]; if (!n) return;
+      const [lx, ly] = M.apply(M.inv(o.m), p.x, p.y);
+      if (drag.kind === "node") { const dx = lx - n.x, dy = ly - n.y; n.x += dx; n.y += dy; n.ix += dx; n.iy += dy; n.ox += dx; n.oy += dy; }
+      else if (drag.kind === "out") { n.ox = lx; n.oy = ly; if (n.smooth !== false) { n.ix = 2 * n.x - lx; n.iy = 2 * n.y - ly; } }
+      else { n.ix = lx; n.iy = ly; if (n.smooth !== false) { n.ox = 2 * n.x - lx; n.oy = 2 * n.y - ly; } }
+      changed("nodes");
+    },
+    up() { drag = null; },
+    dbl() {
+      const o = target(); if (!o || o.type !== "path") return;
+      const n = o.nodes[this.activeNode]; if (!n) return;
+      History.push(); const cell = editableCell(); const po = cell.objects.find((x) => x.id === o.id); const m = po.nodes[this.activeNode];
+      if (m.ix !== m.x || m.ox !== m.x || m.iy !== m.y || m.oy !== m.y) { m.ix = m.ox = m.x; m.iy = m.oy = m.y; m.smooth = false; }
+      else {
+        const N = po.nodes, i = this.activeNode, a = N[(i - 1 + N.length) % N.length], b = N[(i + 1) % N.length];
+        const tx = (b.x - a.x) / 6, ty = (b.y - a.y) / 6; m.ix = m.x - tx; m.iy = m.y - ty; m.ox = m.x + tx; m.oy = m.y + ty; m.smooth = true;
+      }
+      changed("nodes");
+    },
+    overlay(g) {
+      const o = target(); if (!o) return;
+      const po = toPathObj(o); if (!po) return;
+      const acc = "#2f80ff";
+      po.nodes.forEach((n, i) => {
+        const [x, y] = toScreen(...M.apply(o.m, n.x, n.y));
+        if (i === this.activeNode) {
+          for (const [hx, hy] of [[n.ix, n.iy], [n.ox, n.oy]]) {
+            if (hx === n.x && hy === n.y) continue;
+            const [sx, sy] = toScreen(...M.apply(o.m, hx, hy));
+            g.strokeStyle = acc; g.beginPath(); g.moveTo(x, y); g.lineTo(sx, sy); g.stroke();
+            g.fillStyle = "#fff"; g.beginPath(); g.arc(sx, sy, 4, 0, 7); g.fill(); g.stroke();
+          }
+        }
+        g.fillStyle = i === this.activeNode ? acc : "#fff"; g.strokeStyle = acc;
+        g.fillRect(x - 4, y - 4, 8, 8); g.strokeRect(x - 4, y - 4, 8, 8);
+      });
+    }
+  };
+})());
+
+// ---- Pen (Bézier)
+tool("pen", (() => {
+  let obj = null, node = null, dragging = false;
+  const finish = () => {
+    if (!obj) return;
+    const cell = editableCell();
+    if (obj.nodes.length < 2) cell.objects = cell.objects.filter((o) => o.id !== obj.id);
+    else App.state.selection = [obj.id];
+    obj = null; node = null; changed("pen"); App.emit("selection");
+  };
+  return {
+    finish,
+    down(p) {
+      if (!layerEditable()) return;
+      if (obj && obj.nodes.length > 1) {
+        const [fx, fy] = obj.nodes[0] ? [obj.nodes[0].x, obj.nodes[0].y] : [0, 0];
+        if (Math.hypot(fx - p.x, fy - p.y) < docLen(10)) { obj.closed = true; changed("pen"); finish(); return; }
+      }
+      if (!obj) {
+        History.push();
+        const cell = editableCell();
+        const st = styleProps();
+        obj = { id: uid(), type: "path", nodes: [], closed: false, m: M.id(), ...st };
+        if (!obj.stroke && !App.style.penFill) { obj.stroke = App.style.stroke; }
+        if (!App.style.penFill) obj.fill = null;
+        cell.objects.push(obj);
+      } else {
+        const cell = editableCell(); obj = cell.objects.find((o) => o.id === obj.id) || obj;
+      }
+      node = { x: p.x, y: p.y, ix: p.x, iy: p.y, ox: p.x, oy: p.y };
+      obj.nodes.push(node); dragging = true; changed("pen");
+    },
+    move(p) {
+      if (!dragging || !node) return;
+      if (Math.hypot(p.x - node.x, p.y - node.y) > docLen(3)) { node.ox = p.x; node.oy = p.y; node.ix = 2 * node.x - p.x; node.iy = 2 * node.y - p.y; changed("pen"); }
+    },
+    up() { dragging = false; },
+    dbl() { finish(); },
+    cancel() { dragging = false; },
+    overlay(g) {
+      if (!obj || !hover || !obj.nodes.length) return;
+      const last = obj.nodes[obj.nodes.length - 1];
+      const [a, b] = toScreen(last.x, last.y), [c, d] = toScreen(last.ox, last.oy), [e, f] = toScreen(hover.x, hover.y);
+      g.strokeStyle = "#2f80ff"; g.beginPath(); g.moveTo(a, b); g.bezierCurveTo(c, d, e, f, e, f); g.stroke();
+      for (const n of obj.nodes) { const [x, y] = toScreen(n.x, n.y); g.fillStyle = "#fff"; g.fillRect(x - 3.5, y - 3.5, 7, 7); g.strokeRect(x - 3.5, y - 3.5, 7, 7); }
+    }
+  };
+})());
+
+// ---- Pencil: freehand, simplified into a smooth editable path
+function rdp(pts, eps) {
+  if (pts.length < 3) return pts;
+  const a = pts[0], b = pts[pts.length - 1], len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1e-9;
+  let md = 0, idx = 0;
+  for (let i = 1; i < pts.length - 1; i++) { const p = pts[i]; const dd = Math.abs((b[0] - a[0]) * (a[1] - p[1]) - (a[0] - p[0]) * (b[1] - a[1])) / len; if (dd > md) { md = dd; idx = i; } }
+  if (md > eps) return rdp(pts.slice(0, idx + 1), eps).slice(0, -1).concat(rdp(pts.slice(idx), eps));
+  return [a, b];
+}
+tool("pencil", (() => {
+  let pts = null;
+  return {
+    down(p) { if (!layerEditable()) return; pts = [[p.x, p.y]]; },
+    move(p) { if (pts) { const l = pts[pts.length - 1]; if (Math.hypot(p.x - l[0], p.y - l[1]) > docLen(1.5)) pts.push([p.x, p.y]); } },
+    up() {
+      if (!pts || pts.length < 3) { pts = null; return; }
+      let s = rdp(pts, docLen(2.2));
+      const closed = s.length > 3 && Math.hypot(s[0][0] - s[s.length - 1][0], s[0][1] - s[s.length - 1][1]) < docLen(12);
+      if (closed) s = s.slice(0, -1);
+      const n = s.length;
+      const nodes = s.map((q, i) => {
+        const prev = s[i - 1] || (closed ? s[n - 1] : null), next = s[i + 1] || (closed ? s[0] : null);
+        if (!prev || !next) return { x: q[0], y: q[1], ix: q[0], iy: q[1], ox: q[0], oy: q[1] };
+        const tx = (next[0] - prev[0]) / 6, ty = (next[1] - prev[1]) / 6;
+        return { x: q[0], y: q[1], ix: q[0] - tx, iy: q[1] - ty, ox: q[0] + tx, oy: q[1] + ty, smooth: true };
+      });
+      History.push();
+      const st = styleProps();
+      const o = { id: uid(), type: "path", nodes, closed, m: M.id(), ...st, stroke: App.style.strokeOn ? App.style.stroke : (typeof App.style.fill === "string" ? App.style.fill : "#111"), fill: closed && App.style.pencilFill ? st.fill : null };
+      editableCell().objects.push(o);
+      pts = null; changed("pencil");
+    },
+    cancel() { pts = null; },
+    overlay(g) {
+      if (!pts) return;
+      g.strokeStyle = App.style.strokeOn ? App.style.stroke : (typeof App.style.fill === "string" ? App.style.fill : "#111");
+      g.lineWidth = Math.max(1, App.style.sw * App.state.zoom); g.lineCap = "round"; g.lineJoin = "round";
+      g.beginPath(); pts.forEach(([x, y], i) => { const [a, b] = toScreen(x, y); i ? g.lineTo(a, b) : g.moveTo(a, b); }); g.stroke();
+    }
+  };
+})());
+
+// ---- Vector brush: pressure-sensitive filled strokes (stay editable & tweenable)
+tool("vbrush", (() => {
+  let obj = null, sm = null;
+  return {
+    down(p) {
+      if (!layerEditable()) return;
+      History.push();
+      const b = App.style.brush;
+      obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
+      sm = { x: p.x, y: p.y, p: p.p };
+      editableCell().objects.push(obj); changed("brush");
+    },
+    move(p) {
+      if (!obj) return;
+      const k = App.style.brush.smooth * 0.9;
+      sm.x = sm.x * k + p.x * (1 - k); sm.y = sm.y * k + p.y * (1 - k); sm.p = sm.p * 0.5 + p.p * 0.5;
+      const n = obj.pts.length;
+      if (Math.hypot(sm.x - obj.pts[n - 3], sm.y - obj.pts[n - 2]) < Math.max(docLen(1), obj.size * 0.05)) return;
+      obj.pts.push(sm.x, sm.y, sm.p);
+      const cell = editableCell(); const live = cell.objects.find((o) => o.id === obj.id); if (live) live.pts = obj.pts;
+      changed("brush");
+    },
+    up() { obj = null; },
+    cancel() { if (obj) { History.doUndo(); obj = null; } }
+  };
+})());
+
+// ---- Shapes
+function shapeTool(kind) {
+  let obj = null, start = null;
+  return {
+    down(p) {
+      if (!layerEditable()) return;
+      start = p; obj = null;
+    },
+    move(p) {
+      if (!start) return;
+      let dx = p.x - start.x, dy = p.y - start.y;
+      if (!obj && Math.hypot(dx, dy) < docLen(4)) return;
+      if (!obj) {
+        History.push();
+        const st = styleProps(), sh = App.style.shape;
+        obj = { id: uid(), type: kind === "line" ? "path" : kind, m: M.id(), ...st };
+        if (kind === "rect") obj.r = sh.radius;
+        if (kind === "poly") { obj.n = sh.points; obj.star = sh.star; obj.inner = sh.inner; }
+        if (kind === "line") { obj.nodes = []; obj.closed = false; obj.fill = null; obj.stroke = App.style.strokeOn ? App.style.stroke : (typeof App.style.fill === "string" ? App.style.fill : "#111"); obj.sw = Math.max(1, App.style.sw); }
+        editableCell().objects.push(obj);
+      }
+      const live = editableCell().objects.find((o) => o.id === obj.id) || obj;
+      if (kind === "line") {
+        let ex = p.x, ey = p.y;
+        if (p.shift || App.style.shape.constrain) { const a = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4), l = Math.hypot(dx, dy); ex = start.x + Math.cos(a) * l; ey = start.y + Math.sin(a) * l; }
+        live.nodes = [{ x: start.x, y: start.y, ix: start.x, iy: start.y, ox: start.x, oy: start.y }, { x: ex, y: ey, ix: ex, iy: ey, ox: ex, oy: ey }];
+      } else {
+        if (p.shift || App.style.shape.constrain) { const m = Math.max(Math.abs(dx), Math.abs(dy)); dx = Math.sign(dx || 1) * m; dy = Math.sign(dy || 1) * m; }
+        let x0 = Math.min(start.x, start.x + dx), y0 = Math.min(start.y, start.y + dy), w = Math.abs(dx), h = Math.abs(dy);
+        if (p.alt) { x0 = start.x - w; y0 = start.y - h; w *= 2; h *= 2; }
+        live.w = Math.max(1, w); live.h = Math.max(1, h); live.m = M.translate(x0, y0);
+      }
+      changed("shape");
+    },
+    up() { if (obj) { App.state.selection = [obj.id]; App.emit("selection"); } obj = null; start = null; },
+    cancel() { if (obj) History.doUndo(); obj = null; start = null; }
+  };
+}
+tool("rect", shapeTool("rect"));
+tool("ellipse", shapeTool("ellipse"));
+tool("poly", shapeTool("poly"));
+tool("line", shapeTool("line"));
+
+// ---- Text (typed into an overlay box: the viewer blocks prompt dialogs)
+const TextTool = (App.TextTool = {
+  open(x, y, existing) {
+    const box = $("textEditor"), ta = $("textInput");
+    const [sx, sy] = existing ? toScreen(...M.apply(existing.m, 0, 0)) : toScreen(x, y);
+    box.style.left = Math.max(4, Math.min(viewW - 260, sx)) + "px"; box.style.top = Math.max(4, Math.min(viewH - 120, sy)) + "px";
+    box.hidden = false; ta.value = existing ? existing.text : ""; ta.focus();
+    this.pending = { x, y, existing };
+  },
+  edit(o) { this.open(0, 0, o); },
+  commit() {
+    const box = $("textEditor"), ta = $("textInput"), p = this.pending; box.hidden = true; this.pending = null;
+    if (!p) return;
+    const text = ta.value.replace(/\s+$/, "");
+    if (!text) return;
+    History.push();
+    const cell = editableCell(); if (!cell) return;
+    if (p.existing) { const o = cell.objects.find((x) => x.id === p.existing.id); if (o) o.text = text; App.state.selection = [p.existing.id]; }
+    else {
+      const t = App.style.text, st = styleProps();
+      const o = { id: uid(), type: "text", text, font: t.font, size: t.size, weight: t.weight, italic: t.italic, align: t.align, m: M.translate(p.x, p.y), ...st, fill: st.fill || "#111" };
+      if (!o.stroke) o.sw = 0;
+      cell.objects.push(o); App.state.selection = [o.id];
+    }
+    changed("text"); App.emit("selection");
+  },
+  cancel() { $("textEditor").hidden = true; this.pending = null; }
+});
+tool("text", {
+  down(p) {
+    if (!layerEditable()) return;
+    const hit = hitTop(p.x, p.y);
+    if (hit && hit.type === "text") TextTool.edit(hit); else TextTool.open(p.x, p.y, null);
+  }
+});
+
+// ---- Paint brush (pixels) & eraser
+const Paint = (App.Paint = { buffer: document.createElement("canvas"), live: null });
+const stampCache = new Map();
+function stamp(color, hardness) {
+  const key = color + "|" + Math.round(hardness * 20);
+  let c = stampCache.get(key); if (c) return c;
+  c = document.createElement("canvas"); c.width = c.height = 128;
+  const g = c.getContext("2d"), grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  const [r, gg, b] = Color.parse(color);
+  grd.addColorStop(0, Color.str(r, gg, b, 1)); grd.addColorStop(clamp(hardness, 0, 0.98), Color.str(r, gg, b, 1)); grd.addColorStop(1, Color.str(r, gg, b, 0));
+  g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+  if (stampCache.size > 40) stampCache.clear();
+  stampCache.set(key, c); return c;
+}
+function paintTool(erase) {
+  let last = null, cell = null, leftover = 0;
+  const cfg = () => (erase ? { size: App.style.eraser.size, hardness: 0.8, opacity: 1, flow: 1, pressureSize: true, pressureOpacity: false, color: "#000" } : App.style.paint);
+  const dab = (g, x, y, p) => {
+    const c = cfg(); const size = Math.max(0.5, c.size * (c.pressureSize ? 0.15 + 0.85 * p : 1));
+    g.globalAlpha = clamp(c.flow * (c.pressureOpacity ? p : 1), 0.01, 1);
+    g.drawImage(stamp(erase ? "#000" : c.color, c.hardness), x - size / 2, y - size / 2, size, size);
+  };
+  return {
+    down(p) {
+      if (erase && App.style.eraser.mode === "objects") { this.eraseObjects(p, true); return; }
+      if (!layerEditable()) return;
+      History.push();
+      cell = editableCell();
+      rasterForPaint(cell);
+      buildStrokeCache();
+      const d = App.doc, b = Paint.buffer;
+      if (b.width !== d.width || b.height !== d.height) { b.width = d.width; b.height = d.height; }
+      const g = b.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, d.width, d.height);
+      Paint.live = { alpha: cfg().opacity, erase };
+      last = p; leftover = 0; dab(g, p.x, p.y, p.p); changed("paint");
+    },
+    move(p) {
+      if (erase && App.style.eraser.mode === "objects") { if (this._erasing) this.eraseObjects(p, false); return; }
+      if (!last || !cell) return;
+      const g = Paint.buffer.getContext("2d");
+      const dist = Math.hypot(p.x - last.x, p.y - last.y);
+      const step = Math.max(0.5, cfg().size * 0.08);
+      let t = leftover;
+      while (t < dist) { const k = t / dist; dab(g, lerp(last.x, p.x, k), lerp(last.y, p.y, k), lerp(last.p, p.p, k)); t += step; }
+      leftover = t - dist; last = p; changed("paint");
+    },
+    up() {
+      this._erasing = false;
+      if (!cell || !Paint.live) { cell = null; return; }
+      const g = cell.raster.getContext("2d");
+      g.save(); g.globalAlpha = Paint.live.alpha; g.globalCompositeOperation = erase ? "destination-out" : "source-over";
+      g.drawImage(Paint.buffer, 0, 0); g.restore();
+      Paint.live = null; cell = null; last = null; changed("paint");
+    },
+    cancel() { if (cell) { Paint.live = null; cell = null; History.doUndo(); } },
+    eraseObjects(p, first) {
+      if (!layerEditable(first)) return;
+      const tol = Math.max(App.style.eraser.size / 2, docLen(4));
+      const hits = currentObjects().filter((o) => Render.hit(o, p.x, p.y, tol)).map((o) => o.id);
+      if (first) this._erasing = true;
+      if (!hits.length) return;
+      if (!this._pushed || first) { History.push(); this._pushed = true; }
+      const c = editableCell(); c.objects = c.objects.filter((o) => !hits.includes(o.id));
+      App.state.selection = App.state.selection.filter((id) => !hits.includes(id));
+      changed("erase");
+    }
+  };
+}
+tool("paint", paintTool(false));
+tool("eraser", paintTool(true));
+
+// ---- Fill bucket: fills a clicked vector shape, otherwise flood-fills pixels
+tool("bucket", {
+  down(p) {
+    if (!layerEditable()) return;
+    const hit = currentObjects().slice().reverse().find((o) => o.fill !== undefined && o.type !== "text" && o.type !== "image" && Render.hit(o, p.x, p.y, 0));
+    if (hit && hit.type !== "brush") {
+      History.push(); const c = editableCell(); const o = c.objects.find((x) => x.id === hit.id); o.fill = App.style.grad ? { ...App.style.grad } : App.style.paint.color; changed("fill"); return;
+    }
+    const d = App.doc, x0 = Math.floor(p.x), y0 = Math.floor(p.y);
+    if (x0 < 0 || y0 < 0 || x0 >= d.width || y0 >= d.height) return;
+    // sample what the layer looks like (pixels + shapes) so lines drawn with either tool act as borders
+    const s = document.createElement("canvas"); s.width = d.width; s.height = d.height;
+    const sg = s.getContext("2d", { willReadFrequently: true });
+    const L = activeLayer();
+    const r = Render.cellRasterAt(L, App.state.frame); if (r) sg.drawImage(r, 0, 0);
+    for (const o of Render.cellObjectsAt(L, App.state.frame)) Render.drawObj(sg, o);
+    const px = new Uint32Array(sg.getImageData(0, 0, d.width, d.height).data.buffer);
+    const W = d.width, H = d.height, target = px[y0 * W + x0], tol = App.style.bucket.tolerance;
+    const same = (c) => { if (c === target) return true; for (let s2 = 0; s2 < 32; s2 += 8) if (Math.abs(((c >>> s2) & 255) - ((target >>> s2) & 255)) > tol) return false; return true; };
+    const mask = new Uint8Array(W * H), stack = [y0 * W + x0];
+    while (stack.length) {
+      const i = stack.pop(); if (mask[i]) continue;
+      const y = (i / W) | 0; let x = i - y * W;
+      while (x > 0 && !mask[y * W + x - 1] && same(px[y * W + x - 1])) x--;
+      let up = false, dn = false;
+      for (; x < W && !mask[y * W + x] && same(px[y * W + x]); x++) {
+        mask[y * W + x] = 1;
+        if (y > 0) { const u = !mask[(y - 1) * W + x] && same(px[(y - 1) * W + x]); if (u && !up) stack.push((y - 1) * W + x); up = u; }
+        if (y < H - 1) { const v = !mask[(y + 1) * W + x] && same(px[(y + 1) * W + x]); if (v && !dn) stack.push((y + 1) * W + x); dn = v; }
+      }
+    }
+    // grow the fill by 1px so it tucks under anti-aliased line edges
+    const grown = new Uint8Array(mask);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) { const i = y * W + x; if (!mask[i] && (mask[i - 1] || mask[i + 1] || mask[i - W] || mask[i + W])) grown[i] = 1; }
+    const [R, G, B, A] = Color.parse(App.style.paint.color);
+    const fill = sg.createImageData(W, H);
+    for (let i = 0; i < grown.length; i++) if (grown[i]) { fill.data[i * 4] = R; fill.data[i * 4 + 1] = G; fill.data[i * 4 + 2] = B; fill.data[i * 4 + 3] = A * 255; }
+    History.push();
+    const cell = editableCell(); const rc = rasterForPaint(cell);
+    const tmp = document.createElement("canvas"); tmp.width = W; tmp.height = H; tmp.getContext("2d").putImageData(fill, 0, 0);
+    const rg = rc.getContext("2d"); rg.globalCompositeOperation = "destination-over"; rg.drawImage(tmp, 0, 0); rg.globalCompositeOperation = "source-over";
+    changed("bucket");
+  }
+});
+
+// ---- Eyedropper
+tool("eyedropper", {
+  down(p) { this.pick(p); }, move(p) { this.pick(p); },
+  pick(p) {
+    const d = App.doc; if (p.x < 0 || p.y < 0 || p.x >= d.width || p.y >= d.height) return;
+    const c = document.createElement("canvas"); c.width = c.height = 1;
+    const g = c.getContext("2d"); g.translate(-Math.floor(p.x), -Math.floor(p.y)); Render.frame(g, App.state.frame);
+    const [r, gg, b] = g.getImageData(0, 0, 1, 1).data;
+    const hex = "#" + [r, gg, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+    App.style.fill = hex; App.style.grad = null; App.style.paint.color = hex;
+    App.emit("style");
+  }
+});
+tool("hand", {});
+
+// ---------------------------------------------------------------- object commands (menus & shortcuts)
+const Cmd = (App.Cmd = {
+  editSelected(fn) {
+    if (!App.state.selection.length || !layerEditable()) return;
+    History.push(); const cell = editableCell(); const ids = new Set(App.state.selection);
+    cell.objects.forEach((o, i) => { if (ids.has(o.id)) { const r = fn(o); if (r) cell.objects[i] = r; } });
+    changed("edit");
+  },
+  delete() {
+    if (!App.state.selection.length || !layerEditable()) return;
+    History.push(); const cell = editableCell(); const ids = new Set(App.state.selection);
+    cell.objects = cell.objects.filter((o) => !ids.has(o.id)); App.state.selection = []; changed("delete"); App.emit("selection");
+  },
+  clipboard: [],
+  copy() { Cmd.clipboard = selectedObjects().map(cloneObj); if (Cmd.clipboard.length) toast(`Copied ${Cmd.clipboard.length} ${Cmd.clipboard.length === 1 ? "object" : "objects"}.`); },
+  paste(inPlace = true) {
+    if (!Cmd.clipboard.length || !layerEditable()) return;
+    History.push(); const cell = editableCell();
+    const copies = Cmd.clipboard.map((o) => ({ ...cloneObj(o), id: uid(), m: inPlace ? o.m.slice() : M.mul(M.translate(20, 20), o.m) }));
+    cell.objects.push(...copies); App.state.selection = copies.map((o) => o.id); changed("paste"); App.emit("selection");
+  },
+  duplicate() { Cmd.copy(); Cmd.paste(false); },
+  selectAll() { App.state.selection = currentObjects().map((o) => o.id); App.emit("selection"); View.redraw(); },
+  arrange(dir) {
+    if (!App.state.selection.length || !layerEditable()) return;
+    History.push(); const cell = editableCell(); const ids = new Set(App.state.selection);
+    const sel = cell.objects.filter((o) => ids.has(o.id)), rest = cell.objects.filter((o) => !ids.has(o.id));
+    if (dir === "front") cell.objects = [...rest, ...sel];
+    else if (dir === "back") cell.objects = [...sel, ...rest];
+    else {
+      const a = cell.objects;
+      if (dir === "forward") for (let i = a.length - 2; i >= 0; i--) { if (ids.has(a[i].id) && !ids.has(a[i + 1].id)) [a[i], a[i + 1]] = [a[i + 1], a[i]]; }
+      else for (let i = 1; i < a.length; i++) { if (ids.has(a[i].id) && !ids.has(a[i - 1].id)) [a[i], a[i - 1]] = [a[i - 1], a[i]]; }
+    }
+    changed("arrange");
+  },
+  flip(h) { const b = App.selBounds(); if (!b) return; App.transformSelection(M.scale(h ? -1 : 1, h ? 1 : -1, b.x + b.w / 2, b.y + b.h / 2)); },
+  rotate(deg) { const b = App.selBounds(); if (!b) return; App.transformSelection(M.rotate(deg * Math.PI / 180, b.x + b.w / 2, b.y + b.h / 2)); },
+  align(h, v) {
+    const b = App.selBounds(); if (!b) return; const d = App.doc;
+    const dx = h === "l" ? -b.x : h === "c" ? d.width / 2 - (b.x + b.w / 2) : h === "r" ? d.width - (b.x + b.w) : 0;
+    const dy = v === "t" ? -b.y : v === "m" ? d.height / 2 - (b.y + b.h / 2) : v === "b" ? d.height - (b.y + b.h) : 0;
+    App.transformSelection(M.translate(dx, dy));
+  },
+  nudge(dx, dy) { if (App.state.selection.length) App.transformSelection(M.translate(dx, dy)); },
+  toPath() { Cmd.editSelected((o) => toPathObj(o) || undefined); },
+  addNode() {
+    const t = registry.direct, o = selectedObjects()[0]; if (!o || o.type !== "path") return;
+    Cmd.editSelected((po) => {
+      const i = Math.max(0, t.activeNode), j = (i + 1) % po.nodes.length; if (!po.closed && j === 0) return;
+      const a = po.nodes[i], b = po.nodes[j], mid = (u, v) => (u + v) / 2;
+      const q0x = mid(a.x, a.ox), q0y = mid(a.y, a.oy), q1x = mid(a.ox, b.ix), q1y = mid(a.oy, b.iy), q2x = mid(b.ix, b.x), q2y = mid(b.iy, b.y);
+      const r0x = mid(q0x, q1x), r0y = mid(q0y, q1y), r1x = mid(q1x, q2x), r1y = mid(q1y, q2y);
+      const n = { x: mid(r0x, r1x), y: mid(r0y, r1y), ix: r0x, iy: r0y, ox: r1x, oy: r1y, smooth: true };
+      a.ox = q0x; a.oy = q0y; b.ix = q2x; b.iy = q2y;
+      po.nodes.splice(i + 1, 0, n); t.activeNode = i + 1;
+    });
+  },
+  deleteNode() {
+    const t = registry.direct; const o = selectedObjects()[0]; if (!o || o.type !== "path" || t.activeNode < 0) return;
+    Cmd.editSelected((po) => { po.nodes.splice(t.activeNode, 1); t.activeNode = -1; });
+  },
+  toggleClosed() { Cmd.editSelected((o) => { if (o.type === "path") o.closed = !o.closed; }); }
+});
