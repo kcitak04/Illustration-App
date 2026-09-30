@@ -72,7 +72,7 @@ Render.VBRUSHES = [
 Render.VBRUSH_PARAMS = {
   taper: { amt: "Taper length" }, calligraphy: { amt: "Nib contrast", ang: "Nib angle" }, rough: { amt: "Roughness" },
   bristle: { amt: "Dryness", sp: "Bristles" }, dotted: { sp: "Spacing" }, dashed: { sp: "Dash length", amt: "Gap" },
-  spray: { amt: "Spread", sp: "Density" }, splatter: { amt: "Splatter" }, wavy: { amt: "Wave height", freq: "Wavelength" },
+  spray: { amt: "Spread", sp: "Density", dot: "Dot size" }, splatter: { amt: "Splatter" }, wavy: { amt: "Wave height", freq: "Wavelength" },
   zigzag: { amt: "Zigzag height", freq: "Wavelength" }, outline: { amt: "Line thickness" }, beads: { sp: "Spacing", amt: "Size contrast" },
   chain: { sp: "Spacing", amt: "Ring thickness" }, hatch: { sp: "Spacing", ang: "Hatch angle", amt: "Mark length" }
 };
@@ -180,7 +180,7 @@ function brushOutline(o, p) {
       const count = Math.max(1, Math.min(40, Math.round((size / 3) * sp))), spread = 0.6 + amt * 2.4;
       for (let i = 0; i < n; i++) for (let k = 0; k < count; k++) {
         const h = seed * 13 + i * 31 + k * 7, a = hash(h) * Math.PI * 2, dist = Math.sqrt(hash(h + 1)) * rs[i] * spread;
-        dot(p, xs[i] + Math.cos(a) * dist, ys[i] + Math.sin(a) * dist, Math.max(0.5, size * 0.06 * (0.5 + hash(h + 2))));
+        dot(p, xs[i] + Math.cos(a) * dist, ys[i] + Math.sin(a) * dist, Math.max(0.5, size * 0.06 * (0.5 + hash(h + 2)) * (o.dot ?? 1)));
       }
       break;
     }

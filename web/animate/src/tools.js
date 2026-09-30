@@ -736,7 +736,7 @@ tool("vbrush", (() => {
       if (!layerEditable()) return;
       History.push();
       const b = App.style.brush;
-      obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, style: b.style || "pressure", sp: b.sp ?? 1, amt: b.amt ?? 0.5, ang: b.ang ?? 45, freq: b.freq ?? 1, seed: 1 + Math.floor(Math.random() * 9999), m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
+      obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, style: b.style || "pressure", dot: b.dot ?? 1, sp: b.sp ?? 1, amt: b.amt ?? 0.5, ang: b.ang ?? 45, freq: b.freq ?? 1, seed: 1 + Math.floor(Math.random() * 9999), m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
       sm = { x: p.x, y: p.y, p: p.p };
       const cell = editableCell(); cell.objects.push(obj);
       const copies = Sym.transforms().map((T) => ({ ...obj, id: uid(), m: T, pts: obj.pts }));
@@ -889,10 +889,10 @@ const PAINT_BRUSHES = {
 App.PAINT_BRUSHES = PAINT_BRUSHES;
 /** Brushes the eraser can use (the ones that mix or blur existing paint make no sense there). */
 App.ERASER_BRUSHES = Object.keys(PAINT_BRUSHES).filter((k) => !PAINT_BRUSHES[k].direct && k !== "glow");
-const BRUSH_KEYS = ["size", "hardness", "opacity", "flow", "spacing", "sizeJitter", "scatter", "angle", "angleJitter", "follow", "colorJitter", "density", "mix", "smoothing", "pressureSize", "pressureOpacity", "pressureMin"];
+const BRUSH_KEYS = ["dotSize", "size", "hardness", "opacity", "flow", "spacing", "sizeJitter", "scatter", "angle", "angleJitter", "follow", "colorJitter", "density", "mix", "smoothing", "pressureSize", "pressureOpacity", "pressureMin"];
 function brushDefaults(kind) {
   const B = PAINT_BRUSHES[kind] || PAINT_BRUSHES.round;
-  return { size: B.size, hardness: B.hardness, opacity: B.opacity, flow: B.flow, spacing: B.spacing, sizeJitter: B.sizeJitter || 0, scatter: 0, angle: B.angle || 0, angleJitter: B.angleJitter || 0, follow: !!B.follow, colorJitter: 0, density: B.density || 1, mix: B.mix ?? 0.35, smoothing: 0, pressureSize: true, pressureOpacity: false, pressureMin: B.pressureMin ?? 0.15 };
+  return { dotSize: 1, size: B.size, hardness: B.hardness, opacity: B.opacity, flow: B.flow, spacing: B.spacing, sizeJitter: B.sizeJitter || 0, scatter: 0, angle: B.angle || 0, angleJitter: B.angleJitter || 0, follow: !!B.follow, colorJitter: 0, density: B.density || 1, mix: B.mix ?? 0.35, smoothing: 0, pressureSize: true, pressureOpacity: false, pressureMin: B.pressureMin ?? 0.15 };
 }
 App.brushDefaults = brushDefaults;
 
@@ -1004,7 +1004,8 @@ function makePainter(g, kind, c, color, erase) {
           g.fillStyle = col; g.beginPath();
           for (let k = 0; k < n; k++) {
             const a = Math.random() * Math.PI * 2, d = (size / 2) * (dots ? Math.sqrt(Math.random()) : Math.pow(Math.random(), 0.75));
-            const r = dots ? size * (0.035 + Math.random() * 0.07) : Math.max(0.45, size * 0.012 * (0.5 + Math.random()));
+            const ds = c.dotSize ?? 1;
+            const r = Math.max(0.4, (dots ? size * (0.035 + Math.random() * 0.07) : size * 0.012 * (0.5 + Math.random())) * ds);
             const px = x + Math.cos(a) * d, py = y + Math.sin(a) * d; g.moveTo(px + r, py); g.arc(px, py, r, 0, Math.PI * 2);
           }
           g.fill(); break;
@@ -1107,14 +1108,14 @@ Object.assign(App.style.paint, { ...brushDefaults(App.style.paint.brush || "roun
 Object.assign(App.style.eraser, { ...brushDefaults("round"), hardness: 0.8, size: App.style.eraser.size || 40, brush: "round" });
 
 /** Erases the stroke buffer out of every vector object it touches, turning those objects into images. */
-function textureErase(cell, trails, alpha) {
+function textureErase(cell, trails, alpha, only) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const t of trails) for (const [x, y, r] of t) { x0 = Math.min(x0, x - r); y0 = Math.min(y0, y - r); x1 = Math.max(x1, x + r); y1 = Math.max(y1, y + r); }
   const d = App.doc, bg = Paint.buffer.getContext("2d");
   const skip = Mask.current ? Mask.current.ids : null;
   let n = 0;
   cell.objects = cell.objects.map((o) => {
-    if (skip && skip.has(o.id)) return o;
+    if ((skip && skip.has(o.id)) || (only && !only(o))) return o;
     const b = Render.docBounds(o);
     const ix0 = Math.max(0, Math.floor(Math.max(b.x, x0))), iy0 = Math.max(0, Math.floor(Math.max(b.y, y0)));
     const ix1 = Math.min(d.width, Math.ceil(Math.min(b.x + b.w, x1))), iy1 = Math.min(d.height, Math.ceil(Math.min(b.y + b.h, y1)));
@@ -1169,7 +1170,7 @@ function paintTool(erase) {
       if (direct && !cell.raster) rasterForPaint(cell);
       painter = makePainter(direct ? cell.raster.getContext("2d") : g, kind, cfg(), erase ? "#000" : cfg().color, erase);
       Paint.live = { alpha: direct ? 1 : cfg().opacity, erase, pixels: pixels && !direct, vectors, direct, blend: erase ? null : PAINT_BRUSHES[kind].blend };
-      trails = vectors ? [] : null;
+      trails = vectors || erase ? [] : null;   // the eraser always records its path (pictures on the layer are erased too)
       sm = { x: p.x, y: p.y, p: p.p };
       last = p; leftover = 0; dab(g, p.x, p.y, p.p); this.masked(); changed("paint");
     },
@@ -1227,12 +1228,17 @@ function paintTool(erase) {
       if (lv.vectors && trails && cell.objects.length && erase && App.style.eraser.vectorMode !== "cut" && !["round", "ink"].includes(ek)) {
         // textured erasers: the touched shapes become pixels so the texture can show
         textureErase(cell, trails, lv.alpha);
-      } else if (lv.vectors && trails && cell.objects.length) {
-        try {
-          const res = Geo.cutCell(cell, Mask.clipRegion(Geo.eraserRegion(trails)), Mask.current ? Mask.current.ids : null);
-          if (res.removed.length) App.state.selection = App.state.selection.filter((id) => !res.removed.includes(id));
-          if (res.changed) App.emit("selection");
-        } catch (e) { console.warn("vector erase failed", e); }
+      } else {
+        if (lv.vectors && trails && cell.objects.length) {
+          try {
+            const res = Geo.cutCell(cell, Mask.clipRegion(Geo.eraserRegion(trails)), Mask.current ? Mask.current.ids : null);
+            if (res.removed.length) App.state.selection = App.state.selection.filter((id) => !res.removed.includes(id));
+            if (res.changed) App.emit("selection");
+          } catch (e) { console.warn("vector erase failed", e); }
+        }
+        // pictures (imported images, and shapes a textured eraser already turned into pixels) can't be cut
+        // as vectors, so every eraser rubs them out pixel by pixel; text too when vectors are being erased
+        if (erase && trails && cell.objects.length) textureErase(cell, trails, lv.alpha, (o) => o.type === "image" || (lv.vectors && o.type === "text"));
       }
       Paint.live = null; cell = null; last = null; trails = null; painter = null; changed("paint");
     },

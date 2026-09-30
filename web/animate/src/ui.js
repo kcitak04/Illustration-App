@@ -167,7 +167,7 @@ UI.buildProps = function () {
       slider("Pressure", 0, 1, 0.01, () => s.brush.pressure, (v) => (s.brush.pressure = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }),
       slider("Smoothing", 0, 1, 0.01, () => s.brush.smooth, (v) => (s.brush.smooth = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }),
       check("Tapered ends", () => s.brush.taper, (v) => (s.brush.taper = v), { record: false }),
-      btn("Reset style settings", () => { Object.assign(s.brush, { sp: 1, amt: 0.5, ang: 45, freq: 1 }); UI.buildProps(); }));
+      btn("Reset style settings", () => { Object.assign(s.brush, { sp: 1, amt: 0.5, ang: 45, freq: 1, dot: 1 }); UI.buildProps(); }));
   }
   if (t === "paint") {
     const kind = s.paint.brush || "round";
@@ -358,7 +358,7 @@ UI.brushSettings = function (tgt, kind, erase) {
   if (!B.direct) out.push(sl(erase ? "Strength" : "Opacity", "opacity", 0.05, 1, 0.01));
   out.push(sl(kind === "smudge" || kind === "blur" ? "Strength" : "Flow", "flow", 0.02, 1, 0.01));
   out.push(sl("Spacing", "spacing", 0.01, 1.5, 0.01));
-  if (kind === "spray" || kind === "dots") out.push(sl("Density", "density", 0.1, 4, 0.05, { record: false, fmt: (v) => v.toFixed(2) + "×" }));
+  if (kind === "spray" || kind === "dots") out.push(sl("Density", "density", 0.1, 4, 0.05, { record: false, fmt: (v) => v.toFixed(2) + "×" }), sl("Dot size", "dotSize", 0.2, 6, 0.05, { record: false, fmt: (v) => v.toFixed(2) + "×" }));
   if (kind === "oil") out.push(sl("Colour mixing", "mix", 0, 1, 0.01));
   out.push(sl("Size jitter", "sizeJitter", 0, 1, 0.01), sl("Scatter", "scatter", 0, 2, 0.01));
   if (textured) {
@@ -392,6 +392,7 @@ UI.vbrushParams = function (style, get, set, record) {
   if (P.sp) out.push(slider(P.sp, 0.3, 3, 0.05, () => get("sp") ?? 1, (v) => set("sp", v), o((v) => v.toFixed(2) + "×")));
   if (P.amt) out.push(slider(P.amt, 0, 1, 0.01, () => get("amt") ?? 0.5, (v) => set("amt", v), o((v) => Math.round(v * 100) + "%")));
   if (P.ang) out.push(slider(P.ang, 0, 180, 1, () => get("ang") ?? 45, (v) => set("ang", v), o((v) => Math.round(v) + "°")));
+  if (P.dot) out.push(slider(P.dot, 0.2, 6, 0.05, () => get("dot") ?? 1, (v) => set("dot", v), o((v) => v.toFixed(2) + "×")));
   if (P.freq) out.push(slider(P.freq, 0.3, 4, 0.05, () => get("freq") ?? 1, (v) => set("freq", v), o((v) => v.toFixed(2) + "×")));
   return out;
 };
@@ -402,7 +403,7 @@ UI.vbrushPreview = function (cv, style, params) {
   for (let i = 0; i <= 40; i++) { const t = i / 40; pts.push(8 + t * (W - 16), H / 2 + Math.sin(t * Math.PI * 2) * H * 0.22, 0.3 + 0.7 * Math.sin(t * Math.PI)); }
   const fill = App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke || "#111");
   const q = params || {};
-  Render.drawObj(g, { type: "brush", pts, size: 8, pressure: 0.8, taper: true, style, seed: 7, sp: q.sp ?? 1, amt: q.amt ?? 0.5, ang: q.ang ?? 45, freq: q.freq ?? 1, m: M.id(), fill, opacity: 1 });
+  Render.drawObj(g, { type: "brush", pts, size: 8, pressure: 0.8, taper: true, style, seed: 7, sp: q.sp ?? 1, amt: q.amt ?? 0.5, ang: q.ang ?? 45, freq: q.freq ?? 1, dot: q.dot ?? 1, m: M.id(), fill, opacity: 1 });
 };
 
 UI.syncSwatch = function () {
