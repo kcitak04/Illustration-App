@@ -344,10 +344,16 @@ function exportSvgFrame() {
     return `fill="url(#${id})"`;
   };
   if (!d.transparent) body += `<rect width="100%" height="100%" fill="${Color.hex(d.background)}"/>\n`;
-  for (const L of d.layers) {
+  for (const [li, L] of d.layers.entries()) {
     if (!L.visible) continue;
-    body += `<g id="${esc(L.name)}"${L.opacity < 1 ? ` opacity="${L.opacity}"` : ""}${L.blend && L.blend !== "source-over" ? ` style="mix-blend-mode:${L.blend}"` : ""}>\n`;
-    if (L.kind === "media") {
+    const flat = (L.mask && L.mask.on !== false) || L.clip;   // flattened below, with opacity already applied
+    body += `<g id="${esc(L.name)}"${L.opacity < 1 && !flat ? ` opacity="${L.opacity}"` : ""}${L.blend && L.blend !== "source-over" ? ` style="mix-blend-mode:${L.blend}"` : ""}>\n`;
+    if (flat) {
+      // masked / clipped layers are flattened to a picture so they look the same everywhere
+      const c = document.createElement("canvas"); c.width = d.width; c.height = d.height;
+      Render.frame(c.getContext("2d"), f, { background: false, only: li });
+      body += `<image width="${d.width}" height="${d.height}" href="${c.toDataURL("image/png")}"/>\n`;
+    } else if (L.kind === "media") {
       const c = document.createElement("canvas"); c.width = d.width; c.height = d.height; Media.draw(c.getContext("2d"), L, f);
       body += `<image width="${d.width}" height="${d.height}" href="${c.toDataURL("image/png")}"/>\n`;
     } else {

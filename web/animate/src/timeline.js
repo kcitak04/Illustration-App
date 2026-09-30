@@ -158,6 +158,40 @@ const Layers = (App.Layers = {
     else C = { ...L, id: uid(), name: L.name + " copy", settings: { ...L.settings } };
     d.layers.splice(App.state.layer + 1, 0, C); App.state.layer++; changed("layers"); App.emit("layers");
   },
+  // ---- layer masks: a greyscale-free alpha canvas per layer (opaque = shown)
+  addMask(fromSelection) {
+    const d = App.doc, L = d.layers[App.state.layer]; if (!L) return;
+    let area = null;
+    if (fromSelection) { area = App.Mask.selectionArea(); if (!area) { toast("Select the shapes to use as the mask first."); return; } }
+    History.push();
+    const c = document.createElement("canvas"); c.width = d.width; c.height = d.height;
+    const g = c.getContext("2d"); g.fillStyle = "#fff";
+    if (area) { const p = new Path2D(); for (const P of area) for (const r of P) { r.forEach(([x, y], k) => (k ? p.lineTo(x, y) : p.moveTo(x, y))); p.closePath(); } g.fill(p, "evenodd"); }
+    else g.fillRect(0, 0, d.width, d.height);
+    L.mask = { canvas: c, on: true }; L.maskEdit = true;
+    changed("mask"); App.emit("layers");
+    toast(area ? "Layer mask made from the selection. Paint brush hides, eraser reveals." : "Layer mask added. Paint brush hides parts of the layer, eraser brings them back.");
+  },
+  maskOp(op) {
+    const d = App.doc, L = d.layers[App.state.layer]; if (!L || !L.mask) return;
+    History.push();
+    if (op === "delete") { delete L.mask; L.maskEdit = false; }
+    else if (op === "toggle") L.mask = { ...L.mask, on: L.mask.on === false };
+    else {
+      const c = document.createElement("canvas"); c.width = d.width; c.height = d.height; const g = c.getContext("2d");
+      if (op === "invert") { g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.globalCompositeOperation = "destination-out"; g.drawImage(L.mask.canvas, 0, 0); }
+      else if (op === "reveal") { g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); }
+      // "hide" leaves it empty
+      L.mask = { ...L.mask, canvas: c };
+    }
+    changed("mask"); App.emit("layers");
+  },
+  editMask(on) { const L = App.doc.layers[App.state.layer]; if (!L || !L.mask) return; L.maskEdit = on; changed("mask"); App.emit("layers"); },
+  toggleClip() {
+    const L = App.doc.layers[App.state.layer]; if (!L) return;
+    if (App.state.layer === 0 && !L.clip) { toast("The bottom layer has nothing below it to clip to."); return; }
+    History.push(); L.clip = !L.clip; changed("clip"); App.emit("layers");
+  },
   select(i) { if (i === App.state.layer) return; TextTool.cancel(); Tools.get("pen").finish?.(); App.state.layer = i; App.state.selection = []; App.emit("layers"); App.emit("selection"); View.redraw(); }
 });
 
@@ -238,7 +272,8 @@ TL.buildHeads = function () {
     const lock = document.createElement("button"); lock.className = "ico"; lock.title = L.locked ? "Unlock layer" : "Lock layer"; lock.innerHTML = L.locked ? ICON.lock : ICON.unlock;
     lock.onclick = (e) => { e.stopPropagation(); History.push(); L.locked = !L.locked; changed("layers"); };
     const name = document.createElement("span"); name.className = "tl-name";
-    name.textContent = (L.kind === "media" ? (L.media.type === "audio" ? "♪ " : "▶ ") : "") + L.name;
+    name.textContent = (L.clip ? "↳ " : "") + (L.kind === "media" ? (L.media.type === "audio" ? "♪ " : "▶ ") : "") + L.name + (L.mask ? (L.maskEdit ? " ◐ (editing mask)" : " ◐") : "");
+    if (L.clip) name.title = "Clipped to the layer below";
     name.title = "Double-click to rename";
     name.ondblclick = () => {
       const inp = document.createElement("input"); inp.value = L.name; inp.className = "tl-rename"; name.replaceWith(inp); inp.focus(); inp.select();

@@ -187,6 +187,8 @@ UI.buildProps = function () {
     if (s.eraser.mode !== "objects") {
       opts.push(h("p", { class: "hint" }, "Eraser brush — rubs out in the brush's shape and texture:"),
         UI.brushPicker(App.ERASER_BRUSHES.map((id) => [id, App.PAINT_BRUSHES[id].name]), kind, (id) => App.setPaintBrush(id, true), (cv, id) => App.paintPreview(cv, id, "#000", id === kind ? s.eraser : (s.eraserSets || {})[id], true)));
+      if ((s.eraser.mode === "all" || s.eraser.mode === "cut") && !["round", "ink"].includes(kind))
+        opts.push(select("On vector shapes", [["texture", "Erase with the texture (touched shapes turn into pixels)"], ["cut", "Clean cut (shapes stay editable vectors)"]], () => s.eraser.vectorMode || "texture", (v) => (s.eraser.vectorMode = v), { record: false }));
       opts.push(...UI.brushSettings(s.eraser, kind, true));
     } else opts.push(slider("Size", 2, 400, 1, () => s.eraser.size, (v) => (s.eraser.size = v), { record: false }));
     opts.push(h("p", { class: "hint" }, "Tip: flip your stylus to use its eraser end with any tool."));
@@ -201,6 +203,7 @@ UI.buildProps = function () {
   if (t === "direct") opts.push(h("div", { class: "btnrow" }, btn("Add point", () => Cmd.addNode()), btn("Delete point", () => Cmd.deleteNode()), btn("Open / close", () => Cmd.toggleClosed())), h("p", { class: "hint" }, "Double-click a point to switch between smooth and corner."));
   if (t === "select") opts.push(check("Keep proportions when scaling", () => !!s.keepRatio, (v) => (s.keepRatio = v), { record: false }));
   if (["rect", "ellipse", "poly", "line", "pen", "pencil", "vbrush", "text"].includes(t)) opts.push(slider("Opacity", 0, 1, 0.01, () => s.opacity, (v) => (s.opacity = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }));
+  if (L && L.maskEdit && L.mask && (t === "paint" || t === "eraser")) opts.unshift(h("p", { class: "hint maskhint" }, t === "paint" ? "Painting on the LAYER MASK: strokes hide this layer." : "Erasing on the LAYER MASK: strokes bring this layer back."));
   if (opts.length) box.append(section("Tool", ...opts));
   if (SYM_TOOLS.includes(t)) box.append(UI.symmetrySection());
   if (App.Mask.current && MASK_TOOLS.includes(t)) box.append(section("Mask", h("p", { class: "hint" }, App.Mask.current.invert ? "On: you can only paint and erase outside the masked shapes (shaded red)." : "On: you can only paint and erase inside the masked shapes (outside is shaded red)."), btn("Turn mask off", () => App.Mask.clear())));
@@ -239,8 +242,20 @@ UI.buildProps = function () {
       slider("Layer opacity", 0, 1, 0.01, () => L.opacity, (v) => { L.opacity = v; changed("layer"); }, { fmt: (v) => Math.round(v * 100) + "%" }),
       select("Layer blend", BLENDS, () => L.blend || "source-over", (v) => { L.blend = v; changed("layer"); }),
       h("div", { class: "btnrow" }, btn("New layer", () => Layers.add()), btn("Duplicate", () => Layers.duplicate()), btn("Delete", () => Layers.remove())),
-      h("div", { class: "btnrow" }, btn("Move up", () => Layers.move(1)), btn("Move down", () => Layers.move(-1)))
+      h("div", { class: "btnrow" }, btn("Move up", () => Layers.move(1)), btn("Move down", () => Layers.move(-1))),
+      check("Clipping mask: clip to the layer below", () => !!L.clip, () => Layers.toggleClip(), { record: false })
     ];
+    if (L.clip) kids.push(h("p", { class: "hint" }, "This layer only shows where the layer below it has paint or shapes."));
+    if (!L.mask) kids.push(h("div", { class: "btnrow" }, btn("Add layer mask", () => Layers.addMask(false)), btn("Mask from selection", () => Layers.addMask(true))));
+    else {
+      kids.push(
+        h("div", { class: "seg2" }, btn("Edit layer", () => Layers.editMask(false), !L.maskEdit ? "on" : ""), btn("Edit mask", () => Layers.editMask(true), L.maskEdit ? "on" : "")),
+        h("p", { class: "hint" }, L.maskEdit ? "Editing the mask: the paint brush hides parts of this layer (red), the eraser brings them back. Any brush works." : "The mask hides parts of this layer. Choose Edit mask to paint on it."),
+        check("Mask on", () => L.mask.on !== false, () => Layers.maskOp("toggle"), { record: false }),
+        h("div", { class: "btnrow" }, btn("Invert", () => Layers.maskOp("invert")), btn("Show all", () => Layers.maskOp("reveal")), btn("Hide all", () => Layers.maskOp("hide"))),
+        btn("Delete mask", () => Layers.maskOp("delete"))
+      );
+    }
     box.append(section(`Layer · ${L.name}`, ...kids));
   }
 };

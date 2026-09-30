@@ -359,7 +359,8 @@ Project.serialize = async function ({ embedMedia = true, asBlobs = false } = {})
   const enc = async (c) => (c ? (asBlobs ? await canvasToBlob(c) : c.toDataURL("image/png")) : null);
   const layers = [];
   for (const L of d.layers) {
-    const base = { id: L.id, name: L.name, kind: L.kind, visible: L.visible, locked: L.locked, opacity: L.opacity, blend: L.blend };
+    const base = { id: L.id, name: L.name, kind: L.kind, visible: L.visible, locked: L.locked, opacity: L.opacity, blend: L.blend, clip: !!L.clip };
+    if (L.mask && L.mask.canvas) base.mask = { on: L.mask.on !== false, data: await enc(L.mask.canvas) };
     if (L.kind === "draw") {
       base.cells = [];
       for (const c of L.cells) base.cells.push(c ? { objects: c.objects, tween: c.tween, raster: await enc(c.raster) } : null);
@@ -417,6 +418,11 @@ Project.load = async function (data) {
       delete media.data;
       doc.layers.push({ ...L, media, settings: { ...Media.defaults(), ...L.settings } });
     }
+  }
+  for (const L of doc.layers) {
+    if (L.mask && L.mask.data) { const c = await toCanvasFrom(L.mask.data); L.mask = c ? { on: L.mask.on !== false, canvas: c } : undefined; }
+    else if (L.mask && !L.mask.canvas) delete L.mask;
+    delete L.maskEdit;
   }
   if (!doc.layers.length) doc.layers.push(newDrawLayer("Layer 1", doc.frames));
   App.doc = doc;

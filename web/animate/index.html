@@ -87,6 +87,9 @@ body.dropping .dropHint { display: grid; }
 .psec { padding: 10px 12px; border-bottom: 1px solid var(--rule); display: flex; flex-direction: column; gap: 7px; }
 .psec h3 { margin: 0; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
 .row { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 8px; font-size: 13px; }
+.maskhint { color: #e11d48 !important; font-weight: 600; }
+.seg2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.seg2 .btn.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .brushgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
 .brushtile { display: flex; flex-direction: column; align-items: stretch; gap: 1px; padding: 4px 4px 3px; border: 1px solid var(--rule); border-radius: 6px; background: var(--panel-2); color: var(--ink); font: inherit; font-size: 11px; cursor: pointer; }
 .brushtile canvas { width: 100%; height: 34px; background: #fff; border-radius: 3px; }
@@ -510,6 +513,8 @@ function toast(msg, ms = 3200) {
 // ============================================================================
 const Render = (App.Render = {});
 const imgCache = new Map();
+/** Lets a freshly made image object draw immediately (before its data URL has loaded). */
+Render.cacheImage = (src, canvas) => imgCache.set(src, canvas);
 function imageFor(src) {
   let im = imgCache.get(src);
   if (!im) { im = new Image(); im.onload = () => changed("image"); im.src = src; imgCache.set(src, im); }
@@ -812,7 +817,7 @@ Render.drawObj = function (ctx, o) {
   if (o.blend && o.blend !== "source-over") ctx.globalCompositeOperation = o.blend;
   if (o.type === "image") {
     const im = imageFor(o.src);
-    if (im.complete && im.naturalWidth) ctx.drawImage(im, 0, 0, o.w, o.h);
+    if (im instanceof HTMLCanvasElement || (im.complete && im.naturalWidth)) ctx.drawImage(im, 0, 0, o.w, o.h);
   } else if (o.type === "text") {
     const b = textBox(o);
     ctx.font = textFont(o); ctx.textBaseline = "top"; ctx.textAlign = o.align || "left";
@@ -917,26 +922,69 @@ function drawDrawLayer(ctx, L, f) {
  * Draws frame f of the document into ctx (document coordinates).
  * opts: { background: bool, skipLayer: layerIndex, only: layerIndex, mediaTime: fn }
  */
+// scratch canvases for layer groups (clipping masks) and masked layers
+const bufPool = [];
+function scratch(i) {
+  const d = App.doc; let c = bufPool[i];
+  if (!c) c = bufPool[i] = document.createElement("canvas");
+  if (c.width !== d.width || c.height !== d.height) { c.width = d.width; c.height = d.height; }
+  const g = c.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, c.width, c.height);
+  return g;
+}
+const hasMask = (L) => !!(L.mask && L.mask.canvas && L.mask.on !== false);
+/** Draws a layer's own content (no opacity / blend), with its layer mask applied. */
+function layerContent(g, L, i, f, opts) {
+  if (opts.live && i === opts.liveIndex) opts.live(g);
+  else if (L.kind === "draw") drawDrawLayer(g, L, f);
+  else if (L.kind === "media") Media.draw(g, L, f);
+  if (hasMask(L)) { g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(L.mask.canvas, 0, 0); g.restore(); }
+}
+Render.layerContent = layerContent;
+/** The layer a clipped layer is clipped to: the nearest unclipped layer below it. */
+Render.clipBase = function (i) { const Ls = App.doc.layers; let b = i; while (b >= 0 && Ls[b].clip) b--; return b; };
+
+/**
+ * Draws frame f of the document into ctx (document coordinates).
+ * opts: { background, skipLayer, only, from, to, liveIndex + live(g): draw that layer's content yourself }
+ * Clipped layers (L.clip) only show where the layer below them has paint; layer masks (L.mask) hide parts of a layer.
+ */
 Render.frame = function (ctx, f, opts = {}) {
-  const d = App.doc;
+  const d = App.doc, Ls = d.layers;
   if (opts.background !== false && !d.transparent) { ctx.fillStyle = d.background; ctx.fillRect(0, 0, d.width, d.height); }
-  d.layers.forEach((L, i) => {
-    if (!L.visible || i === opts.skipLayer || (opts.only !== undefined && i !== opts.only)) return;
-    const simple = L.opacity >= 1 && (L.blend || "source-over") === "source-over";
-    let tctx = ctx;
-    if (!simple) {
-      if (layerBuf.width !== d.width || layerBuf.height !== d.height) { layerBuf.width = d.width; layerBuf.height = d.height; }
-      tctx = layerBuf.getContext("2d");
-      tctx.setTransform(1, 0, 0, 1, 0, 0); tctx.globalAlpha = 1; tctx.globalCompositeOperation = "source-over";
-      tctx.clearRect(0, 0, d.width, d.height);
+  const from = opts.from ?? 0, to = Math.min(Ls.length - 1, opts.to ?? Ls.length - 1);
+  const shown = (L, i) => L.visible && i !== opts.skipLayer && (opts.only === undefined || i === opts.only);
+  let i = from;
+  while (i <= to) {
+    const L = Ls[i];
+    // a group: an unclipped base plus the clipped layers stacked right above it
+    const base = L.clip ? Render.clipBase(i) : i;
+    let j = i + (L.clip ? 0 : 1);
+    while (j <= to && Ls[j].clip) j++;
+    const members = []; for (let k = L.clip ? i : i + 1; k < j; k++) if (shown(Ls[k], k)) members.push(k);
+    const baseShown = base >= 0 && Ls[base].visible;
+    if (base === i && !members.length) {
+      if (shown(L, i)) {
+        const simple = L.opacity >= 1 && (L.blend || "source-over") === "source-over" && !hasMask(L);
+        if (simple) layerContent(ctx, L, i, f, opts);
+        else { const g = scratch(0); layerContent(g, L, i, f, opts); ctx.save(); ctx.globalAlpha = L.opacity; ctx.globalCompositeOperation = L.blend || "source-over"; ctx.drawImage(g.canvas, 0, 0); ctx.restore(); }
+      }
+    } else if (base < 0) {
+      // clipped layers with nothing underneath to clip to: draw them as normal layers
+      for (const k of members) { const M = Ls[k], g = scratch(0); layerContent(g, M, k, f, opts); ctx.save(); ctx.globalAlpha = M.opacity; ctx.globalCompositeOperation = M.blend || "source-over"; ctx.drawImage(g.canvas, 0, 0); ctx.restore(); }
+    } else if (baseShown) {
+      const A = scratch(0); layerContent(A, Ls[base], base, f, opts);            // the base's shape
+      const G = scratch(1);
+      const drawBase = base >= from && shown(Ls[base], base);
+      if (drawBase) { G.globalAlpha = Ls[base].opacity; G.drawImage(A.canvas, 0, 0); G.globalAlpha = 1; }
+      for (const k of members) {
+        const M = Ls[k], C = scratch(2); layerContent(C, M, k, f, opts);
+        C.globalCompositeOperation = "destination-in"; C.drawImage(A.canvas, 0, 0);
+        G.save(); G.globalAlpha = M.opacity; G.globalCompositeOperation = M.blend || "source-over"; G.drawImage(C.canvas, 0, 0); G.restore();
+      }
+      ctx.save(); ctx.globalCompositeOperation = drawBase ? Ls[base].blend || "source-over" : "source-over"; ctx.drawImage(G.canvas, 0, 0); ctx.restore();
     }
-    if (L.kind === "draw") drawDrawLayer(tctx, L, f);
-    else if (L.kind === "media") Media.draw(tctx, L, f);
-    if (!simple) {
-      ctx.save(); ctx.globalAlpha = L.opacity; ctx.globalCompositeOperation = L.blend || "source-over";
-      ctx.drawImage(layerBuf, 0, 0); ctx.restore();
-    }
-  });
+    i = Math.max(j, i + 1);
+  }
 };
 
 /** Onion skin: neighbouring frames of the active layer tinted red (before) / green (after). */
@@ -1596,7 +1644,8 @@ Project.serialize = async function ({ embedMedia = true, asBlobs = false } = {})
   const enc = async (c) => (c ? (asBlobs ? await canvasToBlob(c) : c.toDataURL("image/png")) : null);
   const layers = [];
   for (const L of d.layers) {
-    const base = { id: L.id, name: L.name, kind: L.kind, visible: L.visible, locked: L.locked, opacity: L.opacity, blend: L.blend };
+    const base = { id: L.id, name: L.name, kind: L.kind, visible: L.visible, locked: L.locked, opacity: L.opacity, blend: L.blend, clip: !!L.clip };
+    if (L.mask && L.mask.canvas) base.mask = { on: L.mask.on !== false, data: await enc(L.mask.canvas) };
     if (L.kind === "draw") {
       base.cells = [];
       for (const c of L.cells) base.cells.push(c ? { objects: c.objects, tween: c.tween, raster: await enc(c.raster) } : null);
@@ -1654,6 +1703,11 @@ Project.load = async function (data) {
       delete media.data;
       doc.layers.push({ ...L, media, settings: { ...Media.defaults(), ...L.settings } });
     }
+  }
+  for (const L of doc.layers) {
+    if (L.mask && L.mask.data) { const c = await toCanvasFrom(L.mask.data); L.mask = c ? { on: L.mask.on !== false, canvas: c } : undefined; }
+    else if (L.mask && !L.mask.canvas) delete L.mask;
+    delete L.maskEdit;
   }
   if (!doc.layers.length) doc.layers.push(newDrawLayer("Layer 1", doc.frames));
   App.doc = doc;
@@ -1720,10 +1774,11 @@ function buildStrokeCache() {
   const under = mk(), over = mk();
   const ug = under.getContext("2d"), og = over.getContext("2d");
   if (!d.transparent) { ug.fillStyle = d.background; ug.fillRect(0, 0, d.width, d.height); }
-  const saved = d.layers;
-  d.layers = saved.slice(0, ai); Render.frame(ug, f, { background: false });
-  d.layers = saved.slice(ai + 1); Render.frame(og, f, { background: false });
-  d.layers = saved;
+  const L = d.layers[ai];
+  // with masks / clipping involved, redraw everything live instead (the layers depend on each other)
+  if (L && (L.clip || L.mask || L.maskEdit || d.layers[ai + 1]?.clip)) { strokeCache = { full: true }; return; }
+  if (ai > 0) Render.frame(ug, f, { background: false, to: ai - 1 });
+  Render.frame(og, f, { background: false, from: ai + 1 });
   strokeCache = { under, over };
 }
 
@@ -1745,7 +1800,9 @@ function paint() {
   g.beginPath(); g.rect(0, 0, d.width, d.height); g.clip();
   g.imageSmoothingQuality = "high";
   const L = activeLayer();
-  if (strokeCache && L) {
+  if (strokeCache && strokeCache.full && L) {
+    Render.frame(g, s.frame, { liveIndex: s.layer, live: (x) => drawActiveContent(x, L) });
+  } else if (strokeCache && L) {
     g.drawImage(strokeCache.under, 0, 0);
     drawActiveLayerLive(g, L);
     g.drawImage(strokeCache.over, 0, 0);
@@ -1754,6 +1811,7 @@ function paint() {
   }
   if (!s.playing) Render.onion(g, s.frame);
   if (!s.playing) Mask.overlay(g);
+  if (!s.playing && L && L.maskEdit && L.mask) drawMaskTint(g, L);
   g.restore();
   // overlays in screen space
   g.save();
@@ -1771,10 +1829,24 @@ function liveBuf(i) {
   return x;
 }
 function applyLive(x) { x.save(); x.globalAlpha = Paint.live.alpha; x.globalCompositeOperation = Paint.live.erase ? "destination-out" : Paint.live.blend || "source-over"; x.drawImage(Paint.buffer, 0, 0); x.restore(); }
+/** While the layer mask is being edited, its hidden parts are tinted red over the canvas. */
+const tintBuf = document.createElement("canvas");
+function drawMaskTint(g, L) {
+  const d = App.doc; if (tintBuf.width !== d.width || tintBuf.height !== d.height) { tintBuf.width = d.width; tintBuf.height = d.height; }
+  const t = tintBuf.getContext("2d"); t.globalCompositeOperation = "source-over"; t.clearRect(0, 0, d.width, d.height);
+  t.fillStyle = "rgb(225, 29, 72)"; t.fillRect(0, 0, d.width, d.height);
+  t.globalCompositeOperation = "destination-out"; t.drawImage(L.mask.canvas, 0, 0);
+  g.save(); g.globalAlpha = 0.4; g.drawImage(tintBuf, 0, 0); g.restore();
+}
 function drawActiveLayerLive(g, L) {
   g.save(); g.globalAlpha = L.opacity; if (L.blend && L.blend !== "source-over") g.globalCompositeOperation = L.blend;
+  drawActiveContent(g, L);
+  g.restore();
+}
+/** The active layer's content with the stroke in progress (no layer opacity / blend). */
+function drawActiveContent(g, L) {
   if (L.kind === "draw") {
-    const f = App.state.frame, lv = Paint.live;
+    const f = App.state.frame, lv = Paint.live && !Paint.live.maskEdit ? Paint.live : null;
     if (!lv) {
       const r = Render.cellRasterAt(L, f); if (r) g.drawImage(r, 0, 0);
       for (const o of Render.cellObjectsAt(L, f)) Render.drawObj(g, o);
@@ -1792,7 +1864,7 @@ function drawActiveLayerLive(g, L) {
       g.drawImage(liveBufs[0], 0, 0);
     }
   } else Media.draw(g, L, App.state.frame);
-  g.restore();
+  if (L.mask && L.mask.canvas && L.mask.on !== false) { g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(L.mask.canvas, 0, 0); g.restore(); }
 }
 
 // ---------------------------------------------------------------- input routing
@@ -2031,6 +2103,12 @@ function drawSymmetryGuides(g) {
 const MASK_TOOLS = ["paint", "eraser", "vbrush"];
 const Mask = (App.Mask = {
   current: null,   // { invert, area (MultiPolygon, doc coords), ids, allow (canvas: opaque where painting is allowed), guard (Path2D of the protected part) }
+  /** The area covered by the selected shapes (MultiPolygon in document coordinates), or null. */
+  selectionArea() {
+    const sel = selectedObjects(); if (!sel.length || typeof polygonClipping === "undefined") return null;
+    const rect = (o) => { const b = Render.docBounds(o); return [[[[b.x, b.y], [b.x + b.w, b.y], [b.x + b.w, b.y + b.h], [b.x, b.y + b.h], [b.x, b.y]]]]; };
+    try { const parts = sel.map((o) => Geo.areaOf(o) || rect(o)).filter((a) => a.length); return parts.length > 1 ? polygonClipping.union(...parts) : parts[0] || null; } catch (e) { return null; }
+  },
   /** Makes a mask from the selected shapes. invert = true paints outside them. */
   fromSelection(invert) {
     const sel = selectedObjects();
@@ -2749,8 +2827,35 @@ App.resetPaintBrush = function (forEraser) {
 Object.assign(App.style.paint, { ...brushDefaults(App.style.paint.brush || "round"), brush: App.style.paint.brush || "round" });
 Object.assign(App.style.eraser, { ...brushDefaults("round"), hardness: 0.8, size: App.style.eraser.size || 40, brush: "round" });
 
+/** Erases the stroke buffer out of every vector object it touches, turning those objects into images. */
+function textureErase(cell, trails, alpha) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const t of trails) for (const [x, y, r] of t) { x0 = Math.min(x0, x - r); y0 = Math.min(y0, y - r); x1 = Math.max(x1, x + r); y1 = Math.max(y1, y + r); }
+  const d = App.doc, bg = Paint.buffer.getContext("2d");
+  const skip = Mask.current ? Mask.current.ids : null;
+  let n = 0;
+  cell.objects = cell.objects.map((o) => {
+    if (skip && skip.has(o.id)) return o;
+    const b = Render.docBounds(o);
+    const ix0 = Math.max(0, Math.floor(Math.max(b.x, x0))), iy0 = Math.max(0, Math.floor(Math.max(b.y, y0)));
+    const ix1 = Math.min(d.width, Math.ceil(Math.min(b.x + b.w, x1))), iy1 = Math.min(d.height, Math.ceil(Math.min(b.y + b.h, y1)));
+    if (ix1 <= ix0 || iy1 <= iy0) return o;
+    const px = bg.getImageData(ix0, iy0, ix1 - ix0, iy1 - iy0).data;
+    let hit = false; for (let k = 3; k < px.length; k += 16) if (px[k]) { hit = true; break; }
+    if (!hit) return o;
+    const bx = Math.floor(b.x) - 1, by = Math.floor(b.y) - 1, bw = Math.max(1, Math.ceil(b.w) + 3), bh = Math.max(1, Math.ceil(b.h) + 3);
+    const c = document.createElement("canvas"); c.width = bw; c.height = bh;
+    const g = c.getContext("2d"); g.translate(-bx, -by);
+    Render.drawObj(g, { ...o, opacity: 1, blend: "source-over" });
+    g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = alpha; g.globalCompositeOperation = "destination-out"; g.drawImage(Paint.buffer, -bx, -by);
+    const src = c.toDataURL("image/png"); Render.cacheImage(src, c); n++;
+    return { id: o.id, group: o.group, type: "image", src, w: bw, h: bh, m: M.translate(bx, by), fill: null, stroke: null, sw: 0, opacity: o.opacity ?? 1, blend: o.blend || "source-over" };
+  });
+  if (n) App.emit("selection");
+}
+
 function paintTool(erase) {
-  let last = null, cell = null, leftover = 0, trails = null, painter = null, before = null;
+  let last = null, cell = null, leftover = 0, trails = null, painter = null, before = null, maskLayer = null, maskBefore = null;
   const cfg = () => (erase ? App.style.eraser : App.style.paint);
   let sm = null;   // stabiliser state
   const mode = () => (erase ? App.style.eraser.mode || "all" : "pixels");
@@ -2765,6 +2870,8 @@ function paintTool(erase) {
   };
   return {
     down(p) {
+      const AL = activeLayer();
+      if (AL && AL.maskEdit && AL.mask) { this.maskDown(p, AL); return; }
       if (erase && mode() === "objects") { this.eraseObjects(p, true); return; }
       if (!layerEditable()) return;
       History.push();
@@ -2788,8 +2895,8 @@ function paintTool(erase) {
       last = p; leftover = 0; dab(g, p.x, p.y, p.p); this.masked(); changed("paint");
     },
     move(p) {
-      if (erase && mode() === "objects") { if (this._erasing) this.eraseObjects(p, false); return; }
-      if (!last || !cell) return;
+      if (erase && mode() === "objects" && !maskLayer) { if (this._erasing) this.eraseObjects(p, false); return; }
+      if (!last || (!cell && !maskLayer)) return;
       const k0 = (cfg().smoothing || 0) * 0.92;
       if (k0 > 0) { sm.x = sm.x * k0 + p.x * (1 - k0); sm.y = sm.y * k0 + p.y * (1 - k0); sm.p = sm.p * k0 + p.p * (1 - k0); p = { ...p, x: sm.x, y: sm.y, p: sm.p }; }
       const g = Paint.buffer.getContext("2d");
@@ -2798,7 +2905,7 @@ function paintTool(erase) {
       const dir = Math.atan2(p.y - last.y, p.x - last.x);
       let t = leftover;
       while (t < dist) { const k = t / dist; dab(g, lerp(last.x, p.x, k), lerp(last.y, p.y, k), lerp(last.p, p.p, k), dir); t += step; }
-      leftover = t - dist; last = p; this.masked(); changed("paint");
+      leftover = t - dist; last = p; this.masked(); if (maskLayer) this.maskUpdate(); changed("paint");
     },
     /** With a mask on, keeps the stroke out of the protected area as it is drawn. */
     masked() {
@@ -2806,8 +2913,30 @@ function paintTool(erase) {
       if (Paint.live.direct) Mask.restore(cell.raster.getContext("2d"), before);
       else Mask.clipBuffer(Paint.buffer.getContext("2d"));
     },
+    /** Painting on a layer mask: the paint brush hides, the eraser shows the layer again. */
+    maskDown(p, L) {
+      if (L.locked) { toast("This layer is locked."); return; }
+      History.push();
+      maskLayer = L; maskBefore = L.mask.canvas;
+      L.mask = { ...L.mask, canvas: cloneCanvas(maskBefore) };   // copy-on-write keeps undo intact
+      buildStrokeCache();
+      const d = App.doc, b = Paint.buffer;
+      if (b.width !== d.width || b.height !== d.height) { b.width = d.width; b.height = d.height; }
+      const g = b.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, d.width, d.height);
+      let kind = cfg().brush || "round"; if (PAINT_BRUSHES[kind].direct) kind = "round";
+      painter = makePainter(g, kind, cfg(), "#000", true);
+      Paint.live = { alpha: cfg().opacity, erase, pixels: false, vectors: false, maskEdit: true };
+      trails = null; sm = { x: p.x, y: p.y, p: p.p };
+      last = p; leftover = 0; dab(g, p.x, p.y, p.p); this.masked(); this.maskUpdate(); changed("paint");
+    },
+    maskUpdate() {
+      const mg = maskLayer.mask.canvas.getContext("2d");
+      mg.save(); mg.globalAlpha = 1; mg.globalCompositeOperation = "copy"; mg.drawImage(maskBefore, 0, 0);
+      mg.globalAlpha = Paint.live.alpha; mg.globalCompositeOperation = erase ? "source-over" : "destination-out"; mg.drawImage(Paint.buffer, 0, 0); mg.restore();
+    },
     up() {
       this._erasing = false;
+      if (maskLayer) { maskLayer = null; maskBefore = null; Paint.live = null; painter = null; last = null; changed("mask"); return; }
       if (!cell || !Paint.live) { cell = null; return; }
       const lv = Paint.live;
       if (lv.pixels && cell.raster) {
@@ -2815,7 +2944,11 @@ function paintTool(erase) {
         g.save(); g.globalAlpha = lv.alpha; g.globalCompositeOperation = erase ? "destination-out" : lv.blend || "source-over";
         g.drawImage(Paint.buffer, 0, 0); g.restore();
       }
-      if (lv.vectors && trails && cell.objects.length) {
+      const ek = App.style.eraser.brush || "round";
+      if (lv.vectors && trails && cell.objects.length && erase && App.style.eraser.vectorMode !== "cut" && !["round", "ink"].includes(ek)) {
+        // textured erasers: the touched shapes become pixels so the texture can show
+        textureErase(cell, trails, lv.alpha);
+      } else if (lv.vectors && trails && cell.objects.length) {
         try {
           const res = Geo.cutCell(cell, Mask.clipRegion(Geo.eraserRegion(trails)), Mask.current ? Mask.current.ids : null);
           if (res.removed.length) App.state.selection = App.state.selection.filter((id) => !res.removed.includes(id));
@@ -2824,7 +2957,10 @@ function paintTool(erase) {
       }
       Paint.live = null; cell = null; last = null; trails = null; painter = null; changed("paint");
     },
-    cancel() { if (cell) { Paint.live = null; cell = null; trails = null; History.doUndo(); } },
+    cancel() {
+      if (maskLayer) { maskLayer = null; maskBefore = null; Paint.live = null; History.doUndo(); return; }
+      if (cell) { Paint.live = null; cell = null; trails = null; History.doUndo(); }
+    },
     eraseObjects(p, first) {
       if (!layerEditable(first)) return;
       const tol = Math.max(App.style.eraser.size / 2, docLen(4));
@@ -3199,6 +3335,40 @@ const Layers = (App.Layers = {
     else C = { ...L, id: uid(), name: L.name + " copy", settings: { ...L.settings } };
     d.layers.splice(App.state.layer + 1, 0, C); App.state.layer++; changed("layers"); App.emit("layers");
   },
+  // ---- layer masks: a greyscale-free alpha canvas per layer (opaque = shown)
+  addMask(fromSelection) {
+    const d = App.doc, L = d.layers[App.state.layer]; if (!L) return;
+    let area = null;
+    if (fromSelection) { area = App.Mask.selectionArea(); if (!area) { toast("Select the shapes to use as the mask first."); return; } }
+    History.push();
+    const c = document.createElement("canvas"); c.width = d.width; c.height = d.height;
+    const g = c.getContext("2d"); g.fillStyle = "#fff";
+    if (area) { const p = new Path2D(); for (const P of area) for (const r of P) { r.forEach(([x, y], k) => (k ? p.lineTo(x, y) : p.moveTo(x, y))); p.closePath(); } g.fill(p, "evenodd"); }
+    else g.fillRect(0, 0, d.width, d.height);
+    L.mask = { canvas: c, on: true }; L.maskEdit = true;
+    changed("mask"); App.emit("layers");
+    toast(area ? "Layer mask made from the selection. Paint brush hides, eraser reveals." : "Layer mask added. Paint brush hides parts of the layer, eraser brings them back.");
+  },
+  maskOp(op) {
+    const d = App.doc, L = d.layers[App.state.layer]; if (!L || !L.mask) return;
+    History.push();
+    if (op === "delete") { delete L.mask; L.maskEdit = false; }
+    else if (op === "toggle") L.mask = { ...L.mask, on: L.mask.on === false };
+    else {
+      const c = document.createElement("canvas"); c.width = d.width; c.height = d.height; const g = c.getContext("2d");
+      if (op === "invert") { g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.globalCompositeOperation = "destination-out"; g.drawImage(L.mask.canvas, 0, 0); }
+      else if (op === "reveal") { g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); }
+      // "hide" leaves it empty
+      L.mask = { ...L.mask, canvas: c };
+    }
+    changed("mask"); App.emit("layers");
+  },
+  editMask(on) { const L = App.doc.layers[App.state.layer]; if (!L || !L.mask) return; L.maskEdit = on; changed("mask"); App.emit("layers"); },
+  toggleClip() {
+    const L = App.doc.layers[App.state.layer]; if (!L) return;
+    if (App.state.layer === 0 && !L.clip) { toast("The bottom layer has nothing below it to clip to."); return; }
+    History.push(); L.clip = !L.clip; changed("clip"); App.emit("layers");
+  },
   select(i) { if (i === App.state.layer) return; TextTool.cancel(); Tools.get("pen").finish?.(); App.state.layer = i; App.state.selection = []; App.emit("layers"); App.emit("selection"); View.redraw(); }
 });
 
@@ -3279,7 +3449,8 @@ TL.buildHeads = function () {
     const lock = document.createElement("button"); lock.className = "ico"; lock.title = L.locked ? "Unlock layer" : "Lock layer"; lock.innerHTML = L.locked ? ICON.lock : ICON.unlock;
     lock.onclick = (e) => { e.stopPropagation(); History.push(); L.locked = !L.locked; changed("layers"); };
     const name = document.createElement("span"); name.className = "tl-name";
-    name.textContent = (L.kind === "media" ? (L.media.type === "audio" ? "♪ " : "▶ ") : "") + L.name;
+    name.textContent = (L.clip ? "↳ " : "") + (L.kind === "media" ? (L.media.type === "audio" ? "♪ " : "▶ ") : "") + L.name + (L.mask ? (L.maskEdit ? " ◐ (editing mask)" : " ◐") : "");
+    if (L.clip) name.title = "Clipped to the layer below";
     name.title = "Double-click to rename";
     name.ondblclick = () => {
       const inp = document.createElement("input"); inp.value = L.name; inp.className = "tl-rename"; name.replaceWith(inp); inp.focus(); inp.select();
@@ -3556,6 +3727,8 @@ UI.buildProps = function () {
     if (s.eraser.mode !== "objects") {
       opts.push(h("p", { class: "hint" }, "Eraser brush — rubs out in the brush's shape and texture:"),
         UI.brushPicker(App.ERASER_BRUSHES.map((id) => [id, App.PAINT_BRUSHES[id].name]), kind, (id) => App.setPaintBrush(id, true), (cv, id) => App.paintPreview(cv, id, "#000", id === kind ? s.eraser : (s.eraserSets || {})[id], true)));
+      if ((s.eraser.mode === "all" || s.eraser.mode === "cut") && !["round", "ink"].includes(kind))
+        opts.push(select("On vector shapes", [["texture", "Erase with the texture (touched shapes turn into pixels)"], ["cut", "Clean cut (shapes stay editable vectors)"]], () => s.eraser.vectorMode || "texture", (v) => (s.eraser.vectorMode = v), { record: false }));
       opts.push(...UI.brushSettings(s.eraser, kind, true));
     } else opts.push(slider("Size", 2, 400, 1, () => s.eraser.size, (v) => (s.eraser.size = v), { record: false }));
     opts.push(h("p", { class: "hint" }, "Tip: flip your stylus to use its eraser end with any tool."));
@@ -3570,6 +3743,7 @@ UI.buildProps = function () {
   if (t === "direct") opts.push(h("div", { class: "btnrow" }, btn("Add point", () => Cmd.addNode()), btn("Delete point", () => Cmd.deleteNode()), btn("Open / close", () => Cmd.toggleClosed())), h("p", { class: "hint" }, "Double-click a point to switch between smooth and corner."));
   if (t === "select") opts.push(check("Keep proportions when scaling", () => !!s.keepRatio, (v) => (s.keepRatio = v), { record: false }));
   if (["rect", "ellipse", "poly", "line", "pen", "pencil", "vbrush", "text"].includes(t)) opts.push(slider("Opacity", 0, 1, 0.01, () => s.opacity, (v) => (s.opacity = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }));
+  if (L && L.maskEdit && L.mask && (t === "paint" || t === "eraser")) opts.unshift(h("p", { class: "hint maskhint" }, t === "paint" ? "Painting on the LAYER MASK: strokes hide this layer." : "Erasing on the LAYER MASK: strokes bring this layer back."));
   if (opts.length) box.append(section("Tool", ...opts));
   if (SYM_TOOLS.includes(t)) box.append(UI.symmetrySection());
   if (App.Mask.current && MASK_TOOLS.includes(t)) box.append(section("Mask", h("p", { class: "hint" }, App.Mask.current.invert ? "On: you can only paint and erase outside the masked shapes (shaded red)." : "On: you can only paint and erase inside the masked shapes (outside is shaded red)."), btn("Turn mask off", () => App.Mask.clear())));
@@ -3608,8 +3782,20 @@ UI.buildProps = function () {
       slider("Layer opacity", 0, 1, 0.01, () => L.opacity, (v) => { L.opacity = v; changed("layer"); }, { fmt: (v) => Math.round(v * 100) + "%" }),
       select("Layer blend", BLENDS, () => L.blend || "source-over", (v) => { L.blend = v; changed("layer"); }),
       h("div", { class: "btnrow" }, btn("New layer", () => Layers.add()), btn("Duplicate", () => Layers.duplicate()), btn("Delete", () => Layers.remove())),
-      h("div", { class: "btnrow" }, btn("Move up", () => Layers.move(1)), btn("Move down", () => Layers.move(-1)))
+      h("div", { class: "btnrow" }, btn("Move up", () => Layers.move(1)), btn("Move down", () => Layers.move(-1))),
+      check("Clipping mask: clip to the layer below", () => !!L.clip, () => Layers.toggleClip(), { record: false })
     ];
+    if (L.clip) kids.push(h("p", { class: "hint" }, "This layer only shows where the layer below it has paint or shapes."));
+    if (!L.mask) kids.push(h("div", { class: "btnrow" }, btn("Add layer mask", () => Layers.addMask(false)), btn("Mask from selection", () => Layers.addMask(true))));
+    else {
+      kids.push(
+        h("div", { class: "seg2" }, btn("Edit layer", () => Layers.editMask(false), !L.maskEdit ? "on" : ""), btn("Edit mask", () => Layers.editMask(true), L.maskEdit ? "on" : "")),
+        h("p", { class: "hint" }, L.maskEdit ? "Editing the mask: the paint brush hides parts of this layer (red), the eraser brings them back. Any brush works." : "The mask hides parts of this layer. Choose Edit mask to paint on it."),
+        check("Mask on", () => L.mask.on !== false, () => Layers.maskOp("toggle"), { record: false }),
+        h("div", { class: "btnrow" }, btn("Invert", () => Layers.maskOp("invert")), btn("Show all", () => Layers.maskOp("reveal")), btn("Hide all", () => Layers.maskOp("hide"))),
+        btn("Delete mask", () => Layers.maskOp("delete"))
+      );
+    }
     box.append(section(`Layer · ${L.name}`, ...kids));
   }
 };
@@ -4407,10 +4593,16 @@ function exportSvgFrame() {
     return `fill="url(#${id})"`;
   };
   if (!d.transparent) body += `<rect width="100%" height="100%" fill="${Color.hex(d.background)}"/>\n`;
-  for (const L of d.layers) {
+  for (const [li, L] of d.layers.entries()) {
     if (!L.visible) continue;
-    body += `<g id="${esc(L.name)}"${L.opacity < 1 ? ` opacity="${L.opacity}"` : ""}${L.blend && L.blend !== "source-over" ? ` style="mix-blend-mode:${L.blend}"` : ""}>\n`;
-    if (L.kind === "media") {
+    const flat = (L.mask && L.mask.on !== false) || L.clip;   // flattened below, with opacity already applied
+    body += `<g id="${esc(L.name)}"${L.opacity < 1 && !flat ? ` opacity="${L.opacity}"` : ""}${L.blend && L.blend !== "source-over" ? ` style="mix-blend-mode:${L.blend}"` : ""}>\n`;
+    if (flat) {
+      // masked / clipped layers are flattened to a picture so they look the same everywhere
+      const c = document.createElement("canvas"); c.width = d.width; c.height = d.height;
+      Render.frame(c.getContext("2d"), f, { background: false, only: li });
+      body += `<image width="${d.width}" height="${d.height}" href="${c.toDataURL("image/png")}"/>\n`;
+    } else if (L.kind === "media") {
       const c = document.createElement("canvas"); c.width = d.width; c.height = d.height; Media.draw(c.getContext("2d"), L, f);
       body += `<image width="${d.width}" height="${d.height}" href="${c.toDataURL("image/png")}"/>\n`;
     } else {

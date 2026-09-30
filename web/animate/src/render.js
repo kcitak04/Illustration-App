@@ -3,6 +3,8 @@
 // ============================================================================
 const Render = (App.Render = {});
 const imgCache = new Map();
+/** Lets a freshly made image object draw immediately (before its data URL has loaded). */
+Render.cacheImage = (src, canvas) => imgCache.set(src, canvas);
 function imageFor(src) {
   let im = imgCache.get(src);
   if (!im) { im = new Image(); im.onload = () => changed("image"); im.src = src; imgCache.set(src, im); }
@@ -305,7 +307,7 @@ Render.drawObj = function (ctx, o) {
   if (o.blend && o.blend !== "source-over") ctx.globalCompositeOperation = o.blend;
   if (o.type === "image") {
     const im = imageFor(o.src);
-    if (im.complete && im.naturalWidth) ctx.drawImage(im, 0, 0, o.w, o.h);
+    if (im instanceof HTMLCanvasElement || (im.complete && im.naturalWidth)) ctx.drawImage(im, 0, 0, o.w, o.h);
   } else if (o.type === "text") {
     const b = textBox(o);
     ctx.font = textFont(o); ctx.textBaseline = "top"; ctx.textAlign = o.align || "left";
@@ -410,26 +412,69 @@ function drawDrawLayer(ctx, L, f) {
  * Draws frame f of the document into ctx (document coordinates).
  * opts: { background: bool, skipLayer: layerIndex, only: layerIndex, mediaTime: fn }
  */
+// scratch canvases for layer groups (clipping masks) and masked layers
+const bufPool = [];
+function scratch(i) {
+  const d = App.doc; let c = bufPool[i];
+  if (!c) c = bufPool[i] = document.createElement("canvas");
+  if (c.width !== d.width || c.height !== d.height) { c.width = d.width; c.height = d.height; }
+  const g = c.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, c.width, c.height);
+  return g;
+}
+const hasMask = (L) => !!(L.mask && L.mask.canvas && L.mask.on !== false);
+/** Draws a layer's own content (no opacity / blend), with its layer mask applied. */
+function layerContent(g, L, i, f, opts) {
+  if (opts.live && i === opts.liveIndex) opts.live(g);
+  else if (L.kind === "draw") drawDrawLayer(g, L, f);
+  else if (L.kind === "media") Media.draw(g, L, f);
+  if (hasMask(L)) { g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(L.mask.canvas, 0, 0); g.restore(); }
+}
+Render.layerContent = layerContent;
+/** The layer a clipped layer is clipped to: the nearest unclipped layer below it. */
+Render.clipBase = function (i) { const Ls = App.doc.layers; let b = i; while (b >= 0 && Ls[b].clip) b--; return b; };
+
+/**
+ * Draws frame f of the document into ctx (document coordinates).
+ * opts: { background, skipLayer, only, from, to, liveIndex + live(g): draw that layer's content yourself }
+ * Clipped layers (L.clip) only show where the layer below them has paint; layer masks (L.mask) hide parts of a layer.
+ */
 Render.frame = function (ctx, f, opts = {}) {
-  const d = App.doc;
+  const d = App.doc, Ls = d.layers;
   if (opts.background !== false && !d.transparent) { ctx.fillStyle = d.background; ctx.fillRect(0, 0, d.width, d.height); }
-  d.layers.forEach((L, i) => {
-    if (!L.visible || i === opts.skipLayer || (opts.only !== undefined && i !== opts.only)) return;
-    const simple = L.opacity >= 1 && (L.blend || "source-over") === "source-over";
-    let tctx = ctx;
-    if (!simple) {
-      if (layerBuf.width !== d.width || layerBuf.height !== d.height) { layerBuf.width = d.width; layerBuf.height = d.height; }
-      tctx = layerBuf.getContext("2d");
-      tctx.setTransform(1, 0, 0, 1, 0, 0); tctx.globalAlpha = 1; tctx.globalCompositeOperation = "source-over";
-      tctx.clearRect(0, 0, d.width, d.height);
+  const from = opts.from ?? 0, to = Math.min(Ls.length - 1, opts.to ?? Ls.length - 1);
+  const shown = (L, i) => L.visible && i !== opts.skipLayer && (opts.only === undefined || i === opts.only);
+  let i = from;
+  while (i <= to) {
+    const L = Ls[i];
+    // a group: an unclipped base plus the clipped layers stacked right above it
+    const base = L.clip ? Render.clipBase(i) : i;
+    let j = i + (L.clip ? 0 : 1);
+    while (j <= to && Ls[j].clip) j++;
+    const members = []; for (let k = L.clip ? i : i + 1; k < j; k++) if (shown(Ls[k], k)) members.push(k);
+    const baseShown = base >= 0 && Ls[base].visible;
+    if (base === i && !members.length) {
+      if (shown(L, i)) {
+        const simple = L.opacity >= 1 && (L.blend || "source-over") === "source-over" && !hasMask(L);
+        if (simple) layerContent(ctx, L, i, f, opts);
+        else { const g = scratch(0); layerContent(g, L, i, f, opts); ctx.save(); ctx.globalAlpha = L.opacity; ctx.globalCompositeOperation = L.blend || "source-over"; ctx.drawImage(g.canvas, 0, 0); ctx.restore(); }
+      }
+    } else if (base < 0) {
+      // clipped layers with nothing underneath to clip to: draw them as normal layers
+      for (const k of members) { const M = Ls[k], g = scratch(0); layerContent(g, M, k, f, opts); ctx.save(); ctx.globalAlpha = M.opacity; ctx.globalCompositeOperation = M.blend || "source-over"; ctx.drawImage(g.canvas, 0, 0); ctx.restore(); }
+    } else if (baseShown) {
+      const A = scratch(0); layerContent(A, Ls[base], base, f, opts);            // the base's shape
+      const G = scratch(1);
+      const drawBase = base >= from && shown(Ls[base], base);
+      if (drawBase) { G.globalAlpha = Ls[base].opacity; G.drawImage(A.canvas, 0, 0); G.globalAlpha = 1; }
+      for (const k of members) {
+        const M = Ls[k], C = scratch(2); layerContent(C, M, k, f, opts);
+        C.globalCompositeOperation = "destination-in"; C.drawImage(A.canvas, 0, 0);
+        G.save(); G.globalAlpha = M.opacity; G.globalCompositeOperation = M.blend || "source-over"; G.drawImage(C.canvas, 0, 0); G.restore();
+      }
+      ctx.save(); ctx.globalCompositeOperation = drawBase ? Ls[base].blend || "source-over" : "source-over"; ctx.drawImage(G.canvas, 0, 0); ctx.restore();
     }
-    if (L.kind === "draw") drawDrawLayer(tctx, L, f);
-    else if (L.kind === "media") Media.draw(tctx, L, f);
-    if (!simple) {
-      ctx.save(); ctx.globalAlpha = L.opacity; ctx.globalCompositeOperation = L.blend || "source-over";
-      ctx.drawImage(layerBuf, 0, 0); ctx.restore();
-    }
-  });
+    i = Math.max(j, i + 1);
+  }
 };
 
 /** Onion skin: neighbouring frames of the active layer tinted red (before) / green (after). */
