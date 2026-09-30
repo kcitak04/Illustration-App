@@ -567,8 +567,20 @@ Render.localPath = function (o, p = new Path2D()) {
 /** Vector brush styles (the brush object's `style`). */
 Render.VBRUSHES = [
   ["pressure", "Pressure"], ["uniform", "Monoline"], ["taper", "Ink taper"], ["calligraphy", "Calligraphy"], ["rough", "Rough edge"],
-  ["bristle", "Dry bristle"], ["dotted", "Dotted"], ["dashed", "Dashed"], ["spray", "Spray"], ["splatter", "Splatter"]
+  ["bristle", "Dry bristle"], ["dotted", "Dotted"], ["dashed", "Dashed"], ["spray", "Spray"], ["splatter", "Splatter"],
+  ["wavy", "Wavy"], ["zigzag", "Zigzag"], ["outline", "Hollow outline"], ["beads", "Beads"], ["chain", "Chain rings"], ["hatch", "Hatch marks"]
 ];
+/**
+ * Extra settings each vector style understands (stored on the stroke):
+ * sp = spacing, amt = the style's main amount, ang = angle in degrees, freq = wavelength.
+ */
+Render.VBRUSH_PARAMS = {
+  taper: { amt: "Taper length" }, calligraphy: { amt: "Nib contrast", ang: "Nib angle" }, rough: { amt: "Roughness" },
+  bristle: { amt: "Dryness", sp: "Bristles" }, dotted: { sp: "Spacing" }, dashed: { sp: "Dash length", amt: "Gap" },
+  spray: { amt: "Spread", sp: "Density" }, splatter: { amt: "Splatter" }, wavy: { amt: "Wave height", freq: "Wavelength" },
+  zigzag: { amt: "Zigzag height", freq: "Wavelength" }, outline: { amt: "Line thickness" }, beads: { sp: "Spacing", amt: "Size contrast" },
+  chain: { sp: "Spacing", amt: "Ring thickness" }, hatch: { sp: "Spacing", ang: "Hatch angle", amt: "Mark length" }
+};
 /** Repeatable pseudo-random number in 0..1 (brush textures must look the same on every redraw). */
 function hash(n) { n = Math.sin(n * 127.1 + 311.7) * 43758.5453; return n - Math.floor(n); }
 
@@ -605,37 +617,62 @@ function brushOutline(o, p) {
   const pts = o.pts, n = pts.length / 3;
   if (!n) return;
   const st = o.style || "pressure", seed = o.seed || 1, size = o.size;
+  const sp = o.sp ?? 1, amt = o.amt ?? 0.5, ang = ((o.ang ?? 45) * Math.PI) / 180, freq = o.freq ?? 1;
   const xs = new Array(n), ys = new Array(n), rs = new Array(n);
   for (let i = 0; i < n; i++) { xs[i] = pts[i * 3]; ys[i] = pts[i * 3 + 1]; }
-  const tapered = (o.taper || st === "taper") && n > 6, tk = st === "taper" ? Math.max(4, Math.round(n / 3)) : 4, tmin = st === "taper" ? 0.06 : 0.35;
+  const tapered = (o.taper || st === "taper") && n > 6;
+  const tk = st === "taper" ? Math.max(3, Math.round(n * (0.08 + 0.5 * amt))) : 4, tmin = st === "taper" ? 0.06 : 0.35;
+  const tan = (X, Y, i, N) => { const i0 = Math.max(0, i - 1), i1 = Math.min(N - 1, i + 1); let tx = X[i1] - X[i0], ty = Y[i1] - Y[i0]; const l = Math.hypot(tx, ty) || 1; return [tx / l, ty / l]; };
   for (let i = 0; i < n; i++) {
-    let r = st === "uniform" ? size / 2 : (size * ((1 - o.pressure) + o.pressure * pts[i * 3 + 2])) / 2;
+    let r = st === "uniform" || st === "outline" || st === "wavy" || st === "zigzag" ? size / 2 : (size * ((1 - o.pressure) + o.pressure * pts[i * 3 + 2])) / 2;
     if (tapered && st !== "uniform") { if (i < tk) r *= tmin + ((1 - tmin) * i) / tk; if (i > n - 1 - tk) r *= tmin + ((1 - tmin) * (n - 1 - i)) / tk; }
     if (st === "calligraphy") {
-      // a flat nib held at 45°: thick across it, hairline along it
-      const i0 = Math.max(0, i - 1), i1 = Math.min(n - 1, i + 1);
-      let tx = xs[i1] - xs[i0], ty = ys[i1] - ys[i0]; const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
-      r *= 0.1 + 0.9 * Math.abs(tx * Math.SQRT1_2 - ty * Math.SQRT1_2);
+      // a flat nib held at an angle: thick across it, thin along it
+      const [tx, ty] = tan(xs, ys, i, n), c = 0.3 + 0.7 * amt;
+      r *= 1 - c + c * Math.abs(tx * Math.sin(ang) - ty * Math.cos(ang));
     }
-    if (st === "rough") r *= 0.6 + 0.8 * hash(seed + i * 1.37);
+    if (st === "rough") r *= 1 - amt * 0.8 + amt * 1.6 * hash(seed + i * 1.37);
     rs[i] = Math.max(0.3, r);
   }
   // running length along the stroke
   const L = new Float64Array(n);
   for (let i = 1; i < n; i++) L[i] = L[i - 1] + Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
-  const at = (d) => { // point + index at distance d
+  const total = L[n - 1];
+  const at = (d) => { // point, half-width and direction at distance d
     let i = 1; while (i < n - 1 && L[i] < d) i++;
+    if (n === 1) return [xs[0], ys[0], rs[0], 1, 0];
     const seg = L[i] - L[i - 1] || 1, t = Math.min(1, Math.max(0, (d - L[i - 1]) / seg));
-    return [xs[i - 1] + (xs[i] - xs[i - 1]) * t, ys[i - 1] + (ys[i] - ys[i - 1]) * t, rs[i - 1] + (rs[i] - rs[i - 1]) * t];
+    const dx = xs[i] - xs[i - 1], dy = ys[i] - ys[i - 1], l = Math.hypot(dx, dy) || 1;
+    return [xs[i - 1] + dx * t, ys[i - 1] + dy * t, rs[i - 1] + (rs[i] - rs[i - 1]) * t, dx / l, dy / l];
   };
   switch (st) {
     case "dotted": {
-      const gap = Math.max(1, size * 1.6);
-      for (let d = 0; d <= L[n - 1] + 1e-6; d += gap) { const [x, y, r] = at(d); dot(p, x, y, r * 0.8); }
+      const gap = Math.max(1, size * 1.6 * sp);
+      for (let d = 0; d <= total + 1e-6; d += gap) { const [x, y, r] = at(d); dot(p, x, y, r * 0.8); }
+      break;
+    }
+    case "beads": {
+      const gap = Math.max(1, size * 1.1 * sp); let k = 0;
+      for (let d = 0; d <= total + 1e-6; d += gap, k++) { const [x, y, r] = at(d); dot(p, x, y, r * (k % 2 ? 1 - 0.8 * amt : 0.95)); }
+      break;
+    }
+    case "chain": {
+      // hollow rings (the stroke is filled even-odd, so the inner circle cuts the hole)
+      const gap = Math.max(1, size * 1.15 * sp);
+      for (let d = 0; d <= total + 1e-6; d += gap) { const [x, y, r] = at(d); dot(p, x, y, r * 0.95); dot(p, x, y, Math.max(0.2, r * 0.95 * (0.85 - 0.7 * amt))); }
+      break;
+    }
+    case "hatch": {
+      const gap = Math.max(1, size * 0.55 * sp), len = size * (0.4 + 1.6 * amt), ca = Math.cos(ang), sa = Math.sin(ang);
+      for (let d = 0; d <= total + 1e-6; d += gap) {
+        const [x, y, r] = at(d), w = Math.max(0.35, r * 0.22), hl = len * (0.5 + r / size) / 2;
+        const ax = ca * hl, ay = sa * hl, nx = -sa * w, ny = ca * w;
+        p.moveTo(x - ax + nx, y - ay + ny); p.lineTo(x + ax + nx, y + ay + ny); p.lineTo(x + ax - nx, y + ay - ny); p.lineTo(x - ax - nx, y - ay - ny); p.closePath();
+      }
       break;
     }
     case "dashed": {
-      const dash = Math.max(2, size * 2.4), period = dash + Math.max(1, size * 1.4);
+      const dash = Math.max(2, size * 2.4 * sp), period = dash + Math.max(1, size * (0.3 + 2.2 * amt));
       let a = -1;
       for (let i = 0; i <= n; i++) {
         const on = i < n && L[i] % period < dash;
@@ -645,10 +682,10 @@ function brushOutline(o, p) {
       break;
     }
     case "spray": {
-      const count = Math.max(3, Math.min(16, Math.round(size / 3)));
+      const count = Math.max(1, Math.min(40, Math.round((size / 3) * sp))), spread = 0.6 + amt * 2.4;
       for (let i = 0; i < n; i++) for (let k = 0; k < count; k++) {
-        const h = seed * 13 + i * 31 + k * 7, ang = hash(h) * Math.PI * 2, dist = Math.sqrt(hash(h + 1)) * rs[i] * 1.8;
-        dot(p, xs[i] + Math.cos(ang) * dist, ys[i] + Math.sin(ang) * dist, Math.max(0.5, size * 0.06 * (0.5 + hash(h + 2))));
+        const h = seed * 13 + i * 31 + k * 7, a = hash(h) * Math.PI * 2, dist = Math.sqrt(hash(h + 1)) * rs[i] * spread;
+        dot(p, xs[i] + Math.cos(a) * dist, ys[i] + Math.sin(a) * dist, Math.max(0.5, size * 0.06 * (0.5 + hash(h + 2))));
       }
       break;
     }
@@ -657,30 +694,46 @@ function brushOutline(o, p) {
       ribbon(p, xs, ys, rs, 0, n - 1);
       for (let i = 0; i < n; i++) {
         const h = seed * 17 + i * 23;
-        if (hash(h) < 0.6) continue;
-        const ang = hash(h + 1) * Math.PI * 2, dist = size * (0.6 + hash(h + 2) * 1.3);
-        dot(p, xs[i] + Math.cos(ang) * dist, ys[i] + Math.sin(ang) * dist, Math.max(0.5, size * (0.05 + 0.14 * hash(h + 3))));
+        if (hash(h) > amt * 0.8) continue;
+        const a = hash(h + 1) * Math.PI * 2, dist = size * (0.6 + hash(h + 2) * 1.3);
+        dot(p, xs[i] + Math.cos(a) * dist, ys[i] + Math.sin(a) * dist, Math.max(0.5, size * (0.05 + 0.14 * hash(h + 3))));
       }
       break;
     }
     case "bristle": {
-      const K = 7;
+      const K = Math.max(3, Math.min(16, Math.round(7 * sp)));
       for (let k = 0; k < K; k++) {
-        const off = (k / (K - 1) - 0.5) * 1.8, thick = 0.07 + 0.13 * hash(seed + k * 5.3);
+        const off = (k / (K - 1) - 0.5) * 1.8, thick = (14 / K) * (0.07 + 0.13 * hash(seed + k * 5.3));
         const bx = new Array(n), by = new Array(n), br = new Array(n);
-        for (let i = 0; i < n; i++) {
-          const i0 = Math.max(0, i - 1), i1 = Math.min(n - 1, i + 1);
-          let tx = xs[i1] - xs[i0], ty = ys[i1] - ys[i0]; const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
-          bx[i] = xs[i] - ty * off * rs[i]; by[i] = ys[i] + tx * off * rs[i]; br[i] = Math.max(0.3, rs[i] * thick * 2);
-        }
+        for (let i = 0; i < n; i++) { const [tx, ty] = tan(xs, ys, i, n); bx[i] = xs[i] - ty * off * rs[i]; by[i] = ys[i] + tx * off * rs[i]; br[i] = Math.max(0.3, rs[i] * thick); }
         // dry-brush gaps: each bristle skips a few stretches
         let a = -1;
         for (let i = 0; i <= n; i++) {
-          const on = i < n && hash(seed * 3 + k * 41 + Math.floor(i / 4)) > 0.28;
+          const on = i < n && hash(seed * 3 + k * 41 + Math.floor(i / 4)) > 0.03 + amt * 0.5;
           if (on && a < 0) a = i;
           if (!on && a >= 0) { ribbon(p, bx, by, br, a, i - 1); a = -1; }
         }
       }
+      break;
+    }
+    case "wavy": case "zigzag": {
+      // resample the stroke evenly, then push it sideways along a sine / triangle wave
+      const wl = Math.max(4, size * 4 * freq), amp = size * 1.6 * amt, step = st === "zigzag" ? wl / 2 : wl / 16;
+      const X = [], Y = [], R = [];
+      for (let d = 0, k = 0; d <= total + 1e-6; d += step, k++) {
+        const [x, y, r, tx, ty] = at(d);
+        const w = st === "zigzag" ? (k % 2 ? 1 : -1) : Math.sin((d / wl) * Math.PI * 2);
+        X.push(x - ty * w * amp); Y.push(y + tx * w * amp); R.push(r * 0.6);
+      }
+      if (st === "zigzag") { for (let k = 1; k < X.length; k++) { const mx = [X[k - 1], X[k]], my = [Y[k - 1], Y[k]]; ribbon(p, mx, my, [R[k - 1], R[k]], 0, 1); } }
+      else ribbon(p, X, Y, R, 0, X.length - 1);
+      break;
+    }
+    case "outline": {
+      // two ribbons filled even-odd leave a hollow line
+      ribbon(p, xs, ys, rs, 0, n - 1);
+      const inner = rs.map((r) => Math.max(0.2, r * (0.85 - 0.7 * amt)));
+      ribbon(p, xs, ys, inner, 0, n - 1);
       break;
     }
     default: ribbon(p, xs, ys, rs, 0, n - 1);
@@ -719,7 +772,7 @@ Render.localBounds = function (o) {
     case "brush": {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       for (let i = 0; i < o.pts.length; i += 3) { x0 = Math.min(x0, o.pts[i]); y0 = Math.min(y0, o.pts[i + 1]); x1 = Math.max(x1, o.pts[i]); y1 = Math.max(y1, o.pts[i + 1]); }
-      const r = o.style === "spray" || o.style === "splatter" ? o.size * 1.9 : o.size / 2;
+      const r = o.style === "spray" ? o.size * (0.4 + 1.3 * (o.amt ?? 0.5)) : o.style === "splatter" ? o.size * 1.9 : o.style === "wavy" || o.style === "zigzag" ? o.size * (0.5 + 1.7 * (o.amt ?? 0.5)) : o.style === "hatch" ? o.size * (0.5 + 1.6 * (o.amt ?? 0.5)) : o.size / 2;
       return { x: x0 - r, y: y0 - r, w: x1 - x0 + 2 * r, h: y1 - y0 + 2 * r };
     }
   }
@@ -782,7 +835,7 @@ Render.drawObj = function (ctx, o) {
 };
 
 Render.isCompound = (o) => o.type === "path" && o.nodes.some((n, i) => i > 0 && n.start);
-Render.fillRule = (o) => (o.type === "rings" || Render.isCompound(o) ? "evenodd" : "nonzero");
+Render.fillRule = (o) => (o.type === "rings" || Render.isCompound(o) || (o.type === "brush" && (o.style === "outline" || o.style === "chain")) ? "evenodd" : "nonzero");
 
 const hitCtx = document.createElement("canvas").getContext("2d");
 Render.hit = function (o, x, y, tol) {
@@ -975,6 +1028,7 @@ function fillGeom(o) {
   }
   const polys = Geo.flatten(o).filter((s) => s.pts.length >= 3).map((s) => [s.pts]);
   if (!polys.length) return [];
+  if (Render.fillRule(o) === "evenodd") return polys.length === 1 ? polygonClipping.union(polys[0]) : polygonClipping.xor(...polys);
   return polys.length === 1 ? polygonClipping.union(polys[0]) : polygonClipping.union(...polys);
 }
 
@@ -1716,7 +1770,7 @@ function liveBuf(i) {
   const x = c.getContext("2d"); x.setTransform(1, 0, 0, 1, 0, 0); x.globalAlpha = 1; x.globalCompositeOperation = "source-over"; x.clearRect(0, 0, c.width, c.height);
   return x;
 }
-function applyLive(x) { x.save(); x.globalAlpha = Paint.live.alpha; x.globalCompositeOperation = Paint.live.erase ? "destination-out" : "source-over"; x.drawImage(Paint.buffer, 0, 0); x.restore(); }
+function applyLive(x) { x.save(); x.globalAlpha = Paint.live.alpha; x.globalCompositeOperation = Paint.live.erase ? "destination-out" : Paint.live.blend || "source-over"; x.drawImage(Paint.buffer, 0, 0); x.restore(); }
 function drawActiveLayerLive(g, L) {
   g.save(); g.globalAlpha = L.opacity; if (L.blend && L.blend !== "source-over") g.globalCompositeOperation = L.blend;
   if (L.kind === "draw") {
@@ -2325,7 +2379,7 @@ tool("vbrush", (() => {
       if (!layerEditable()) return;
       History.push();
       const b = App.style.brush;
-      obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, style: b.style || "pressure", seed: 1 + Math.floor(Math.random() * 9999), m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
+      obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, style: b.style || "pressure", sp: b.sp ?? 1, amt: b.amt ?? 0.5, ang: b.ang ?? 45, freq: b.freq ?? 1, seed: 1 + Math.floor(Math.random() * 9999), m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
       sm = { x: p.x, y: p.y, p: p.p };
       const cell = editableCell(); cell.objects.push(obj);
       const copies = Sym.transforms().map((T) => ({ ...obj, id: uid(), m: T, pts: obj.pts }));
@@ -2453,19 +2507,37 @@ function stamp(color, hardness) {
   stampCache.set(key, c); return c;
 }
 // ---- Paint brush presets & engine
+/**
+ * Each brush's starting settings. Every brush understands the common settings (size, opacity, flow,
+ * spacing, jitter, scatter, angle…); a few add their own (hardness, density, mixing).
+ */
 const PAINT_BRUSHES = {
   round:      { name: "Round",        size: 24, hardness: 0.7,  opacity: 1,    flow: 1,    spacing: 0.08 },
+  ink:        { name: "Ink pen",      size: 8,  hardness: 0.98, opacity: 1,    flow: 1,    spacing: 0.03, pressureMin: 0.03 },
   airbrush:   { name: "Airbrush",     size: 90, hardness: 0,    opacity: 1,    flow: 0.1,  spacing: 0.05 },
-  spray:      { name: "Spray paint",  size: 70, hardness: 1,    opacity: 1,    flow: 0.8,  spacing: 0.18 },
-  dots:       { name: "Dotted spray", size: 80, hardness: 1,    opacity: 1,    flow: 1,    spacing: 0.45 },
-  oil:        { name: "Oil paint",    size: 44, hardness: 0.8,  opacity: 1,    flow: 0.9,  spacing: 0.05, direct: true },
+  spray:      { name: "Spray paint",  size: 70, hardness: 1,    opacity: 1,    flow: 0.8,  spacing: 0.18, density: 1 },
+  dots:       { name: "Dotted spray", size: 80, hardness: 1,    opacity: 1,    flow: 1,    spacing: 0.45, density: 1 },
+  oil:        { name: "Oil paint",    size: 44, hardness: 0.8,  opacity: 1,    flow: 0.9,  spacing: 0.05, follow: true, mix: 0.35, direct: true },
   smudge:     { name: "Smudge",       size: 44, hardness: 0.5,  opacity: 1,    flow: 0.75, spacing: 0.08, direct: true },
-  chalk:      { name: "Chalk",        size: 40, hardness: 0.9,  opacity: 1,    flow: 0.85, spacing: 0.14 },
-  pencil:     { name: "Pencil",       size: 6,  hardness: 0.9,  opacity: 0.95, flow: 0.7,  spacing: 0.12 },
-  marker:     { name: "Marker",       size: 30, hardness: 0.95, opacity: 0.6,  flow: 1,    spacing: 0.04 },
-  watercolor: { name: "Watercolour",  size: 70, hardness: 0.3,  opacity: 0.8,  flow: 0.07, spacing: 0.03 }
+  blur:       { name: "Blur",         size: 60, hardness: 0.5,  opacity: 1,    flow: 0.5,  spacing: 0.15, direct: true },
+  chalk:      { name: "Chalk",        size: 40, hardness: 0.9,  opacity: 1,    flow: 0.85, spacing: 0.14, angleJitter: 1 },
+  charcoal:   { name: "Charcoal",     size: 34, hardness: 0.9,  opacity: 1,    flow: 0.7,  spacing: 0.08, follow: true, angleJitter: 0.08 },
+  crayon:     { name: "Crayon",       size: 18, hardness: 0.95, opacity: 1,    flow: 0.9,  spacing: 0.1,  angleJitter: 1 },
+  pencil:     { name: "Pencil",       size: 6,  hardness: 0.9,  opacity: 0.95, flow: 0.7,  spacing: 0.12, angleJitter: 1 },
+  marker:     { name: "Marker",       size: 30, hardness: 0.95, opacity: 0.6,  flow: 1,    spacing: 0.04, angle: -45 },
+  watercolor: { name: "Watercolour",  size: 70, hardness: 0.3,  opacity: 0.8,  flow: 0.07, spacing: 0.03, sizeJitter: 0.08 },
+  hatching:   { name: "Hatching",     size: 40, hardness: 1,    opacity: 1,    flow: 1,    spacing: 0.22, angle: 45 },
+  glow:       { name: "Glow / neon",  size: 40, hardness: 0.2,  opacity: 0.9,  flow: 0.35, spacing: 0.06, blend: "lighter" }
 };
 App.PAINT_BRUSHES = PAINT_BRUSHES;
+/** Brushes the eraser can use (the ones that mix or blur existing paint make no sense there). */
+App.ERASER_BRUSHES = Object.keys(PAINT_BRUSHES).filter((k) => !PAINT_BRUSHES[k].direct && k !== "glow");
+const BRUSH_KEYS = ["size", "hardness", "opacity", "flow", "spacing", "sizeJitter", "scatter", "angle", "angleJitter", "follow", "colorJitter", "density", "mix", "smoothing", "pressureSize", "pressureOpacity", "pressureMin"];
+function brushDefaults(kind) {
+  const B = PAINT_BRUSHES[kind] || PAINT_BRUSHES.round;
+  return { size: B.size, hardness: B.hardness, opacity: B.opacity, flow: B.flow, spacing: B.spacing, sizeJitter: B.sizeJitter || 0, scatter: 0, angle: B.angle || 0, angleJitter: B.angleJitter || 0, follow: !!B.follow, colorJitter: 0, density: B.density || 1, mix: B.mix ?? 0.35, smoothing: 0, pressureSize: true, pressureOpacity: false, pressureMin: B.pressureMin ?? 0.15 };
+}
+App.brushDefaults = brushDefaults;
 
 // white alpha-mask textures, tinted per colour on demand
 const texCache = new Map();
@@ -2473,17 +2545,25 @@ function texture(kind) {
   if (texCache.has(kind)) return texCache.get(kind);
   const S = 128, c = document.createElement("canvas"); c.width = c.height = S;
   const g = c.getContext("2d");
-  if (kind === "chalk" || kind === "pencil") {
-    // grain: a coarse (chalk) or fine (pencil) speckle inside a disc
-    const R = kind === "chalk" ? 40 : 128, t = document.createElement("canvas"); t.width = t.height = R;
-    const tg = t.getContext("2d"), im = tg.createImageData(R, R);
+  if (kind === "chalk" || kind === "pencil" || kind === "crayon") {
+    // grain: coarse (chalk), fine (pencil) or dense waxy (crayon) speckle inside a disc
+    const R = kind === "chalk" ? 40 : kind === "crayon" ? 64 : 128, t = document.createElement("canvas"); t.width = t.height = R;
+    const tg = t.getContext("2d"), im = tg.createImageData(R, R), dens = kind === "chalk" ? 0.6 : kind === "crayon" ? 0.78 : 0.5;
     for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) {
       const d = Math.hypot(x - R / 2 + 0.5, y - R / 2 + 0.5) / (R / 2);
-      const keep = Math.random() < (kind === "chalk" ? 0.6 : 0.5) * (1 - Math.pow(Math.min(1, d), 4));
-      im.data[(y * R + x) * 4 + 3] = keep ? 140 + Math.random() * 115 : 0;
+      const keep = Math.random() < dens * (1 - Math.pow(Math.min(1, d), kind === "crayon" ? 8 : 4));
+      im.data[(y * R + x) * 4 + 3] = keep ? (kind === "crayon" ? 220 : 140) + Math.random() * 35 : 0;
       im.data[(y * R + x) * 4] = im.data[(y * R + x) * 4 + 1] = im.data[(y * R + x) * 4 + 2] = 255;
     }
     tg.putImageData(im, 0, 0); g.imageSmoothingEnabled = kind !== "chalk"; g.drawImage(t, 0, 0, S, S);
+  } else if (kind === "charcoal") {
+    // long broken streaks, soft ends
+    g.save(); g.beginPath(); g.ellipse(64, 64, 62, 40, 0, 0, Math.PI * 2); g.clip();
+    for (let k = 0; k < 90; k++) {
+      const y = 20 + Math.random() * 88, x = Math.random() * 90, w = 8 + Math.random() * 50;
+      g.globalAlpha = 0.25 + Math.random() * 0.6; g.fillStyle = "#fff"; g.fillRect(x, y, w, 0.8 + Math.random() * 2.2);
+    }
+    g.restore();
   } else if (kind === "bristle") {
     // streaks running along x inside an oval, like a loaded flat brush
     g.save(); g.beginPath(); g.ellipse(64, 64, 62, 52, 0, 0, Math.PI * 2); g.clip();
@@ -2513,19 +2593,32 @@ function tinted(kind, color) {
   let c = tintCache.get(key); if (c) return c;
   const t = texture(kind); c = document.createElement("canvas"); c.width = t.width; c.height = t.height;
   const g = c.getContext("2d"); g.drawImage(t, 0, 0); g.globalCompositeOperation = "source-in"; g.fillStyle = color; g.fillRect(0, 0, c.width, c.height);
-  if (tintCache.size > 80) tintCache.clear();
+  if (tintCache.size > 120) tintCache.clear();
   tintCache.set(key, c); return c;
 }
 const rotDraw = (g, img, x, y, w, h, a) => { g.save(); g.translate(x, y); g.rotate(a); g.drawImage(img, -w / 2, -h / 2, w, h); g.restore(); };
+/** A random nearby colour (hue and lightness), rounded so the texture caches stay small. */
+function jitterColor(rgb, amt) {
+  let [r, g, b] = rgb.map((v) => v / 255);
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b); let h = 0, l = (mx + mn) / 2, s = 0;
+  if (mx !== mn) { const d = mx - mn; s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h /= 6; }
+  h = (h + (Math.random() - 0.5) * amt * 0.5 + 1) % 1; l = clamp(l + (Math.random() - 0.5) * amt * 0.5, 0, 1);
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = (t) => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  const Q = (v) => Math.round(v * 255 / 8) * 8;
+  return `rgb(${Q(f(h + 1 / 3))},${Q(f(h))},${Q(f(h - 1 / 3))})`;
+}
 
 /**
  * One stroke of a paint brush. `g` is where dabs land: the stroke buffer, or the layer's pixels
- * themselves for brushes that mix with what's already painted (oil, smudge).
+ * themselves for brushes that change what's already painted (oil, smudge, blur).
+ * c holds the brush settings; `erase` makes every dab solid black (the buffer is then cut out).
  */
-function makePainter(g, kind, c, color) {
+function makePainter(g, kind, c, color, erase) {
   const B = PAINT_BRUSHES[kind] || PAINT_BRUSHES.round;
   const base = Color.parse(color);
   const oil = [], smudges = [];
+  let tmp = null;
   // oil reads the colours underneath from one snapshot taken at the start of the stroke (fast on phones)
   let snap = null;
   const sample = (x, y) => {
@@ -2535,16 +2628,23 @@ function makePainter(g, kind, c, color) {
     const i = (py * snap.width + px) * 4; return snap.data.subarray(i, i + 4);
   };
   return {
-    spacing: B.spacing,
+    lastSize: c.size,
+    get spacing() { return c.spacing ?? B.spacing; },
     dab(x, y, p, dir, i) {
-      const size = Math.max(0.5, c.size * (c.pressureSize ? 0.15 + 0.85 * p : 1));
+      const pm = c.pressureMin ?? 0.15;
+      let size = Math.max(0.5, c.size * (c.pressureSize ? pm + (1 - pm) * p : 1));
+      if (c.sizeJitter) size *= 1 - c.sizeJitter * Math.random();
+      if (c.scatter) { const a = Math.random() * Math.PI * 2, d = Math.random() * c.scatter * c.size; x += Math.cos(a) * d; y += Math.sin(a) * d; }
+      this.lastSize = size;
+      const rot = ((c.angle || 0) * Math.PI) / 180 + (c.follow ? dir : 0) + (c.angleJitter ? (Math.random() - 0.5) * Math.PI * 2 * c.angleJitter : 0);
       const alpha = clamp(c.flow * (c.pressureOpacity ? p : 1), 0.01, 1);
+      const col = erase ? "#000" : c.colorJitter ? jitterColor(base, c.colorJitter) : color;
       g.globalAlpha = alpha; g.globalCompositeOperation = "source-over";
       switch (kind) {
         case "spray": case "dots": {
-          const dots = kind === "dots";
-          const n = dots ? clamp(Math.round(size / 12), 2, 9) : clamp(Math.round((size * size) / 50), 8, 220);
-          g.fillStyle = color; g.beginPath();
+          const dots = kind === "dots", dn = c.density ?? 1;
+          const n = Math.max(1, Math.round((dots ? clamp(size / 12, 2, 9) : clamp((size * size) / 50, 8, 220)) * dn));
+          g.fillStyle = col; g.beginPath();
           for (let k = 0; k < n; k++) {
             const a = Math.random() * Math.PI * 2, d = (size / 2) * (dots ? Math.sqrt(Math.random()) : Math.pow(Math.random(), 0.75));
             const r = dots ? size * (0.035 + Math.random() * 0.07) : Math.max(0.45, size * 0.012 * (0.5 + Math.random()));
@@ -2552,22 +2652,26 @@ function makePainter(g, kind, c, color) {
           }
           g.fill(); break;
         }
-        case "chalk": case "pencil":
-          rotDraw(g, tinted(kind, color), x, y, size, size, Math.random() * Math.PI * 2); break;
-        case "watercolor": {
-          const s = size * (0.92 + Math.random() * 0.16);
-          rotDraw(g, tinted("watercolor", color), x, y, s, s, 0); break;
+        case "chalk": case "pencil": case "crayon": rotDraw(g, tinted(kind, col), x, y, size, size, rot); break;
+        case "charcoal": rotDraw(g, tinted("charcoal", col), x, y, size, size * 0.8, rot); break;
+        case "watercolor": rotDraw(g, tinted("watercolor", col), x, y, size, size, rot); break;
+        case "marker": rotDraw(g, tinted("chisel", col), x, y, size, size, rot); break;
+        case "airbrush": case "glow": g.drawImage(kind === "glow" ? stamp(col, c.hardness) : tinted("soft", col), x - size / 2, y - size / 2, size, size); break;
+        case "hatching": {
+          // one line per dab, all at the same angle: a hatched band
+          const len = size, w = Math.max(0.6, size * 0.035), ca = Math.cos(rot), sa = Math.sin(rot);
+          g.strokeStyle = col; g.lineWidth = w; g.lineCap = "round";
+          g.beginPath(); g.moveTo(x - ca * len / 2, y - sa * len / 2); g.lineTo(x + ca * len / 2, y + sa * len / 2); g.stroke();
+          break;
         }
-        case "marker": rotDraw(g, tinted("chisel", color), x, y, size, size, -Math.PI / 4); break;
-        case "airbrush": g.drawImage(tinted("soft", color), x - size / 2, y - size / 2, size, size); break;
         case "oil": {
           // the brush picks up some of the colour underneath and carries it along
           let cur = oil[i] || (oil[i] = base.slice(0, 3));
-          const u = sample(x, y), mix = App.style.paint.mix ?? 0.35;
+          const u = sample(x, y), mix = c.mix ?? 0.35;
           if (u && u[3] > 20) for (let k = 0; k < 3; k++) cur[k] += (u[k] - cur[k]) * mix * 0.22;
           for (let k = 0; k < 3; k++) cur[k] += (base[k] - cur[k]) * 0.015;
           const q = (v) => Math.round(v / 6) * 6;   // fewer distinct tints to cache
-          rotDraw(g, tinted("bristle", `rgb(${q(cur[0])},${q(cur[1])},${q(cur[2])})`), x, y, size, size * 0.8, dir);
+          rotDraw(g, tinted("bristle", c.colorJitter ? jitterColor(cur, c.colorJitter) : `rgb(${q(cur[0])},${q(cur[1])},${q(cur[2])})`), x, y, size, size * 0.8, rot);
           break;
         }
         case "smudge": {
@@ -2587,23 +2691,36 @@ function makePainter(g, kind, c, color) {
           sm.g.globalAlpha = 1 - clamp(c.flow, 0.05, 0.98) * 0.85; sm.g.drawImage(g.canvas, x - D / 2, y - D / 2, D, D, 0, 0, D, D); sm.g.globalAlpha = 1;
           break;
         }
-        default: g.drawImage(stamp(color, c.hardness), x - size / 2, y - size / 2, size, size);
+        case "blur": {
+          // soften: shrink the patch and scale it back up (works in every browser), laid down through a soft edge
+          const D = Math.max(4, Math.ceil(size)), k = Math.max(2, Math.round(2 + c.flow * 6));
+          if (!tmp) { tmp = [document.createElement("canvas"), document.createElement("canvas")]; }
+          const [a, b2] = tmp; if (a.width !== D) { a.width = a.height = D; } const sw = Math.max(1, Math.round(D / k)); if (b2.width !== sw) { b2.width = b2.height = sw; }
+          const ag = a.getContext("2d"), bg = b2.getContext("2d");
+          bg.clearRect(0, 0, sw, sw); bg.imageSmoothingQuality = "high"; bg.drawImage(g.canvas, x - D / 2, y - D / 2, D, D, 0, 0, sw, sw);
+          ag.globalCompositeOperation = "source-over"; ag.clearRect(0, 0, D, D); ag.imageSmoothingQuality = "high"; ag.drawImage(b2, 0, 0, D, D);
+          ag.globalCompositeOperation = "destination-in"; ag.drawImage(texture("soft"), 0, 0, D, D);
+          g.globalAlpha = 0.85; g.drawImage(a, x - D / 2, y - D / 2);
+          break;
+        }
+        default: g.drawImage(stamp(col, c.hardness), x - size / 2, y - size / 2, size, size);
       }
       g.globalAlpha = 1;
     }
   };
 }
-/** Draws a sample stroke of a paint brush into a small canvas (for the brush picker). */
-App.paintPreview = function (canvas, kind, color) {
+/** Draws a sample stroke of a brush into a small canvas (for the brush pickers). */
+App.paintPreview = function (canvas, kind, color, settings, erase) {
   const g = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
   g.clearRect(0, 0, W, H);
-  const B = PAINT_BRUSHES[kind];
-  const c = { size: ["spray", "dots", "airbrush", "watercolor"].includes(kind) ? H * 0.75 : Math.min(H * 0.5, Math.max(3, B.size * 0.3)), hardness: B.hardness, flow: B.flow, pressureSize: true, pressureOpacity: false };
-  if (kind === "smudge") { ["#e11d48", "#f59e0b", "#2563eb"].forEach((col, k) => { g.fillStyle = col; g.fillRect(W * (0.12 + k * 0.28), 4, W * 0.18, H - 8); }); }
-  const direct = B.direct, buf = direct ? null : document.createElement("canvas");
+  const B = PAINT_BRUSHES[kind], c = { ...brushDefaults(kind), ...(settings || {}) };
+  c.size = ["spray", "dots", "airbrush", "watercolor", "glow", "blur"].includes(kind) ? H * 0.75 : Math.min(H * 0.55, Math.max(3, c.size * 0.3));
+  if (erase) { g.fillStyle = "#9aa3ae"; g.fillRect(4, 6, W - 8, H - 12); }
+  else if (kind === "smudge" || kind === "blur") { ["#e11d48", "#f59e0b", "#2563eb"].forEach((col, k) => { g.fillStyle = col; g.fillRect(W * (0.12 + k * 0.28), 4, W * 0.18, H - 8); }); }
+  else if (kind === "glow") { g.fillStyle = "#111827"; g.fillRect(0, 0, W, H); }
+  const direct = B.direct && !erase, buf = direct ? null : document.createElement("canvas");
   if (buf) { buf.width = W; buf.height = H; }
-  const pt = direct ? g : buf.getContext("2d");
-  const P = makePainter(pt, kind, c, color);
+  const P = makePainter(direct ? g : buf.getContext("2d"), kind, c, color, erase);
   let last = null;
   for (let i = 0; i <= 60; i++) {
     const t = i / 60, x = 8 + t * (W - 16), y = H / 2 + Math.sin(t * Math.PI * 2) * H * 0.22, p = 0.35 + 0.65 * Math.sin(t * Math.PI);
@@ -2613,29 +2730,37 @@ App.paintPreview = function (canvas, kind, color) {
     } else P.dab(x, y, p, 0, 0);
     last = { x, y };
   }
-  if (buf) { g.globalAlpha = B.opacity; g.drawImage(buf, 0, 0); g.globalAlpha = 1; }
+  if (buf) { g.save(); g.globalAlpha = c.opacity; g.globalCompositeOperation = erase ? "destination-out" : B.blend || "source-over"; g.drawImage(buf, 0, 0); g.restore(); }
 };
-/** Chooses a paint brush and loads its starting settings (size, softness, flow…). */
-App.setPaintBrush = function (kind) {
-  const B = PAINT_BRUSHES[kind]; if (!B) return;
-  Object.assign(App.style.paint, { brush: kind, size: B.size, hardness: B.hardness, opacity: B.opacity, flow: B.flow });
+/** Switches brush for the paint brush or the eraser; each brush remembers its own settings. */
+App.setPaintBrush = function (kind, forEraser) {
+  if (!PAINT_BRUSHES[kind]) return;
+  const tgt = forEraser ? App.style.eraser : App.style.paint;
+  const store = forEraser ? (App.style.eraserSets = App.style.eraserSets || {}) : (App.style.paintSets = App.style.paintSets || {});
+  const cur = tgt.brush || "round";
+  store[cur] = Object.fromEntries(BRUSH_KEYS.map((k) => [k, tgt[k]]));
+  Object.assign(tgt, store[kind] || brushDefaults(kind), { brush: kind });
 };
+App.resetPaintBrush = function (forEraser) {
+  const tgt = forEraser ? App.style.eraser : App.style.paint;
+  Object.assign(tgt, brushDefaults(tgt.brush || "round"));
+};
+// start both tools with a full set of settings
+Object.assign(App.style.paint, { ...brushDefaults(App.style.paint.brush || "round"), brush: App.style.paint.brush || "round" });
+Object.assign(App.style.eraser, { ...brushDefaults("round"), hardness: 0.8, size: App.style.eraser.size || 40, brush: "round" });
 
 function paintTool(erase) {
   let last = null, cell = null, leftover = 0, trails = null, painter = null, before = null;
-  const cfg = () => (erase ? { size: App.style.eraser.size, hardness: 0.8, opacity: 1, flow: 1, pressureSize: true, pressureOpacity: false, color: "#000" } : App.style.paint);
+  const cfg = () => (erase ? App.style.eraser : App.style.paint);
+  let sm = null;   // stabiliser state
   const mode = () => (erase ? App.style.eraser.mode || "all" : "pixels");
   // a mirrored copy of a stroke also mirrors its direction
   const turn = (T, a) => Math.atan2(T[1] * Math.cos(a) + T[3] * Math.sin(a), T[0] * Math.cos(a) + T[2] * Math.sin(a));
   const dab = (g, x, y, p, dir = 0) => {
-    if (painter) { Sym.all().forEach((T, i) => { const [px, py] = M.apply(T, x, y); painter.dab(px, py, p, turn(T, dir), i); }); return; }
-    const c = cfg(); const size = Math.max(0.5, c.size * (c.pressureSize ? 0.15 + 0.85 * p : 1));
-    g.globalAlpha = clamp(c.flow * (c.pressureOpacity ? p : 1), 0.01, 1);
-    const st = stamp(erase ? "#000" : c.color, c.hardness);
     Sym.all().forEach((T, i) => {
       const [px, py] = M.apply(T, x, y);
-      g.drawImage(st, px - size / 2, py - size / 2, size, size);
-      if (trails) (trails[i] = trails[i] || []).push([px, py, size / 2]);
+      painter.dab(px, py, p, turn(T, dir), i);
+      if (trails) (trails[i] = trails[i] || []).push([px, py, painter.lastSize / 2]);
     });
   };
   return {
@@ -2651,19 +2776,25 @@ function paintTool(erase) {
       const d = App.doc, b = Paint.buffer;
       if (b.width !== d.width || b.height !== d.height) { b.width = d.width; b.height = d.height; }
       const g = b.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, d.width, d.height);
-      const kind = erase ? null : App.style.paint.brush || "round", direct = !!(kind && PAINT_BRUSHES[kind]?.direct);
-      // oil & smudge work straight on the layer's pixels (they mix with what's there)
-      painter = kind ? makePainter(direct ? cell.raster.getContext("2d", { willReadFrequently: kind === "oil" }) : g, kind, cfg(), cfg().color) : null;
-      Paint.live = { alpha: direct ? 1 : cfg().opacity, erase, pixels: pixels && !direct, vectors, direct };
+      let kind = cfg().brush || "round";
+      if (erase && !App.ERASER_BRUSHES.includes(kind)) kind = "round";
+      const direct = !erase && !!PAINT_BRUSHES[kind].direct;
+      // oil, smudge & blur work straight on the layer's pixels (they change what's there)
+      if (direct && !cell.raster) rasterForPaint(cell);
+      painter = makePainter(direct ? cell.raster.getContext("2d") : g, kind, cfg(), erase ? "#000" : cfg().color, erase);
+      Paint.live = { alpha: direct ? 1 : cfg().opacity, erase, pixels: pixels && !direct, vectors, direct, blend: erase ? null : PAINT_BRUSHES[kind].blend };
       trails = vectors ? [] : null;
-      last = p; leftover = 0; dab(painter && direct ? null : g, p.x, p.y, p.p); this.masked(); changed("paint");
+      sm = { x: p.x, y: p.y, p: p.p };
+      last = p; leftover = 0; dab(g, p.x, p.y, p.p); this.masked(); changed("paint");
     },
     move(p) {
       if (erase && mode() === "objects") { if (this._erasing) this.eraseObjects(p, false); return; }
       if (!last || !cell) return;
+      const k0 = (cfg().smoothing || 0) * 0.92;
+      if (k0 > 0) { sm.x = sm.x * k0 + p.x * (1 - k0); sm.y = sm.y * k0 + p.y * (1 - k0); sm.p = sm.p * k0 + p.p * (1 - k0); p = { ...p, x: sm.x, y: sm.y, p: sm.p }; }
       const g = Paint.buffer.getContext("2d");
       const dist = Math.hypot(p.x - last.x, p.y - last.y);
-      const step = Math.max(0.5, cfg().size * (painter ? painter.spacing : 0.08));
+      const step = Math.max(0.5, cfg().size * Math.max(0.01, painter.spacing));
       const dir = Math.atan2(p.y - last.y, p.x - last.x);
       let t = leftover;
       while (t < dist) { const k = t / dist; dab(g, lerp(last.x, p.x, k), lerp(last.y, p.y, k), lerp(last.p, p.p, k), dir); t += step; }
@@ -2681,7 +2812,7 @@ function paintTool(erase) {
       const lv = Paint.live;
       if (lv.pixels && cell.raster) {
         const g = cell.raster.getContext("2d");
-        g.save(); g.globalAlpha = lv.alpha; g.globalCompositeOperation = erase ? "destination-out" : "source-over";
+        g.save(); g.globalAlpha = lv.alpha; g.globalCompositeOperation = erase ? "destination-out" : lv.blend || "source-over";
         g.drawImage(Paint.buffer, 0, 0); g.restore();
       }
       if (lv.vectors && trails && cell.objects.length) {
@@ -3397,19 +3528,21 @@ UI.buildProps = function () {
 
   // --- tool options
   const opts = [];
-  if (t === "vbrush") opts.push(UI.brushPicker(Render.VBRUSHES, s.brush.style || "pressure", (id) => { s.brush.style = id; }, (cv, id) => UI.vbrushPreview(cv, id)), slider("Size", 1, 300, 1, () => s.brush.size, (v) => (s.brush.size = v), { record: false }), slider("Pressure", 0, 1, 0.01, () => s.brush.pressure, (v) => (s.brush.pressure = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), slider("Smoothing", 0, 1, 0.01, () => s.brush.smooth, (v) => (s.brush.smooth = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }), check("Tapered ends", () => s.brush.taper, (v) => (s.brush.taper = v), { record: false }));
-  if (t === "paint") {
-    const kind = s.paint.brush || "round", pct = { record: false, fmt: (v) => Math.round(v * 100) + "%" };
-    opts.push(UI.brushPicker(Object.entries(App.PAINT_BRUSHES).map(([id, b]) => [id, b.name]), kind, (id) => App.setPaintBrush(id), (cv, id) => App.paintPreview(cv, id, s.paint.color)),
-      slider("Size", 1, 400, 1, () => s.paint.size, (v) => (s.paint.size = v), { record: false }));
-    if (["round", "marker"].includes(kind)) opts.push(slider("Hardness", 0, 1, 0.01, () => s.paint.hardness, (v) => (s.paint.hardness = v), pct));
-    if (kind !== "smudge") opts.push(slider("Opacity", 0.05, 1, 0.01, () => s.paint.opacity, (v) => (s.paint.opacity = v), pct));
-    opts.push(slider(kind === "smudge" ? "Strength" : "Flow", 0.02, 1, 0.01, () => s.paint.flow, (v) => (s.paint.flow = v), pct));
-    if (kind === "oil") opts.push(slider("Colour mixing", 0, 1, 0.01, () => s.paint.mix ?? 0.35, (v) => (s.paint.mix = v), pct));
-    const hints = { oil: "Picks up the paint already on this layer and blends it into the stroke.", smudge: "Drags the painted pixels on this layer along with your stroke.", watercolor: "Build it up in layers: each stroke is translucent with a darker rim.", marker: "Overlapping in one stroke stays even; a new stroke on top darkens it." };
-    if (hints[kind]) opts.push(h("p", { class: "hint" }, hints[kind]));
+  if (t === "vbrush") {
+    const st = s.brush.style || "pressure";
+    opts.push(UI.brushPicker(Render.VBRUSHES, st, (id) => { s.brush.style = id; }, (cv, id) => UI.vbrushPreview(cv, id, id === st ? s.brush : null)),
+      slider("Size", 1, 300, 1, () => s.brush.size, (v) => (s.brush.size = v), { record: false }),
+      ...UI.vbrushParams(st, (k) => s.brush[k], (k, v) => { s.brush[k] = v; UI.refreshPreview(); }, false),
+      slider("Pressure", 0, 1, 0.01, () => s.brush.pressure, (v) => (s.brush.pressure = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }),
+      slider("Smoothing", 0, 1, 0.01, () => s.brush.smooth, (v) => (s.brush.smooth = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }),
+      check("Tapered ends", () => s.brush.taper, (v) => (s.brush.taper = v), { record: false }),
+      btn("Reset style settings", () => { Object.assign(s.brush, { sp: 1, amt: 0.5, ang: 45, freq: 1 }); UI.buildProps(); }));
   }
-  if (t === "paint") opts.push( check("Pressure changes size", () => s.paint.pressureSize, (v) => (s.paint.pressureSize = v), { record: false }), check("Pressure changes opacity", () => s.paint.pressureOpacity, (v) => (s.paint.pressureOpacity = v), { record: false }));
+  if (t === "paint") {
+    const kind = s.paint.brush || "round";
+    opts.push(UI.brushPicker(Object.entries(App.PAINT_BRUSHES).map(([id, b]) => [id, b.name]), kind, (id) => App.setPaintBrush(id), (cv, id) => App.paintPreview(cv, id, s.paint.color, id === kind ? s.paint : (s.paintSets || {})[id])));
+    opts.push(...UI.brushSettings(s.paint, kind, false));
+  }
   if (t === "eraser") {
     const hints = {
       all: "Rubs out painted pixels and cuts through vector shapes and lines where you erase.",
@@ -3418,9 +3551,14 @@ UI.buildProps = function () {
       objects: "Removes every vector shape or line you touch, as a whole."
     };
     const hint = h("p", { class: "hint" }, hints[s.eraser.mode] || hints.all);
-    opts.push(slider("Size", 2, 400, 1, () => s.eraser.size, (v) => (s.eraser.size = v), { record: false }),
-      select("Erases", [["all", "Everything (pixels + vectors)"], ["pixels", "Painted pixels only"], ["cut", "Parts of vectors"], ["objects", "Whole vector objects"]], () => s.eraser.mode, (v) => { s.eraser.mode = v; hint.textContent = hints[v]; UI.syncSymButton(); }, { record: false }),
-      hint, h("p", { class: "hint" }, "Tip: flip your stylus to use its eraser end with any tool."));
+    const kind = App.ERASER_BRUSHES.includes(s.eraser.brush) ? s.eraser.brush : "round";
+    opts.push(select("Erases", [["all", "Everything (pixels + vectors)"], ["pixels", "Painted pixels only"], ["cut", "Parts of vectors"], ["objects", "Whole vector objects"]], () => s.eraser.mode, (v) => { s.eraser.mode = v; hint.textContent = hints[v]; UI.syncSymButton(); }, { record: false }), hint);
+    if (s.eraser.mode !== "objects") {
+      opts.push(h("p", { class: "hint" }, "Eraser brush — rubs out in the brush's shape and texture:"),
+        UI.brushPicker(App.ERASER_BRUSHES.map((id) => [id, App.PAINT_BRUSHES[id].name]), kind, (id) => App.setPaintBrush(id, true), (cv, id) => App.paintPreview(cv, id, "#000", id === kind ? s.eraser : (s.eraserSets || {})[id], true)));
+      opts.push(...UI.brushSettings(s.eraser, kind, true));
+    } else opts.push(slider("Size", 2, 400, 1, () => s.eraser.size, (v) => (s.eraser.size = v), { record: false }));
+    opts.push(h("p", { class: "hint" }, "Tip: flip your stylus to use its eraser end with any tool."));
   }
   if (t === "bucket") opts.push(slider("Tolerance", 0, 128, 1, () => s.bucket.tolerance, (v) => (s.bucket.tolerance = v), { record: false }), h("p", { class: "hint" }, "Click inside a vector shape to recolour it, or anywhere else to flood-fill pixels. Lines drawn with any tool act as borders."));
   if (t === "rect") opts.push(slider("Corner radius", 0, 400, 1, () => s.shape.radius, (v) => { s.shape.radius = v; if (editSel) Cmd.editSelected((o) => { if (o.type === "rect") o.r = v; }); }, { record: false }));
@@ -3453,7 +3591,12 @@ UI.buildProps = function () {
       h("div", { class: "btnrow" }, btn("Align left", () => Cmd.align("l", null)), btn("Centre", () => Cmd.align("c", "m")), btn("Align right", () => Cmd.align("r", null))),
       h("div", { class: "btnrow" }, btn("Align top", () => Cmd.align(null, "t")), btn("Middle", () => Cmd.align(null, "m")), btn("Align bottom", () => Cmd.align(null, "b")))
     ];
-    if (sel.some((x) => x.type === "brush")) kids.unshift(select("Brush style", Render.VBRUSHES, () => (sel.find((x) => x.type === "brush").style || "pressure"), (v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") { x.style = v; if (!x.seed) x.seed = 1 + Math.floor(Math.random() * 9999); } }); changed("style"); }));
+    const fb = sel.find((x) => x.type === "brush");
+    if (fb) {
+      const setSel = (k, v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") x[k] = v; }); changed("brush-param"); };
+      kids.unshift(...UI.vbrushParams(fb.style || "pressure", (k) => fb[k], setSel, true));
+    }
+    if (fb) kids.unshift(select("Brush style", Render.VBRUSHES, () => (sel.find((x) => x.type === "brush").style || "pressure"), (v) => { const c = editableCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") { x.style = v; if (!x.seed) x.seed = 1 + Math.floor(Math.random() * 9999); } }); changed("style"); UI.buildProps(); }));
     if (o.type === "text") kids.unshift(btn("Edit text", () => TextTool.edit(o)), slider("Text size", 8, 600, 1, () => o.size, (v) => { const c = editableCell(); c.objects.forEach((x) => { if (x.id === o.id) x.size = v; }); changed("size"); }));
     const grouped = sel.length > 1 && sel[0].group && sel.every((x) => x.group === sel[0].group);
     box.append(section(`Selection · ${grouped ? "group of " : ""}${sel.length} ${sel.length === 1 ? "object" : "objects"}`, ...kids));
@@ -3553,17 +3696,67 @@ UI.brushPicker = function (items, current, pick, draw) {
     const cv = h("canvas", { width: 132, height: 40, "aria-hidden": "true" });
     const b = h("button", { type: "button", class: "brushtile" + (id === current ? " on" : ""), role: "radio", "aria-checked": String(id === current), title: name, onclick: () => { pick(id); UI.buildProps(); } }, cv, h("span", {}, name));
     grid.append(b);
+    cv._draw = () => draw(cv, id);
     requestAnimationFrame(() => { try { draw(cv, id); } catch (e) { /* preview only */ } });
   }
   return grid;
 };
-UI.vbrushPreview = function (cv, style) {
+/** The settings every paint / eraser brush offers, plus the ones only some brushes use. */
+UI.brushSettings = function (tgt, kind, erase) {
+  const pct = { record: false, fmt: (v) => Math.round(v * 100) + "%" }, deg = { record: false, fmt: (v) => Math.round(v) + "°" };
+  const redraw = () => UI.refreshPreview();
+  const sl = (label, key, min, max, step, o = pct) => slider(label, min, max, step, () => tgt[key] ?? 0, (v) => { tgt[key] = v; redraw(); }, o);
+  const B = App.PAINT_BRUSHES[kind], textured = ["chalk", "pencil", "crayon", "charcoal", "oil", "marker", "watercolor", "hatching"].includes(kind);
+  const out = [sl("Size", "size", 1, 400, 1, { record: false })];
+  if (["round", "ink", "marker", "glow"].includes(kind)) out.push(sl("Hardness", "hardness", 0, 1, 0.01));
+  if (!B.direct) out.push(sl(erase ? "Strength" : "Opacity", "opacity", 0.05, 1, 0.01));
+  out.push(sl(kind === "smudge" || kind === "blur" ? "Strength" : "Flow", "flow", 0.02, 1, 0.01));
+  out.push(sl("Spacing", "spacing", 0.01, 1.5, 0.01));
+  if (kind === "spray" || kind === "dots") out.push(sl("Density", "density", 0.1, 4, 0.05, { record: false, fmt: (v) => v.toFixed(2) + "×" }));
+  if (kind === "oil") out.push(sl("Colour mixing", "mix", 0, 1, 0.01));
+  out.push(sl("Size jitter", "sizeJitter", 0, 1, 0.01), sl("Scatter", "scatter", 0, 2, 0.01));
+  if (textured) {
+    out.push(sl("Angle", "angle", -180, 180, 1, deg), sl("Angle jitter", "angleJitter", 0, 1, 0.01),
+      check("Turn with the stroke", () => !!tgt.follow, (v) => { tgt.follow = v; redraw(); }, { record: false }));
+  }
+  if (!erase && !["smudge", "blur"].includes(kind)) out.push(sl("Colour jitter", "colorJitter", 0, 1, 0.01));
+  out.push(sl("Stabiliser", "smoothing", 0, 1, 0.01),
+    check("Pressure changes size", () => tgt.pressureSize, (v) => { tgt.pressureSize = v; redraw(); }, { record: false }));
+  if (tgt.pressureSize) out.push(sl("Thinnest (light press)", "pressureMin", 0, 1, 0.01));
+  if (!B.direct) out.push(check(erase ? "Pressure changes strength" : "Pressure changes opacity", () => tgt.pressureOpacity, (v) => { tgt.pressureOpacity = v; redraw(); }, { record: false }));
+  const hints = {
+    oil: "Picks up the paint already on this layer and blends it into the stroke.", smudge: "Drags the painted pixels on this layer along with your stroke.",
+    blur: "Softens the painted pixels on this layer where you brush.", watercolor: "Build it up in layers: each stroke is translucent with a darker rim.",
+    marker: "Overlapping in one stroke stays even; a new stroke on top darkens it.", glow: "Adds light: looks best on dark colours. Colours brighten where strokes overlap.",
+    hatching: "Draws parallel lines at the chosen angle. Cross-hatch by changing the angle and going over it again."
+  };
+  if (hints[kind] && !erase) out.push(h("p", { class: "hint" }, hints[kind]));
+  out.push(btn("Reset this brush", () => { App.resetPaintBrush(erase); UI.buildProps(); }));
+  return out;
+};
+/** Re-draws the selected brush tile's sample after a setting changes. */
+UI.refreshPreview = function () {
+  const tile = document.querySelector(".brushtile.on canvas"); if (!tile || !tile._draw) return;
+  cancelAnimationFrame(UI._pv); UI._pv = requestAnimationFrame(() => { try { tile._draw(); } catch (e) { /* preview only */ } });
+};
+/** Sliders for the extra settings of a vector brush style (on the tool, or on selected strokes). */
+UI.vbrushParams = function (style, get, set, record) {
+  const P = Render.VBRUSH_PARAMS[style] || {}, out = [];
+  const o = (fmt) => ({ record, fmt });
+  if (P.sp) out.push(slider(P.sp, 0.3, 3, 0.05, () => get("sp") ?? 1, (v) => set("sp", v), o((v) => v.toFixed(2) + "×")));
+  if (P.amt) out.push(slider(P.amt, 0, 1, 0.01, () => get("amt") ?? 0.5, (v) => set("amt", v), o((v) => Math.round(v * 100) + "%")));
+  if (P.ang) out.push(slider(P.ang, 0, 180, 1, () => get("ang") ?? 45, (v) => set("ang", v), o((v) => Math.round(v) + "°")));
+  if (P.freq) out.push(slider(P.freq, 0.3, 4, 0.05, () => get("freq") ?? 1, (v) => set("freq", v), o((v) => v.toFixed(2) + "×")));
+  return out;
+};
+UI.vbrushPreview = function (cv, style, params) {
   const g = cv.getContext("2d"), W = cv.width, H = cv.height;
   g.clearRect(0, 0, W, H);
   const pts = [];
   for (let i = 0; i <= 40; i++) { const t = i / 40; pts.push(8 + t * (W - 16), H / 2 + Math.sin(t * Math.PI * 2) * H * 0.22, 0.3 + 0.7 * Math.sin(t * Math.PI)); }
   const fill = App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke || "#111");
-  Render.drawObj(g, { type: "brush", pts, size: 9, pressure: 0.8, taper: true, style, seed: 7, m: M.id(), fill, opacity: 1 });
+  const q = params || {};
+  Render.drawObj(g, { type: "brush", pts, size: 8, pressure: 0.8, taper: true, style, seed: 7, sp: q.sp ?? 1, amt: q.amt ?? 0.5, ang: q.ang ?? 45, freq: q.freq ?? 1, m: M.id(), fill, opacity: 1 });
 };
 
 UI.syncSwatch = function () {

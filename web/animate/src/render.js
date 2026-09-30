@@ -60,8 +60,20 @@ Render.localPath = function (o, p = new Path2D()) {
 /** Vector brush styles (the brush object's `style`). */
 Render.VBRUSHES = [
   ["pressure", "Pressure"], ["uniform", "Monoline"], ["taper", "Ink taper"], ["calligraphy", "Calligraphy"], ["rough", "Rough edge"],
-  ["bristle", "Dry bristle"], ["dotted", "Dotted"], ["dashed", "Dashed"], ["spray", "Spray"], ["splatter", "Splatter"]
+  ["bristle", "Dry bristle"], ["dotted", "Dotted"], ["dashed", "Dashed"], ["spray", "Spray"], ["splatter", "Splatter"],
+  ["wavy", "Wavy"], ["zigzag", "Zigzag"], ["outline", "Hollow outline"], ["beads", "Beads"], ["chain", "Chain rings"], ["hatch", "Hatch marks"]
 ];
+/**
+ * Extra settings each vector style understands (stored on the stroke):
+ * sp = spacing, amt = the style's main amount, ang = angle in degrees, freq = wavelength.
+ */
+Render.VBRUSH_PARAMS = {
+  taper: { amt: "Taper length" }, calligraphy: { amt: "Nib contrast", ang: "Nib angle" }, rough: { amt: "Roughness" },
+  bristle: { amt: "Dryness", sp: "Bristles" }, dotted: { sp: "Spacing" }, dashed: { sp: "Dash length", amt: "Gap" },
+  spray: { amt: "Spread", sp: "Density" }, splatter: { amt: "Splatter" }, wavy: { amt: "Wave height", freq: "Wavelength" },
+  zigzag: { amt: "Zigzag height", freq: "Wavelength" }, outline: { amt: "Line thickness" }, beads: { sp: "Spacing", amt: "Size contrast" },
+  chain: { sp: "Spacing", amt: "Ring thickness" }, hatch: { sp: "Spacing", ang: "Hatch angle", amt: "Mark length" }
+};
 /** Repeatable pseudo-random number in 0..1 (brush textures must look the same on every redraw). */
 function hash(n) { n = Math.sin(n * 127.1 + 311.7) * 43758.5453; return n - Math.floor(n); }
 
@@ -98,37 +110,62 @@ function brushOutline(o, p) {
   const pts = o.pts, n = pts.length / 3;
   if (!n) return;
   const st = o.style || "pressure", seed = o.seed || 1, size = o.size;
+  const sp = o.sp ?? 1, amt = o.amt ?? 0.5, ang = ((o.ang ?? 45) * Math.PI) / 180, freq = o.freq ?? 1;
   const xs = new Array(n), ys = new Array(n), rs = new Array(n);
   for (let i = 0; i < n; i++) { xs[i] = pts[i * 3]; ys[i] = pts[i * 3 + 1]; }
-  const tapered = (o.taper || st === "taper") && n > 6, tk = st === "taper" ? Math.max(4, Math.round(n / 3)) : 4, tmin = st === "taper" ? 0.06 : 0.35;
+  const tapered = (o.taper || st === "taper") && n > 6;
+  const tk = st === "taper" ? Math.max(3, Math.round(n * (0.08 + 0.5 * amt))) : 4, tmin = st === "taper" ? 0.06 : 0.35;
+  const tan = (X, Y, i, N) => { const i0 = Math.max(0, i - 1), i1 = Math.min(N - 1, i + 1); let tx = X[i1] - X[i0], ty = Y[i1] - Y[i0]; const l = Math.hypot(tx, ty) || 1; return [tx / l, ty / l]; };
   for (let i = 0; i < n; i++) {
-    let r = st === "uniform" ? size / 2 : (size * ((1 - o.pressure) + o.pressure * pts[i * 3 + 2])) / 2;
+    let r = st === "uniform" || st === "outline" || st === "wavy" || st === "zigzag" ? size / 2 : (size * ((1 - o.pressure) + o.pressure * pts[i * 3 + 2])) / 2;
     if (tapered && st !== "uniform") { if (i < tk) r *= tmin + ((1 - tmin) * i) / tk; if (i > n - 1 - tk) r *= tmin + ((1 - tmin) * (n - 1 - i)) / tk; }
     if (st === "calligraphy") {
-      // a flat nib held at 45°: thick across it, hairline along it
-      const i0 = Math.max(0, i - 1), i1 = Math.min(n - 1, i + 1);
-      let tx = xs[i1] - xs[i0], ty = ys[i1] - ys[i0]; const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
-      r *= 0.1 + 0.9 * Math.abs(tx * Math.SQRT1_2 - ty * Math.SQRT1_2);
+      // a flat nib held at an angle: thick across it, thin along it
+      const [tx, ty] = tan(xs, ys, i, n), c = 0.3 + 0.7 * amt;
+      r *= 1 - c + c * Math.abs(tx * Math.sin(ang) - ty * Math.cos(ang));
     }
-    if (st === "rough") r *= 0.6 + 0.8 * hash(seed + i * 1.37);
+    if (st === "rough") r *= 1 - amt * 0.8 + amt * 1.6 * hash(seed + i * 1.37);
     rs[i] = Math.max(0.3, r);
   }
   // running length along the stroke
   const L = new Float64Array(n);
   for (let i = 1; i < n; i++) L[i] = L[i - 1] + Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]);
-  const at = (d) => { // point + index at distance d
+  const total = L[n - 1];
+  const at = (d) => { // point, half-width and direction at distance d
     let i = 1; while (i < n - 1 && L[i] < d) i++;
+    if (n === 1) return [xs[0], ys[0], rs[0], 1, 0];
     const seg = L[i] - L[i - 1] || 1, t = Math.min(1, Math.max(0, (d - L[i - 1]) / seg));
-    return [xs[i - 1] + (xs[i] - xs[i - 1]) * t, ys[i - 1] + (ys[i] - ys[i - 1]) * t, rs[i - 1] + (rs[i] - rs[i - 1]) * t];
+    const dx = xs[i] - xs[i - 1], dy = ys[i] - ys[i - 1], l = Math.hypot(dx, dy) || 1;
+    return [xs[i - 1] + dx * t, ys[i - 1] + dy * t, rs[i - 1] + (rs[i] - rs[i - 1]) * t, dx / l, dy / l];
   };
   switch (st) {
     case "dotted": {
-      const gap = Math.max(1, size * 1.6);
-      for (let d = 0; d <= L[n - 1] + 1e-6; d += gap) { const [x, y, r] = at(d); dot(p, x, y, r * 0.8); }
+      const gap = Math.max(1, size * 1.6 * sp);
+      for (let d = 0; d <= total + 1e-6; d += gap) { const [x, y, r] = at(d); dot(p, x, y, r * 0.8); }
+      break;
+    }
+    case "beads": {
+      const gap = Math.max(1, size * 1.1 * sp); let k = 0;
+      for (let d = 0; d <= total + 1e-6; d += gap, k++) { const [x, y, r] = at(d); dot(p, x, y, r * (k % 2 ? 1 - 0.8 * amt : 0.95)); }
+      break;
+    }
+    case "chain": {
+      // hollow rings (the stroke is filled even-odd, so the inner circle cuts the hole)
+      const gap = Math.max(1, size * 1.15 * sp);
+      for (let d = 0; d <= total + 1e-6; d += gap) { const [x, y, r] = at(d); dot(p, x, y, r * 0.95); dot(p, x, y, Math.max(0.2, r * 0.95 * (0.85 - 0.7 * amt))); }
+      break;
+    }
+    case "hatch": {
+      const gap = Math.max(1, size * 0.55 * sp), len = size * (0.4 + 1.6 * amt), ca = Math.cos(ang), sa = Math.sin(ang);
+      for (let d = 0; d <= total + 1e-6; d += gap) {
+        const [x, y, r] = at(d), w = Math.max(0.35, r * 0.22), hl = len * (0.5 + r / size) / 2;
+        const ax = ca * hl, ay = sa * hl, nx = -sa * w, ny = ca * w;
+        p.moveTo(x - ax + nx, y - ay + ny); p.lineTo(x + ax + nx, y + ay + ny); p.lineTo(x + ax - nx, y + ay - ny); p.lineTo(x - ax - nx, y - ay - ny); p.closePath();
+      }
       break;
     }
     case "dashed": {
-      const dash = Math.max(2, size * 2.4), period = dash + Math.max(1, size * 1.4);
+      const dash = Math.max(2, size * 2.4 * sp), period = dash + Math.max(1, size * (0.3 + 2.2 * amt));
       let a = -1;
       for (let i = 0; i <= n; i++) {
         const on = i < n && L[i] % period < dash;
@@ -138,10 +175,10 @@ function brushOutline(o, p) {
       break;
     }
     case "spray": {
-      const count = Math.max(3, Math.min(16, Math.round(size / 3)));
+      const count = Math.max(1, Math.min(40, Math.round((size / 3) * sp))), spread = 0.6 + amt * 2.4;
       for (let i = 0; i < n; i++) for (let k = 0; k < count; k++) {
-        const h = seed * 13 + i * 31 + k * 7, ang = hash(h) * Math.PI * 2, dist = Math.sqrt(hash(h + 1)) * rs[i] * 1.8;
-        dot(p, xs[i] + Math.cos(ang) * dist, ys[i] + Math.sin(ang) * dist, Math.max(0.5, size * 0.06 * (0.5 + hash(h + 2))));
+        const h = seed * 13 + i * 31 + k * 7, a = hash(h) * Math.PI * 2, dist = Math.sqrt(hash(h + 1)) * rs[i] * spread;
+        dot(p, xs[i] + Math.cos(a) * dist, ys[i] + Math.sin(a) * dist, Math.max(0.5, size * 0.06 * (0.5 + hash(h + 2))));
       }
       break;
     }
@@ -150,30 +187,46 @@ function brushOutline(o, p) {
       ribbon(p, xs, ys, rs, 0, n - 1);
       for (let i = 0; i < n; i++) {
         const h = seed * 17 + i * 23;
-        if (hash(h) < 0.6) continue;
-        const ang = hash(h + 1) * Math.PI * 2, dist = size * (0.6 + hash(h + 2) * 1.3);
-        dot(p, xs[i] + Math.cos(ang) * dist, ys[i] + Math.sin(ang) * dist, Math.max(0.5, size * (0.05 + 0.14 * hash(h + 3))));
+        if (hash(h) > amt * 0.8) continue;
+        const a = hash(h + 1) * Math.PI * 2, dist = size * (0.6 + hash(h + 2) * 1.3);
+        dot(p, xs[i] + Math.cos(a) * dist, ys[i] + Math.sin(a) * dist, Math.max(0.5, size * (0.05 + 0.14 * hash(h + 3))));
       }
       break;
     }
     case "bristle": {
-      const K = 7;
+      const K = Math.max(3, Math.min(16, Math.round(7 * sp)));
       for (let k = 0; k < K; k++) {
-        const off = (k / (K - 1) - 0.5) * 1.8, thick = 0.07 + 0.13 * hash(seed + k * 5.3);
+        const off = (k / (K - 1) - 0.5) * 1.8, thick = (14 / K) * (0.07 + 0.13 * hash(seed + k * 5.3));
         const bx = new Array(n), by = new Array(n), br = new Array(n);
-        for (let i = 0; i < n; i++) {
-          const i0 = Math.max(0, i - 1), i1 = Math.min(n - 1, i + 1);
-          let tx = xs[i1] - xs[i0], ty = ys[i1] - ys[i0]; const l = Math.hypot(tx, ty) || 1; tx /= l; ty /= l;
-          bx[i] = xs[i] - ty * off * rs[i]; by[i] = ys[i] + tx * off * rs[i]; br[i] = Math.max(0.3, rs[i] * thick * 2);
-        }
+        for (let i = 0; i < n; i++) { const [tx, ty] = tan(xs, ys, i, n); bx[i] = xs[i] - ty * off * rs[i]; by[i] = ys[i] + tx * off * rs[i]; br[i] = Math.max(0.3, rs[i] * thick); }
         // dry-brush gaps: each bristle skips a few stretches
         let a = -1;
         for (let i = 0; i <= n; i++) {
-          const on = i < n && hash(seed * 3 + k * 41 + Math.floor(i / 4)) > 0.28;
+          const on = i < n && hash(seed * 3 + k * 41 + Math.floor(i / 4)) > 0.03 + amt * 0.5;
           if (on && a < 0) a = i;
           if (!on && a >= 0) { ribbon(p, bx, by, br, a, i - 1); a = -1; }
         }
       }
+      break;
+    }
+    case "wavy": case "zigzag": {
+      // resample the stroke evenly, then push it sideways along a sine / triangle wave
+      const wl = Math.max(4, size * 4 * freq), amp = size * 1.6 * amt, step = st === "zigzag" ? wl / 2 : wl / 16;
+      const X = [], Y = [], R = [];
+      for (let d = 0, k = 0; d <= total + 1e-6; d += step, k++) {
+        const [x, y, r, tx, ty] = at(d);
+        const w = st === "zigzag" ? (k % 2 ? 1 : -1) : Math.sin((d / wl) * Math.PI * 2);
+        X.push(x - ty * w * amp); Y.push(y + tx * w * amp); R.push(r * 0.6);
+      }
+      if (st === "zigzag") { for (let k = 1; k < X.length; k++) { const mx = [X[k - 1], X[k]], my = [Y[k - 1], Y[k]]; ribbon(p, mx, my, [R[k - 1], R[k]], 0, 1); } }
+      else ribbon(p, X, Y, R, 0, X.length - 1);
+      break;
+    }
+    case "outline": {
+      // two ribbons filled even-odd leave a hollow line
+      ribbon(p, xs, ys, rs, 0, n - 1);
+      const inner = rs.map((r) => Math.max(0.2, r * (0.85 - 0.7 * amt)));
+      ribbon(p, xs, ys, inner, 0, n - 1);
       break;
     }
     default: ribbon(p, xs, ys, rs, 0, n - 1);
@@ -212,7 +265,7 @@ Render.localBounds = function (o) {
     case "brush": {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       for (let i = 0; i < o.pts.length; i += 3) { x0 = Math.min(x0, o.pts[i]); y0 = Math.min(y0, o.pts[i + 1]); x1 = Math.max(x1, o.pts[i]); y1 = Math.max(y1, o.pts[i + 1]); }
-      const r = o.style === "spray" || o.style === "splatter" ? o.size * 1.9 : o.size / 2;
+      const r = o.style === "spray" ? o.size * (0.4 + 1.3 * (o.amt ?? 0.5)) : o.style === "splatter" ? o.size * 1.9 : o.style === "wavy" || o.style === "zigzag" ? o.size * (0.5 + 1.7 * (o.amt ?? 0.5)) : o.style === "hatch" ? o.size * (0.5 + 1.6 * (o.amt ?? 0.5)) : o.size / 2;
       return { x: x0 - r, y: y0 - r, w: x1 - x0 + 2 * r, h: y1 - y0 + 2 * r };
     }
   }
@@ -275,7 +328,7 @@ Render.drawObj = function (ctx, o) {
 };
 
 Render.isCompound = (o) => o.type === "path" && o.nodes.some((n, i) => i > 0 && n.start);
-Render.fillRule = (o) => (o.type === "rings" || Render.isCompound(o) ? "evenodd" : "nonzero");
+Render.fillRule = (o) => (o.type === "rings" || Render.isCompound(o) || (o.type === "brush" && (o.style === "outline" || o.style === "chain")) ? "evenodd" : "nonzero");
 
 const hitCtx = document.createElement("canvas").getContext("2d");
 Render.hit = function (o, x, y, tol) {

@@ -103,7 +103,7 @@ function liveBuf(i) {
   const x = c.getContext("2d"); x.setTransform(1, 0, 0, 1, 0, 0); x.globalAlpha = 1; x.globalCompositeOperation = "source-over"; x.clearRect(0, 0, c.width, c.height);
   return x;
 }
-function applyLive(x) { x.save(); x.globalAlpha = Paint.live.alpha; x.globalCompositeOperation = Paint.live.erase ? "destination-out" : "source-over"; x.drawImage(Paint.buffer, 0, 0); x.restore(); }
+function applyLive(x) { x.save(); x.globalAlpha = Paint.live.alpha; x.globalCompositeOperation = Paint.live.erase ? "destination-out" : Paint.live.blend || "source-over"; x.drawImage(Paint.buffer, 0, 0); x.restore(); }
 function drawActiveLayerLive(g, L) {
   g.save(); g.globalAlpha = L.opacity; if (L.blend && L.blend !== "source-over") g.globalCompositeOperation = L.blend;
   if (L.kind === "draw") {
@@ -712,7 +712,7 @@ tool("vbrush", (() => {
       if (!layerEditable()) return;
       History.push();
       const b = App.style.brush;
-      obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, style: b.style || "pressure", seed: 1 + Math.floor(Math.random() * 9999), m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
+      obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, style: b.style || "pressure", sp: b.sp ?? 1, amt: b.amt ?? 0.5, ang: b.ang ?? 45, freq: b.freq ?? 1, seed: 1 + Math.floor(Math.random() * 9999), m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
       sm = { x: p.x, y: p.y, p: p.p };
       const cell = editableCell(); cell.objects.push(obj);
       const copies = Sym.transforms().map((T) => ({ ...obj, id: uid(), m: T, pts: obj.pts }));
@@ -840,19 +840,37 @@ function stamp(color, hardness) {
   stampCache.set(key, c); return c;
 }
 // ---- Paint brush presets & engine
+/**
+ * Each brush's starting settings. Every brush understands the common settings (size, opacity, flow,
+ * spacing, jitter, scatter, angle…); a few add their own (hardness, density, mixing).
+ */
 const PAINT_BRUSHES = {
   round:      { name: "Round",        size: 24, hardness: 0.7,  opacity: 1,    flow: 1,    spacing: 0.08 },
+  ink:        { name: "Ink pen",      size: 8,  hardness: 0.98, opacity: 1,    flow: 1,    spacing: 0.03, pressureMin: 0.03 },
   airbrush:   { name: "Airbrush",     size: 90, hardness: 0,    opacity: 1,    flow: 0.1,  spacing: 0.05 },
-  spray:      { name: "Spray paint",  size: 70, hardness: 1,    opacity: 1,    flow: 0.8,  spacing: 0.18 },
-  dots:       { name: "Dotted spray", size: 80, hardness: 1,    opacity: 1,    flow: 1,    spacing: 0.45 },
-  oil:        { name: "Oil paint",    size: 44, hardness: 0.8,  opacity: 1,    flow: 0.9,  spacing: 0.05, direct: true },
+  spray:      { name: "Spray paint",  size: 70, hardness: 1,    opacity: 1,    flow: 0.8,  spacing: 0.18, density: 1 },
+  dots:       { name: "Dotted spray", size: 80, hardness: 1,    opacity: 1,    flow: 1,    spacing: 0.45, density: 1 },
+  oil:        { name: "Oil paint",    size: 44, hardness: 0.8,  opacity: 1,    flow: 0.9,  spacing: 0.05, follow: true, mix: 0.35, direct: true },
   smudge:     { name: "Smudge",       size: 44, hardness: 0.5,  opacity: 1,    flow: 0.75, spacing: 0.08, direct: true },
-  chalk:      { name: "Chalk",        size: 40, hardness: 0.9,  opacity: 1,    flow: 0.85, spacing: 0.14 },
-  pencil:     { name: "Pencil",       size: 6,  hardness: 0.9,  opacity: 0.95, flow: 0.7,  spacing: 0.12 },
-  marker:     { name: "Marker",       size: 30, hardness: 0.95, opacity: 0.6,  flow: 1,    spacing: 0.04 },
-  watercolor: { name: "Watercolour",  size: 70, hardness: 0.3,  opacity: 0.8,  flow: 0.07, spacing: 0.03 }
+  blur:       { name: "Blur",         size: 60, hardness: 0.5,  opacity: 1,    flow: 0.5,  spacing: 0.15, direct: true },
+  chalk:      { name: "Chalk",        size: 40, hardness: 0.9,  opacity: 1,    flow: 0.85, spacing: 0.14, angleJitter: 1 },
+  charcoal:   { name: "Charcoal",     size: 34, hardness: 0.9,  opacity: 1,    flow: 0.7,  spacing: 0.08, follow: true, angleJitter: 0.08 },
+  crayon:     { name: "Crayon",       size: 18, hardness: 0.95, opacity: 1,    flow: 0.9,  spacing: 0.1,  angleJitter: 1 },
+  pencil:     { name: "Pencil",       size: 6,  hardness: 0.9,  opacity: 0.95, flow: 0.7,  spacing: 0.12, angleJitter: 1 },
+  marker:     { name: "Marker",       size: 30, hardness: 0.95, opacity: 0.6,  flow: 1,    spacing: 0.04, angle: -45 },
+  watercolor: { name: "Watercolour",  size: 70, hardness: 0.3,  opacity: 0.8,  flow: 0.07, spacing: 0.03, sizeJitter: 0.08 },
+  hatching:   { name: "Hatching",     size: 40, hardness: 1,    opacity: 1,    flow: 1,    spacing: 0.22, angle: 45 },
+  glow:       { name: "Glow / neon",  size: 40, hardness: 0.2,  opacity: 0.9,  flow: 0.35, spacing: 0.06, blend: "lighter" }
 };
 App.PAINT_BRUSHES = PAINT_BRUSHES;
+/** Brushes the eraser can use (the ones that mix or blur existing paint make no sense there). */
+App.ERASER_BRUSHES = Object.keys(PAINT_BRUSHES).filter((k) => !PAINT_BRUSHES[k].direct && k !== "glow");
+const BRUSH_KEYS = ["size", "hardness", "opacity", "flow", "spacing", "sizeJitter", "scatter", "angle", "angleJitter", "follow", "colorJitter", "density", "mix", "smoothing", "pressureSize", "pressureOpacity", "pressureMin"];
+function brushDefaults(kind) {
+  const B = PAINT_BRUSHES[kind] || PAINT_BRUSHES.round;
+  return { size: B.size, hardness: B.hardness, opacity: B.opacity, flow: B.flow, spacing: B.spacing, sizeJitter: B.sizeJitter || 0, scatter: 0, angle: B.angle || 0, angleJitter: B.angleJitter || 0, follow: !!B.follow, colorJitter: 0, density: B.density || 1, mix: B.mix ?? 0.35, smoothing: 0, pressureSize: true, pressureOpacity: false, pressureMin: B.pressureMin ?? 0.15 };
+}
+App.brushDefaults = brushDefaults;
 
 // white alpha-mask textures, tinted per colour on demand
 const texCache = new Map();
@@ -860,17 +878,25 @@ function texture(kind) {
   if (texCache.has(kind)) return texCache.get(kind);
   const S = 128, c = document.createElement("canvas"); c.width = c.height = S;
   const g = c.getContext("2d");
-  if (kind === "chalk" || kind === "pencil") {
-    // grain: a coarse (chalk) or fine (pencil) speckle inside a disc
-    const R = kind === "chalk" ? 40 : 128, t = document.createElement("canvas"); t.width = t.height = R;
-    const tg = t.getContext("2d"), im = tg.createImageData(R, R);
+  if (kind === "chalk" || kind === "pencil" || kind === "crayon") {
+    // grain: coarse (chalk), fine (pencil) or dense waxy (crayon) speckle inside a disc
+    const R = kind === "chalk" ? 40 : kind === "crayon" ? 64 : 128, t = document.createElement("canvas"); t.width = t.height = R;
+    const tg = t.getContext("2d"), im = tg.createImageData(R, R), dens = kind === "chalk" ? 0.6 : kind === "crayon" ? 0.78 : 0.5;
     for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) {
       const d = Math.hypot(x - R / 2 + 0.5, y - R / 2 + 0.5) / (R / 2);
-      const keep = Math.random() < (kind === "chalk" ? 0.6 : 0.5) * (1 - Math.pow(Math.min(1, d), 4));
-      im.data[(y * R + x) * 4 + 3] = keep ? 140 + Math.random() * 115 : 0;
+      const keep = Math.random() < dens * (1 - Math.pow(Math.min(1, d), kind === "crayon" ? 8 : 4));
+      im.data[(y * R + x) * 4 + 3] = keep ? (kind === "crayon" ? 220 : 140) + Math.random() * 35 : 0;
       im.data[(y * R + x) * 4] = im.data[(y * R + x) * 4 + 1] = im.data[(y * R + x) * 4 + 2] = 255;
     }
     tg.putImageData(im, 0, 0); g.imageSmoothingEnabled = kind !== "chalk"; g.drawImage(t, 0, 0, S, S);
+  } else if (kind === "charcoal") {
+    // long broken streaks, soft ends
+    g.save(); g.beginPath(); g.ellipse(64, 64, 62, 40, 0, 0, Math.PI * 2); g.clip();
+    for (let k = 0; k < 90; k++) {
+      const y = 20 + Math.random() * 88, x = Math.random() * 90, w = 8 + Math.random() * 50;
+      g.globalAlpha = 0.25 + Math.random() * 0.6; g.fillStyle = "#fff"; g.fillRect(x, y, w, 0.8 + Math.random() * 2.2);
+    }
+    g.restore();
   } else if (kind === "bristle") {
     // streaks running along x inside an oval, like a loaded flat brush
     g.save(); g.beginPath(); g.ellipse(64, 64, 62, 52, 0, 0, Math.PI * 2); g.clip();
@@ -900,19 +926,32 @@ function tinted(kind, color) {
   let c = tintCache.get(key); if (c) return c;
   const t = texture(kind); c = document.createElement("canvas"); c.width = t.width; c.height = t.height;
   const g = c.getContext("2d"); g.drawImage(t, 0, 0); g.globalCompositeOperation = "source-in"; g.fillStyle = color; g.fillRect(0, 0, c.width, c.height);
-  if (tintCache.size > 80) tintCache.clear();
+  if (tintCache.size > 120) tintCache.clear();
   tintCache.set(key, c); return c;
 }
 const rotDraw = (g, img, x, y, w, h, a) => { g.save(); g.translate(x, y); g.rotate(a); g.drawImage(img, -w / 2, -h / 2, w, h); g.restore(); };
+/** A random nearby colour (hue and lightness), rounded so the texture caches stay small. */
+function jitterColor(rgb, amt) {
+  let [r, g, b] = rgb.map((v) => v / 255);
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b); let h = 0, l = (mx + mn) / 2, s = 0;
+  if (mx !== mn) { const d = mx - mn; s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h /= 6; }
+  h = (h + (Math.random() - 0.5) * amt * 0.5 + 1) % 1; l = clamp(l + (Math.random() - 0.5) * amt * 0.5, 0, 1);
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = (t) => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  const Q = (v) => Math.round(v * 255 / 8) * 8;
+  return `rgb(${Q(f(h + 1 / 3))},${Q(f(h))},${Q(f(h - 1 / 3))})`;
+}
 
 /**
  * One stroke of a paint brush. `g` is where dabs land: the stroke buffer, or the layer's pixels
- * themselves for brushes that mix with what's already painted (oil, smudge).
+ * themselves for brushes that change what's already painted (oil, smudge, blur).
+ * c holds the brush settings; `erase` makes every dab solid black (the buffer is then cut out).
  */
-function makePainter(g, kind, c, color) {
+function makePainter(g, kind, c, color, erase) {
   const B = PAINT_BRUSHES[kind] || PAINT_BRUSHES.round;
   const base = Color.parse(color);
   const oil = [], smudges = [];
+  let tmp = null;
   // oil reads the colours underneath from one snapshot taken at the start of the stroke (fast on phones)
   let snap = null;
   const sample = (x, y) => {
@@ -922,16 +961,23 @@ function makePainter(g, kind, c, color) {
     const i = (py * snap.width + px) * 4; return snap.data.subarray(i, i + 4);
   };
   return {
-    spacing: B.spacing,
+    lastSize: c.size,
+    get spacing() { return c.spacing ?? B.spacing; },
     dab(x, y, p, dir, i) {
-      const size = Math.max(0.5, c.size * (c.pressureSize ? 0.15 + 0.85 * p : 1));
+      const pm = c.pressureMin ?? 0.15;
+      let size = Math.max(0.5, c.size * (c.pressureSize ? pm + (1 - pm) * p : 1));
+      if (c.sizeJitter) size *= 1 - c.sizeJitter * Math.random();
+      if (c.scatter) { const a = Math.random() * Math.PI * 2, d = Math.random() * c.scatter * c.size; x += Math.cos(a) * d; y += Math.sin(a) * d; }
+      this.lastSize = size;
+      const rot = ((c.angle || 0) * Math.PI) / 180 + (c.follow ? dir : 0) + (c.angleJitter ? (Math.random() - 0.5) * Math.PI * 2 * c.angleJitter : 0);
       const alpha = clamp(c.flow * (c.pressureOpacity ? p : 1), 0.01, 1);
+      const col = erase ? "#000" : c.colorJitter ? jitterColor(base, c.colorJitter) : color;
       g.globalAlpha = alpha; g.globalCompositeOperation = "source-over";
       switch (kind) {
         case "spray": case "dots": {
-          const dots = kind === "dots";
-          const n = dots ? clamp(Math.round(size / 12), 2, 9) : clamp(Math.round((size * size) / 50), 8, 220);
-          g.fillStyle = color; g.beginPath();
+          const dots = kind === "dots", dn = c.density ?? 1;
+          const n = Math.max(1, Math.round((dots ? clamp(size / 12, 2, 9) : clamp((size * size) / 50, 8, 220)) * dn));
+          g.fillStyle = col; g.beginPath();
           for (let k = 0; k < n; k++) {
             const a = Math.random() * Math.PI * 2, d = (size / 2) * (dots ? Math.sqrt(Math.random()) : Math.pow(Math.random(), 0.75));
             const r = dots ? size * (0.035 + Math.random() * 0.07) : Math.max(0.45, size * 0.012 * (0.5 + Math.random()));
@@ -939,22 +985,26 @@ function makePainter(g, kind, c, color) {
           }
           g.fill(); break;
         }
-        case "chalk": case "pencil":
-          rotDraw(g, tinted(kind, color), x, y, size, size, Math.random() * Math.PI * 2); break;
-        case "watercolor": {
-          const s = size * (0.92 + Math.random() * 0.16);
-          rotDraw(g, tinted("watercolor", color), x, y, s, s, 0); break;
+        case "chalk": case "pencil": case "crayon": rotDraw(g, tinted(kind, col), x, y, size, size, rot); break;
+        case "charcoal": rotDraw(g, tinted("charcoal", col), x, y, size, size * 0.8, rot); break;
+        case "watercolor": rotDraw(g, tinted("watercolor", col), x, y, size, size, rot); break;
+        case "marker": rotDraw(g, tinted("chisel", col), x, y, size, size, rot); break;
+        case "airbrush": case "glow": g.drawImage(kind === "glow" ? stamp(col, c.hardness) : tinted("soft", col), x - size / 2, y - size / 2, size, size); break;
+        case "hatching": {
+          // one line per dab, all at the same angle: a hatched band
+          const len = size, w = Math.max(0.6, size * 0.035), ca = Math.cos(rot), sa = Math.sin(rot);
+          g.strokeStyle = col; g.lineWidth = w; g.lineCap = "round";
+          g.beginPath(); g.moveTo(x - ca * len / 2, y - sa * len / 2); g.lineTo(x + ca * len / 2, y + sa * len / 2); g.stroke();
+          break;
         }
-        case "marker": rotDraw(g, tinted("chisel", color), x, y, size, size, -Math.PI / 4); break;
-        case "airbrush": g.drawImage(tinted("soft", color), x - size / 2, y - size / 2, size, size); break;
         case "oil": {
           // the brush picks up some of the colour underneath and carries it along
           let cur = oil[i] || (oil[i] = base.slice(0, 3));
-          const u = sample(x, y), mix = App.style.paint.mix ?? 0.35;
+          const u = sample(x, y), mix = c.mix ?? 0.35;
           if (u && u[3] > 20) for (let k = 0; k < 3; k++) cur[k] += (u[k] - cur[k]) * mix * 0.22;
           for (let k = 0; k < 3; k++) cur[k] += (base[k] - cur[k]) * 0.015;
           const q = (v) => Math.round(v / 6) * 6;   // fewer distinct tints to cache
-          rotDraw(g, tinted("bristle", `rgb(${q(cur[0])},${q(cur[1])},${q(cur[2])})`), x, y, size, size * 0.8, dir);
+          rotDraw(g, tinted("bristle", c.colorJitter ? jitterColor(cur, c.colorJitter) : `rgb(${q(cur[0])},${q(cur[1])},${q(cur[2])})`), x, y, size, size * 0.8, rot);
           break;
         }
         case "smudge": {
@@ -974,23 +1024,36 @@ function makePainter(g, kind, c, color) {
           sm.g.globalAlpha = 1 - clamp(c.flow, 0.05, 0.98) * 0.85; sm.g.drawImage(g.canvas, x - D / 2, y - D / 2, D, D, 0, 0, D, D); sm.g.globalAlpha = 1;
           break;
         }
-        default: g.drawImage(stamp(color, c.hardness), x - size / 2, y - size / 2, size, size);
+        case "blur": {
+          // soften: shrink the patch and scale it back up (works in every browser), laid down through a soft edge
+          const D = Math.max(4, Math.ceil(size)), k = Math.max(2, Math.round(2 + c.flow * 6));
+          if (!tmp) { tmp = [document.createElement("canvas"), document.createElement("canvas")]; }
+          const [a, b2] = tmp; if (a.width !== D) { a.width = a.height = D; } const sw = Math.max(1, Math.round(D / k)); if (b2.width !== sw) { b2.width = b2.height = sw; }
+          const ag = a.getContext("2d"), bg = b2.getContext("2d");
+          bg.clearRect(0, 0, sw, sw); bg.imageSmoothingQuality = "high"; bg.drawImage(g.canvas, x - D / 2, y - D / 2, D, D, 0, 0, sw, sw);
+          ag.globalCompositeOperation = "source-over"; ag.clearRect(0, 0, D, D); ag.imageSmoothingQuality = "high"; ag.drawImage(b2, 0, 0, D, D);
+          ag.globalCompositeOperation = "destination-in"; ag.drawImage(texture("soft"), 0, 0, D, D);
+          g.globalAlpha = 0.85; g.drawImage(a, x - D / 2, y - D / 2);
+          break;
+        }
+        default: g.drawImage(stamp(col, c.hardness), x - size / 2, y - size / 2, size, size);
       }
       g.globalAlpha = 1;
     }
   };
 }
-/** Draws a sample stroke of a paint brush into a small canvas (for the brush picker). */
-App.paintPreview = function (canvas, kind, color) {
+/** Draws a sample stroke of a brush into a small canvas (for the brush pickers). */
+App.paintPreview = function (canvas, kind, color, settings, erase) {
   const g = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
   g.clearRect(0, 0, W, H);
-  const B = PAINT_BRUSHES[kind];
-  const c = { size: ["spray", "dots", "airbrush", "watercolor"].includes(kind) ? H * 0.75 : Math.min(H * 0.5, Math.max(3, B.size * 0.3)), hardness: B.hardness, flow: B.flow, pressureSize: true, pressureOpacity: false };
-  if (kind === "smudge") { ["#e11d48", "#f59e0b", "#2563eb"].forEach((col, k) => { g.fillStyle = col; g.fillRect(W * (0.12 + k * 0.28), 4, W * 0.18, H - 8); }); }
-  const direct = B.direct, buf = direct ? null : document.createElement("canvas");
+  const B = PAINT_BRUSHES[kind], c = { ...brushDefaults(kind), ...(settings || {}) };
+  c.size = ["spray", "dots", "airbrush", "watercolor", "glow", "blur"].includes(kind) ? H * 0.75 : Math.min(H * 0.55, Math.max(3, c.size * 0.3));
+  if (erase) { g.fillStyle = "#9aa3ae"; g.fillRect(4, 6, W - 8, H - 12); }
+  else if (kind === "smudge" || kind === "blur") { ["#e11d48", "#f59e0b", "#2563eb"].forEach((col, k) => { g.fillStyle = col; g.fillRect(W * (0.12 + k * 0.28), 4, W * 0.18, H - 8); }); }
+  else if (kind === "glow") { g.fillStyle = "#111827"; g.fillRect(0, 0, W, H); }
+  const direct = B.direct && !erase, buf = direct ? null : document.createElement("canvas");
   if (buf) { buf.width = W; buf.height = H; }
-  const pt = direct ? g : buf.getContext("2d");
-  const P = makePainter(pt, kind, c, color);
+  const P = makePainter(direct ? g : buf.getContext("2d"), kind, c, color, erase);
   let last = null;
   for (let i = 0; i <= 60; i++) {
     const t = i / 60, x = 8 + t * (W - 16), y = H / 2 + Math.sin(t * Math.PI * 2) * H * 0.22, p = 0.35 + 0.65 * Math.sin(t * Math.PI);
@@ -1000,29 +1063,37 @@ App.paintPreview = function (canvas, kind, color) {
     } else P.dab(x, y, p, 0, 0);
     last = { x, y };
   }
-  if (buf) { g.globalAlpha = B.opacity; g.drawImage(buf, 0, 0); g.globalAlpha = 1; }
+  if (buf) { g.save(); g.globalAlpha = c.opacity; g.globalCompositeOperation = erase ? "destination-out" : B.blend || "source-over"; g.drawImage(buf, 0, 0); g.restore(); }
 };
-/** Chooses a paint brush and loads its starting settings (size, softness, flow…). */
-App.setPaintBrush = function (kind) {
-  const B = PAINT_BRUSHES[kind]; if (!B) return;
-  Object.assign(App.style.paint, { brush: kind, size: B.size, hardness: B.hardness, opacity: B.opacity, flow: B.flow });
+/** Switches brush for the paint brush or the eraser; each brush remembers its own settings. */
+App.setPaintBrush = function (kind, forEraser) {
+  if (!PAINT_BRUSHES[kind]) return;
+  const tgt = forEraser ? App.style.eraser : App.style.paint;
+  const store = forEraser ? (App.style.eraserSets = App.style.eraserSets || {}) : (App.style.paintSets = App.style.paintSets || {});
+  const cur = tgt.brush || "round";
+  store[cur] = Object.fromEntries(BRUSH_KEYS.map((k) => [k, tgt[k]]));
+  Object.assign(tgt, store[kind] || brushDefaults(kind), { brush: kind });
 };
+App.resetPaintBrush = function (forEraser) {
+  const tgt = forEraser ? App.style.eraser : App.style.paint;
+  Object.assign(tgt, brushDefaults(tgt.brush || "round"));
+};
+// start both tools with a full set of settings
+Object.assign(App.style.paint, { ...brushDefaults(App.style.paint.brush || "round"), brush: App.style.paint.brush || "round" });
+Object.assign(App.style.eraser, { ...brushDefaults("round"), hardness: 0.8, size: App.style.eraser.size || 40, brush: "round" });
 
 function paintTool(erase) {
   let last = null, cell = null, leftover = 0, trails = null, painter = null, before = null;
-  const cfg = () => (erase ? { size: App.style.eraser.size, hardness: 0.8, opacity: 1, flow: 1, pressureSize: true, pressureOpacity: false, color: "#000" } : App.style.paint);
+  const cfg = () => (erase ? App.style.eraser : App.style.paint);
+  let sm = null;   // stabiliser state
   const mode = () => (erase ? App.style.eraser.mode || "all" : "pixels");
   // a mirrored copy of a stroke also mirrors its direction
   const turn = (T, a) => Math.atan2(T[1] * Math.cos(a) + T[3] * Math.sin(a), T[0] * Math.cos(a) + T[2] * Math.sin(a));
   const dab = (g, x, y, p, dir = 0) => {
-    if (painter) { Sym.all().forEach((T, i) => { const [px, py] = M.apply(T, x, y); painter.dab(px, py, p, turn(T, dir), i); }); return; }
-    const c = cfg(); const size = Math.max(0.5, c.size * (c.pressureSize ? 0.15 + 0.85 * p : 1));
-    g.globalAlpha = clamp(c.flow * (c.pressureOpacity ? p : 1), 0.01, 1);
-    const st = stamp(erase ? "#000" : c.color, c.hardness);
     Sym.all().forEach((T, i) => {
       const [px, py] = M.apply(T, x, y);
-      g.drawImage(st, px - size / 2, py - size / 2, size, size);
-      if (trails) (trails[i] = trails[i] || []).push([px, py, size / 2]);
+      painter.dab(px, py, p, turn(T, dir), i);
+      if (trails) (trails[i] = trails[i] || []).push([px, py, painter.lastSize / 2]);
     });
   };
   return {
@@ -1038,19 +1109,25 @@ function paintTool(erase) {
       const d = App.doc, b = Paint.buffer;
       if (b.width !== d.width || b.height !== d.height) { b.width = d.width; b.height = d.height; }
       const g = b.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, d.width, d.height);
-      const kind = erase ? null : App.style.paint.brush || "round", direct = !!(kind && PAINT_BRUSHES[kind]?.direct);
-      // oil & smudge work straight on the layer's pixels (they mix with what's there)
-      painter = kind ? makePainter(direct ? cell.raster.getContext("2d", { willReadFrequently: kind === "oil" }) : g, kind, cfg(), cfg().color) : null;
-      Paint.live = { alpha: direct ? 1 : cfg().opacity, erase, pixels: pixels && !direct, vectors, direct };
+      let kind = cfg().brush || "round";
+      if (erase && !App.ERASER_BRUSHES.includes(kind)) kind = "round";
+      const direct = !erase && !!PAINT_BRUSHES[kind].direct;
+      // oil, smudge & blur work straight on the layer's pixels (they change what's there)
+      if (direct && !cell.raster) rasterForPaint(cell);
+      painter = makePainter(direct ? cell.raster.getContext("2d") : g, kind, cfg(), erase ? "#000" : cfg().color, erase);
+      Paint.live = { alpha: direct ? 1 : cfg().opacity, erase, pixels: pixels && !direct, vectors, direct, blend: erase ? null : PAINT_BRUSHES[kind].blend };
       trails = vectors ? [] : null;
-      last = p; leftover = 0; dab(painter && direct ? null : g, p.x, p.y, p.p); this.masked(); changed("paint");
+      sm = { x: p.x, y: p.y, p: p.p };
+      last = p; leftover = 0; dab(g, p.x, p.y, p.p); this.masked(); changed("paint");
     },
     move(p) {
       if (erase && mode() === "objects") { if (this._erasing) this.eraseObjects(p, false); return; }
       if (!last || !cell) return;
+      const k0 = (cfg().smoothing || 0) * 0.92;
+      if (k0 > 0) { sm.x = sm.x * k0 + p.x * (1 - k0); sm.y = sm.y * k0 + p.y * (1 - k0); sm.p = sm.p * k0 + p.p * (1 - k0); p = { ...p, x: sm.x, y: sm.y, p: sm.p }; }
       const g = Paint.buffer.getContext("2d");
       const dist = Math.hypot(p.x - last.x, p.y - last.y);
-      const step = Math.max(0.5, cfg().size * (painter ? painter.spacing : 0.08));
+      const step = Math.max(0.5, cfg().size * Math.max(0.01, painter.spacing));
       const dir = Math.atan2(p.y - last.y, p.x - last.x);
       let t = leftover;
       while (t < dist) { const k = t / dist; dab(g, lerp(last.x, p.x, k), lerp(last.y, p.y, k), lerp(last.p, p.p, k), dir); t += step; }
@@ -1068,7 +1145,7 @@ function paintTool(erase) {
       const lv = Paint.live;
       if (lv.pixels && cell.raster) {
         const g = cell.raster.getContext("2d");
-        g.save(); g.globalAlpha = lv.alpha; g.globalCompositeOperation = erase ? "destination-out" : "source-over";
+        g.save(); g.globalAlpha = lv.alpha; g.globalCompositeOperation = erase ? "destination-out" : lv.blend || "source-over";
         g.drawImage(Paint.buffer, 0, 0); g.restore();
       }
       if (lv.vectors && trails && cell.objects.length) {

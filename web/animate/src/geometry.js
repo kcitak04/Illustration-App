@@ -67,6 +67,7 @@ function fillGeom(o) {
   }
   const polys = Geo.flatten(o).filter((s) => s.pts.length >= 3).map((s) => [s.pts]);
   if (!polys.length) return [];
+  if (Render.fillRule(o) === "evenodd") return polys.length === 1 ? polygonClipping.union(polys[0]) : polygonClipping.xor(...polys);
   return polys.length === 1 ? polygonClipping.union(polys[0]) : polygonClipping.union(...polys);
 }
 
