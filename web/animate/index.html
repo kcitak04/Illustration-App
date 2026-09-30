@@ -82,6 +82,16 @@ body.dropping .dropHint { display: grid; }
 /* properties */
 .props { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); overflow-y: auto; min-height: 0; }
 .props-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--rule); position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.ptabs { display: flex; gap: 2px; background: var(--panel-2); border-radius: 7px; padding: 2px; }
+.ptabs button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 5px 12px; border-radius: 5px; cursor: pointer; }
+.ptabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+.recent { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; }
+.recent .chip, .recent .empty { aspect-ratio: 1; width: 100%; height: auto; border-radius: 6px; }
+.recent .empty { border: 1px dashed var(--rule); }
+.cur-colours { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.cur-colours .dot { width: 22px; height: 22px; border-radius: 5px; border: 1px solid var(--rule); background-clip: padding-box; }
+.hexrow { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 8px; align-items: center; font-size: 13px; }
+.hexrow input { width: 100%; min-width: 0; font-family: ui-monospace, monospace; background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 5px; padding: 5px 7px; }
 .props-head strong { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 #propsClose { display: none; }
 .psec { padding: 10px 12px; border-bottom: 1px solid var(--rule); display: flex; flex-direction: column; gap: 7px; }
@@ -226,8 +236,15 @@ kbd { font-family: var(--font-mono); font-size: 11px; background: var(--panel-2)
       <div class="dropHint">Drop images, videos, GIFs, sounds or a project to import</div>
     </main>
     <aside class="props" id="props" aria-label="Properties">
-      <div class="props-head"><strong>Properties</strong><button class="btn tiny" id="propsClose" type="button" aria-label="Close properties">✕</button></div>
-      <div id="propsBody"></div>
+      <div class="props-head">
+        <div class="ptabs" role="tablist" aria-label="Panel">
+          <button type="button" role="tab" id="tabColour" aria-controls="colourBody">Colour</button>
+          <button type="button" role="tab" id="tabProps" aria-controls="propsBody">Properties</button>
+        </div>
+        <button class="btn tiny" id="propsClose" type="button" aria-label="Close panel">✕</button>
+      </div>
+      <div id="colourBody" role="tabpanel" hidden></div>
+      <div id="propsBody" role="tabpanel"></div>
     </aside>
   </div>
 
@@ -1984,6 +2001,8 @@ function drawHoverCursor(g) {
 }
 
 // ---------------------------------------------------------------- helpers shared by tools
+/** Adds colours that were just used for drawing to the "recent colours" memory. */
+function remember(...cs) { if (App.rememberColor) for (const c of cs) if (typeof c === "string") App.rememberColor(c); }
 function currentObjects() { const L = activeLayer(); return L && L.kind === "draw" ? Render.cellObjectsAt(L, App.state.frame) : []; }
 // ---- layer groups: linked layers whose shapes are selected and moved together
 /** The active layer plus the layers grouped with it (drawing layers that are shown and unlocked), bottom to top. */
@@ -2400,6 +2419,7 @@ tool("pen", (() => {
         const cell = editableCell();
         const st = styleProps();
         obj = { id: uid(), type: "path", nodes: [], closed: false, m: M.id(), ...st };
+        remember(st.stroke || App.style.stroke, App.style.penFill ? st.fill : null);
         if (!obj.stroke && !App.style.penFill) { obj.stroke = App.style.stroke; }
         if (!App.style.penFill) obj.fill = null;
         cell.objects.push(obj);
@@ -2460,6 +2480,7 @@ tool("pencil", (() => {
       History.push();
       const st = styleProps();
       const o = { id: uid(), type: "path", nodes, closed, m: M.id(), ...st, stroke: App.style.strokeOn ? App.style.stroke : (typeof App.style.fill === "string" ? App.style.fill : "#111"), fill: closed && App.style.pencilFill ? st.fill : null };
+      remember(o.stroke, o.fill);
       const cell = editableCell(); cell.objects.push(o); addMirrors(cell, o);
       pts = null; changed("pencil");
     },
@@ -2482,6 +2503,7 @@ tool("vbrush", (() => {
       History.push();
       const b = App.style.brush;
       obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, style: b.style || "pressure", dot: b.dot ?? 1, sp: b.sp ?? 1, amt: b.amt ?? 0.5, ang: b.ang ?? 45, freq: b.freq ?? 1, seed: 1 + Math.floor(Math.random() * 9999), m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
+      remember(typeof obj.fill === "string" ? obj.fill : null);
       sm = { x: p.x, y: p.y, p: p.p };
       const cell = editableCell(); cell.objects.push(obj);
       const copies = Sym.transforms().map((T) => ({ ...obj, id: uid(), m: T, pts: obj.pts }));
@@ -2529,6 +2551,7 @@ function shapeTool(kind) {
       if (!obj) {
         History.push();
         const st = styleProps(), sh = App.style.shape;
+        remember(st.fill, st.stroke);
         obj = { id: uid(), type: kind === "line" ? "path" : kind, m: M.id(), ...st };
         if (kind === "rect") obj.r = sh.radius;
         if (kind === "poly") { obj.n = sh.points; obj.star = sh.star; obj.inner = sh.inner; }
@@ -2579,6 +2602,7 @@ const TextTool = (App.TextTool = {
     else {
       const t = App.style.text, st = styleProps();
       const o = { id: uid(), type: "text", text, font: t.font, size: t.size, weight: t.weight, italic: t.italic, align: t.align, m: M.translate(p.x, p.y), ...st, fill: st.fill || "#111" };
+      remember(o.fill, o.stroke);
       if (!o.stroke) o.sw = 0;
       cell.objects.push(o); App.state.selection = [o.id];
     }
@@ -2910,6 +2934,7 @@ function paintTool(erase) {
       const g = b.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, d.width, d.height);
       let kind = cfg().brush || "round";
       if (erase && !App.ERASER_BRUSHES.includes(kind)) kind = "round";
+      if (!erase && !PAINT_BRUSHES[kind].direct) remember(cfg().color);
       const direct = !erase && !!PAINT_BRUSHES[kind].direct;
       // oil, smudge & blur work straight on the layer's pixels (they change what's there)
       if (direct && !cell.raster) rasterForPaint(cell);
@@ -3014,7 +3039,7 @@ tool("bucket", {
     if (!layerEditable()) return;
     const hit = currentObjects().slice().reverse().find((o) => o.fill !== undefined && o.type !== "text" && o.type !== "image" && Render.hit(o, p.x, p.y, 0));
     if (hit && hit.type !== "brush") {
-      History.push(); const c = editableCell(); const o = c.objects.find((x) => x.id === hit.id); o.fill = App.style.grad ? { ...App.style.grad } : App.style.paint.color; changed("fill"); return;
+      History.push(); const c = editableCell(); const o = c.objects.find((x) => x.id === hit.id); o.fill = App.style.grad ? { ...App.style.grad } : App.style.paint.color; remember(o.fill); changed("fill"); return;
     }
     const d = App.doc, x0 = Math.floor(p.x), y0 = Math.floor(p.y);
     if (x0 < 0 || y0 < 0 || x0 >= d.width || y0 >= d.height) return;
@@ -3043,6 +3068,7 @@ tool("bucket", {
     const grown = new Uint8Array(mask);
     for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) { const i = y * W + x; if (!mask[i] && (mask[i - 1] || mask[i + 1] || mask[i - W] || mask[i + W])) grown[i] = 1; }
     const [R, G, B, A] = Color.parse(App.style.paint.color);
+    remember(App.style.paint.color);
     const fill = sg.createImageData(W, H);
     for (let i = 0; i < grown.length; i++) if (grown[i]) { fill.data[i * 4] = R; fill.data[i * 4 + 1] = G; fill.data[i * 4 + 2] = B; fill.data[i * 4 + 3] = A * 255; }
     History.push();
@@ -3055,7 +3081,7 @@ tool("bucket", {
 
 // ---- Eyedropper
 tool("eyedropper", {
-  down(p) { this.pick(p); }, move(p) { this.pick(p); },
+  down(p) { this.pick(p); }, move(p) { this.pick(p); }, up() { if (this._last) remember(this._last); this._last = null; },
   pick(p) {
     const d = App.doc; if (p.x < 0 || p.y < 0 || p.x >= d.width || p.y >= d.height) return;
     const c = document.createElement("canvas"); c.width = c.height = 1;
@@ -3063,6 +3089,7 @@ tool("eyedropper", {
     const [r, gg, b] = g.getImageData(0, 0, 1, 1).data;
     const hex = "#" + [r, gg, b].map((v) => v.toString(16).padStart(2, "0")).join("");
     App.style.fill = hex; App.style.grad = null; App.style.paint.color = hex;
+    this._last = hex;
     App.emit("style");
   }
 });
@@ -3713,7 +3740,7 @@ UI.buildToolbar = function () {
   const sw = h("div", { class: "swatches", title: "Fill / paint colour and stroke colour" },
     h("span", { class: "sw fill", style: `background:${typeof App.style.fill === "string" ? App.style.fill : "#888"}` }),
     h("span", { class: "sw stroke", style: `border-color:${App.style.strokeOn ? App.style.stroke : "transparent"}` }));
-  sw.onclick = () => UI.openProps();
+  sw.onclick = () => UI.showTab("colour");
   const sb = h("button", { class: "tool symbtn", type: "button", "aria-label": "Symmetry", html: ICON.sym, onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); window.innerWidth <= 900 ? UI.symmetryMenu(r.left, r.bottom + 6) : UI.symmetryMenu(r.right + 6, r.top); } });
   const mb = h("button", { class: "tool maskbtn", type: "button", "aria-label": "Mask", html: ICON.mask, onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); window.innerWidth <= 900 ? UI.maskMenu(r.left, r.bottom + 6) : UI.maskMenu(r.right + 6, r.top); } });
   bar.append(sb, mb, sw);
@@ -3751,6 +3778,12 @@ UI.buildProps = function () {
   const applyStroke = (v) => { s.strokeOn = !!v; if (v) s.stroke = v; if (editSel) { const cell = App.selCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) { o.stroke = v; if (v && !o.sw) o.sw = s.sw; } }); changed("stroke"); } UI.syncSwatch(); };
   const first = editSel ? sel[0] : null;
   const fillNow = first ? (typeof first.fill === "string" ? first.fill : null) : (s.grad ? null : s.fill);
+  UI.buildColour({ t, s, editSel, first, fillNow, applyFill, applyStroke });
+  const dot = (c, label) => h("span", { class: "dot", title: label, style: c ? `background:${typeof c === "string" ? c : `linear-gradient(90deg, ${c.c1}, ${c.c2})`}` : "background: repeating-linear-gradient(45deg, transparent 0 4px, var(--rule) 4px 6px)" });
+  const isPaint = t === "paint" || t === "bucket";
+  box.append(h("section", { class: "psec" }, h("div", { class: "cur-colours" },
+    dot(isPaint ? s.paint.color : first ? first.fill : s.grad || s.fill, isPaint ? "Paint colour" : "Fill"), dot(first ? first.stroke : s.strokeOn ? s.stroke : null, "Stroke"),
+    h("span", {}, "Colours are in the"), btn("Colour tab", () => UI.showTab("colour"), "tiny"))));
   const colorSec = section("Colour",
     colorRow(t === "paint" || t === "bucket" ? "Paint" : "Fill", () => (t === "paint" || t === "bucket" ? s.paint.color : fillNow), (v) => { if (t === "paint" || t === "bucket") { s.paint.color = v || s.paint.color; s.fill = v || s.fill; UI.syncSwatch(); } else applyFill(v); }, { allowNone: !["paint", "bucket", "vbrush"].includes(t), record: !!editSel }),
     colorRow("Stroke", () => (first ? first.stroke : s.strokeOn ? s.stroke : null), applyStroke, { allowNone: true, record: !!editSel }),
@@ -3758,7 +3791,7 @@ UI.buildProps = function () {
     h("div", { class: "row" }, btn("Gradient…", () => UI.gradientDialog()), s.grad ? h("span", { class: "hint" }, `${s.grad.type} gradient on`) : null),
     UI.recentSwatches()
   );
-  box.append(colorSec);
+  void colorSec;   // built for the Colour tab instead
 
   // --- tool options
   const opts = [];
@@ -4039,12 +4072,79 @@ UI.syncSwatch = function () {
   if (s) s.style.borderColor = App.style.strokeOn ? App.style.stroke : "transparent";
 };
 const recent = ["#111827", "#ffffff", "#e11d48", "#f97316", "#facc15", "#22c55e", "#06b6d4", "#3b82f6", "#8b5cf6", "#ec4899", "#78350f", "#94a3b8"];
+// ---------------------------------------------------------------- the Colour tab
+const RECENT_KEY = "frame-studio-recent-colours";
+let recentUsed = [];
+try { recentUsed = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]").filter((c) => typeof c === "string").slice(0, 8); } catch (e) { recentUsed = []; }
+/** Remembers a colour you used (newest first, 8 at most, kept between sessions on this device). */
+App.rememberColor = function (c) {
+  if (!c || typeof c !== "string") return;
+  let key; try { const p = Color.parse(c); key = p[3] < 1 ? Color.withAlpha(Color.hex(c), p[3]) : Color.hex(c).toLowerCase(); } catch (e) { return; }
+  if (recentUsed[0] === key) return;
+  recentUsed = [key, ...recentUsed.filter((x) => x !== key)].slice(0, 8);
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(recentUsed)); } catch (e) { /* storage blocked: memory lasts this session */ }
+  if (UI.tab === "colour") UI.renderRecent();
+};
+UI.tab = "props";
+UI.showTab = function (which) {
+  UI.tab = which;
+  $("colourBody").hidden = which !== "colour"; $("propsBody").hidden = which === "colour";
+  $("tabColour").setAttribute("aria-selected", String(which === "colour")); $("tabProps").setAttribute("aria-selected", String(which !== "colour"));
+  UI.openProps();
+};
+UI.applyTarget = "fill";   // what a swatch click sets: fill (paint) or stroke
+/** Applies a swatch colour to the fill / paint colour (or the stroke) and to any selected shapes. */
+function applySwatch(c) {
+  const t = App.state.tool, sel = ["select", "direct"].includes(t) && App.state.selection.length;
+  App.rememberColor(c);
+  if (UI.applyTarget === "stroke") {
+    App.style.strokeOn = true; App.style.stroke = c;
+    if (sel) Cmd.editSelected((o) => { o.stroke = c; if (!o.sw) o.sw = App.style.sw; });
+  } else {
+    if (sel) Cmd.editSelected((o) => { o.fill = c; });
+    App.style.fill = c; App.style.grad = null; App.style.paint.color = c;
+  }
+  UI.syncSwatch(); UI.buildProps();
+}
+UI.renderRecent = function () {
+  const box = document.getElementById("recentBox"); if (!box) return;
+  box.textContent = "";
+  for (let i = 0; i < 8; i++) {
+    const c = recentUsed[i];
+    box.append(c ? h("button", { class: "chip", type: "button", title: c, "aria-label": "Recent colour " + c, style: `background:${c}`, onclick: () => applySwatch(c) }) : h("span", { class: "empty", "aria-hidden": "true" }));
+  }
+};
+UI.buildColour = function ({ t, s, editSel, first, fillNow, applyFill, applyStroke }) {
+  const box = $("colourBody"); if (!box) return;
+  box.textContent = "";
+  const isPaint = t === "paint" || t === "bucket";
+  const cur = isPaint ? s.paint.color : fillNow;
+  const setMain = (v) => { if (isPaint) { s.paint.color = v || s.paint.color; s.fill = v || s.fill; UI.syncSwatch(); } else applyFill(v); };
+  const hex = h("input", { type: "text", value: cur && typeof cur === "string" ? Color.hex(cur) : "", placeholder: "#1d4ed8", spellcheck: "false", "aria-label": "Hex colour" });
+  hex.addEventListener("change", () => { const v = hex.value.trim(); if (!/^#?[0-9a-f]{3}([0-9a-f]{3})?$/i.test(v)) { toast("Type a colour like #ff5a36."); return; } const c = v[0] === "#" ? v : "#" + v; if (editSel) History.push(); setMain(c); App.rememberColor(c); UI.buildProps(); });
+  const main = colorRow(isPaint ? "Paint" : "Fill", () => cur, setMain, { allowNone: !["paint", "bucket", "vbrush"].includes(t), record: !!editSel });
+  // picking in the colour dialog counts as using that colour
+  main.querySelector("input[type=color]").addEventListener("change", (e) => App.rememberColor(e.target.value));
+  const stroke = colorRow("Stroke", () => (first ? first.stroke : s.strokeOn ? s.stroke : null), applyStroke, { allowNone: true, record: !!editSel });
+  stroke.querySelector("input[type=color]").addEventListener("change", (e) => App.rememberColor(e.target.value));
+  const target = h("div", { class: "seg2" },
+    btn("Swatches set fill", () => { UI.applyTarget = "fill"; UI.buildProps(); }, UI.applyTarget === "fill" ? "on" : ""),
+    btn("Swatches set stroke", () => { UI.applyTarget = "stroke"; UI.buildProps(); }, UI.applyTarget === "stroke" ? "on" : ""));
+  box.append(
+    section(editSel ? `Colour · ${App.state.selection.length} selected` : isPaint ? "Paint colour" : "Colour",
+      main, h("div", { class: "hexrow" }, h("label", {}, "Hex"), hex), stroke,
+      slider("Stroke width", 0, 80, 0.5, () => (first ? first.sw || 0 : s.sw), (v) => { s.sw = v; if (editSel) { const cell = App.selCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) o.sw = v; }); changed("sw"); } }, { record: !!editSel }),
+      h("div", { class: "btnrow" }, btn("Gradient…", () => UI.gradientDialog()), btn("Pick from canvas", () => App.setTool("eyedropper"))),
+      s.grad ? h("p", { class: "hint" }, `${s.grad.type} gradient fill is on — pick a solid colour to turn it off.`) : null),
+    section("Recent colours", h("div", { class: "recent", id: "recentBox" }),
+      h("p", { class: "hint" }, "The last 8 colours you drew or filled with. They stay here next time you open the app."),
+      btn("Clear recent", () => { recentUsed = []; try { localStorage.removeItem(RECENT_KEY); } catch (e) { /* ignore */ } UI.renderRecent(); })),
+    section("Swatches", target, UI.recentSwatches())
+  );
+  UI.renderRecent();
+};
 UI.recentSwatches = function () {
-  return h("div", { class: "palette" }, recent.map((c) => h("button", { class: "chip", type: "button", title: c, style: `background:${c}`, onclick: () => {
-    const t = App.state.tool;
-    if (["select", "direct"].includes(t) && App.state.selection.length) Cmd.editSelected((o) => { o.fill = c; });
-    App.style.fill = c; App.style.grad = null; App.style.paint.color = c; UI.syncSwatch(); UI.buildProps();
-  } })));
+  return h("div", { class: "palette" }, recent.map((c) => h("button", { class: "chip", type: "button", title: c, style: `background:${c}`, onclick: () => applySwatch(c) })));
 };
 
 // ---------------------------------------------------------------- media clip settings (video / image / sequence / sound)
@@ -4966,6 +5066,9 @@ async function start() {
   $("zoomMinus").onclick = () => View.zoomAt(0.8);
   $("zoomPlus").onclick = () => View.zoomAt(1.25);
   $("propsToggle").onclick = () => document.body.classList.toggle("props-open");
+  $("tabColour").onclick = () => UI.showTab("colour");
+  $("tabProps").onclick = () => UI.showTab("props");
+  UI.showTab("props"); document.body.classList.remove("props-open");
   $("propsClose").onclick = () => UI.closeProps();
   $("importFile").onchange = (e) => { UI.importFiles(e.target.files || []); e.target.value = ""; };
   $("projectFile").onchange = async (e) => {

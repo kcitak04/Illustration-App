@@ -110,7 +110,7 @@ UI.buildToolbar = function () {
   const sw = h("div", { class: "swatches", title: "Fill / paint colour and stroke colour" },
     h("span", { class: "sw fill", style: `background:${typeof App.style.fill === "string" ? App.style.fill : "#888"}` }),
     h("span", { class: "sw stroke", style: `border-color:${App.style.strokeOn ? App.style.stroke : "transparent"}` }));
-  sw.onclick = () => UI.openProps();
+  sw.onclick = () => UI.showTab("colour");
   const sb = h("button", { class: "tool symbtn", type: "button", "aria-label": "Symmetry", html: ICON.sym, onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); window.innerWidth <= 900 ? UI.symmetryMenu(r.left, r.bottom + 6) : UI.symmetryMenu(r.right + 6, r.top); } });
   const mb = h("button", { class: "tool maskbtn", type: "button", "aria-label": "Mask", html: ICON.mask, onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); window.innerWidth <= 900 ? UI.maskMenu(r.left, r.bottom + 6) : UI.maskMenu(r.right + 6, r.top); } });
   bar.append(sb, mb, sw);
@@ -148,6 +148,12 @@ UI.buildProps = function () {
   const applyStroke = (v) => { s.strokeOn = !!v; if (v) s.stroke = v; if (editSel) { const cell = App.selCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) { o.stroke = v; if (v && !o.sw) o.sw = s.sw; } }); changed("stroke"); } UI.syncSwatch(); };
   const first = editSel ? sel[0] : null;
   const fillNow = first ? (typeof first.fill === "string" ? first.fill : null) : (s.grad ? null : s.fill);
+  UI.buildColour({ t, s, editSel, first, fillNow, applyFill, applyStroke });
+  const dot = (c, label) => h("span", { class: "dot", title: label, style: c ? `background:${typeof c === "string" ? c : `linear-gradient(90deg, ${c.c1}, ${c.c2})`}` : "background: repeating-linear-gradient(45deg, transparent 0 4px, var(--rule) 4px 6px)" });
+  const isPaint = t === "paint" || t === "bucket";
+  box.append(h("section", { class: "psec" }, h("div", { class: "cur-colours" },
+    dot(isPaint ? s.paint.color : first ? first.fill : s.grad || s.fill, isPaint ? "Paint colour" : "Fill"), dot(first ? first.stroke : s.strokeOn ? s.stroke : null, "Stroke"),
+    h("span", {}, "Colours are in the"), btn("Colour tab", () => UI.showTab("colour"), "tiny"))));
   const colorSec = section("Colour",
     colorRow(t === "paint" || t === "bucket" ? "Paint" : "Fill", () => (t === "paint" || t === "bucket" ? s.paint.color : fillNow), (v) => { if (t === "paint" || t === "bucket") { s.paint.color = v || s.paint.color; s.fill = v || s.fill; UI.syncSwatch(); } else applyFill(v); }, { allowNone: !["paint", "bucket", "vbrush"].includes(t), record: !!editSel }),
     colorRow("Stroke", () => (first ? first.stroke : s.strokeOn ? s.stroke : null), applyStroke, { allowNone: true, record: !!editSel }),
@@ -155,7 +161,7 @@ UI.buildProps = function () {
     h("div", { class: "row" }, btn("Gradient…", () => UI.gradientDialog()), s.grad ? h("span", { class: "hint" }, `${s.grad.type} gradient on`) : null),
     UI.recentSwatches()
   );
-  box.append(colorSec);
+  void colorSec;   // built for the Colour tab instead
 
   // --- tool options
   const opts = [];
@@ -436,12 +442,79 @@ UI.syncSwatch = function () {
   if (s) s.style.borderColor = App.style.strokeOn ? App.style.stroke : "transparent";
 };
 const recent = ["#111827", "#ffffff", "#e11d48", "#f97316", "#facc15", "#22c55e", "#06b6d4", "#3b82f6", "#8b5cf6", "#ec4899", "#78350f", "#94a3b8"];
+// ---------------------------------------------------------------- the Colour tab
+const RECENT_KEY = "frame-studio-recent-colours";
+let recentUsed = [];
+try { recentUsed = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]").filter((c) => typeof c === "string").slice(0, 8); } catch (e) { recentUsed = []; }
+/** Remembers a colour you used (newest first, 8 at most, kept between sessions on this device). */
+App.rememberColor = function (c) {
+  if (!c || typeof c !== "string") return;
+  let key; try { const p = Color.parse(c); key = p[3] < 1 ? Color.withAlpha(Color.hex(c), p[3]) : Color.hex(c).toLowerCase(); } catch (e) { return; }
+  if (recentUsed[0] === key) return;
+  recentUsed = [key, ...recentUsed.filter((x) => x !== key)].slice(0, 8);
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(recentUsed)); } catch (e) { /* storage blocked: memory lasts this session */ }
+  if (UI.tab === "colour") UI.renderRecent();
+};
+UI.tab = "props";
+UI.showTab = function (which) {
+  UI.tab = which;
+  $("colourBody").hidden = which !== "colour"; $("propsBody").hidden = which === "colour";
+  $("tabColour").setAttribute("aria-selected", String(which === "colour")); $("tabProps").setAttribute("aria-selected", String(which !== "colour"));
+  UI.openProps();
+};
+UI.applyTarget = "fill";   // what a swatch click sets: fill (paint) or stroke
+/** Applies a swatch colour to the fill / paint colour (or the stroke) and to any selected shapes. */
+function applySwatch(c) {
+  const t = App.state.tool, sel = ["select", "direct"].includes(t) && App.state.selection.length;
+  App.rememberColor(c);
+  if (UI.applyTarget === "stroke") {
+    App.style.strokeOn = true; App.style.stroke = c;
+    if (sel) Cmd.editSelected((o) => { o.stroke = c; if (!o.sw) o.sw = App.style.sw; });
+  } else {
+    if (sel) Cmd.editSelected((o) => { o.fill = c; });
+    App.style.fill = c; App.style.grad = null; App.style.paint.color = c;
+  }
+  UI.syncSwatch(); UI.buildProps();
+}
+UI.renderRecent = function () {
+  const box = document.getElementById("recentBox"); if (!box) return;
+  box.textContent = "";
+  for (let i = 0; i < 8; i++) {
+    const c = recentUsed[i];
+    box.append(c ? h("button", { class: "chip", type: "button", title: c, "aria-label": "Recent colour " + c, style: `background:${c}`, onclick: () => applySwatch(c) }) : h("span", { class: "empty", "aria-hidden": "true" }));
+  }
+};
+UI.buildColour = function ({ t, s, editSel, first, fillNow, applyFill, applyStroke }) {
+  const box = $("colourBody"); if (!box) return;
+  box.textContent = "";
+  const isPaint = t === "paint" || t === "bucket";
+  const cur = isPaint ? s.paint.color : fillNow;
+  const setMain = (v) => { if (isPaint) { s.paint.color = v || s.paint.color; s.fill = v || s.fill; UI.syncSwatch(); } else applyFill(v); };
+  const hex = h("input", { type: "text", value: cur && typeof cur === "string" ? Color.hex(cur) : "", placeholder: "#1d4ed8", spellcheck: "false", "aria-label": "Hex colour" });
+  hex.addEventListener("change", () => { const v = hex.value.trim(); if (!/^#?[0-9a-f]{3}([0-9a-f]{3})?$/i.test(v)) { toast("Type a colour like #ff5a36."); return; } const c = v[0] === "#" ? v : "#" + v; if (editSel) History.push(); setMain(c); App.rememberColor(c); UI.buildProps(); });
+  const main = colorRow(isPaint ? "Paint" : "Fill", () => cur, setMain, { allowNone: !["paint", "bucket", "vbrush"].includes(t), record: !!editSel });
+  // picking in the colour dialog counts as using that colour
+  main.querySelector("input[type=color]").addEventListener("change", (e) => App.rememberColor(e.target.value));
+  const stroke = colorRow("Stroke", () => (first ? first.stroke : s.strokeOn ? s.stroke : null), applyStroke, { allowNone: true, record: !!editSel });
+  stroke.querySelector("input[type=color]").addEventListener("change", (e) => App.rememberColor(e.target.value));
+  const target = h("div", { class: "seg2" },
+    btn("Swatches set fill", () => { UI.applyTarget = "fill"; UI.buildProps(); }, UI.applyTarget === "fill" ? "on" : ""),
+    btn("Swatches set stroke", () => { UI.applyTarget = "stroke"; UI.buildProps(); }, UI.applyTarget === "stroke" ? "on" : ""));
+  box.append(
+    section(editSel ? `Colour · ${App.state.selection.length} selected` : isPaint ? "Paint colour" : "Colour",
+      main, h("div", { class: "hexrow" }, h("label", {}, "Hex"), hex), stroke,
+      slider("Stroke width", 0, 80, 0.5, () => (first ? first.sw || 0 : s.sw), (v) => { s.sw = v; if (editSel) { const cell = App.selCell(); const ids = new Set(App.state.selection); cell.objects.forEach((o) => { if (ids.has(o.id)) o.sw = v; }); changed("sw"); } }, { record: !!editSel }),
+      h("div", { class: "btnrow" }, btn("Gradient…", () => UI.gradientDialog()), btn("Pick from canvas", () => App.setTool("eyedropper"))),
+      s.grad ? h("p", { class: "hint" }, `${s.grad.type} gradient fill is on — pick a solid colour to turn it off.`) : null),
+    section("Recent colours", h("div", { class: "recent", id: "recentBox" }),
+      h("p", { class: "hint" }, "The last 8 colours you drew or filled with. They stay here next time you open the app."),
+      btn("Clear recent", () => { recentUsed = []; try { localStorage.removeItem(RECENT_KEY); } catch (e) { /* ignore */ } UI.renderRecent(); })),
+    section("Swatches", target, UI.recentSwatches())
+  );
+  UI.renderRecent();
+};
 UI.recentSwatches = function () {
-  return h("div", { class: "palette" }, recent.map((c) => h("button", { class: "chip", type: "button", title: c, style: `background:${c}`, onclick: () => {
-    const t = App.state.tool;
-    if (["select", "direct"].includes(t) && App.state.selection.length) Cmd.editSelected((o) => { o.fill = c; });
-    App.style.fill = c; App.style.grad = null; App.style.paint.color = c; UI.syncSwatch(); UI.buildProps();
-  } })));
+  return h("div", { class: "palette" }, recent.map((c) => h("button", { class: "chip", type: "button", title: c, style: `background:${c}`, onclick: () => applySwatch(c) })));
 };
 
 // ---------------------------------------------------------------- media clip settings (video / image / sequence / sound)

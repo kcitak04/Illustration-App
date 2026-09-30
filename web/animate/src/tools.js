@@ -262,6 +262,8 @@ function drawHoverCursor(g) {
 }
 
 // ---------------------------------------------------------------- helpers shared by tools
+/** Adds colours that were just used for drawing to the "recent colours" memory. */
+function remember(...cs) { if (App.rememberColor) for (const c of cs) if (typeof c === "string") App.rememberColor(c); }
 function currentObjects() { const L = activeLayer(); return L && L.kind === "draw" ? Render.cellObjectsAt(L, App.state.frame) : []; }
 // ---- layer groups: linked layers whose shapes are selected and moved together
 /** The active layer plus the layers grouped with it (drawing layers that are shown and unlocked), bottom to top. */
@@ -678,6 +680,7 @@ tool("pen", (() => {
         const cell = editableCell();
         const st = styleProps();
         obj = { id: uid(), type: "path", nodes: [], closed: false, m: M.id(), ...st };
+        remember(st.stroke || App.style.stroke, App.style.penFill ? st.fill : null);
         if (!obj.stroke && !App.style.penFill) { obj.stroke = App.style.stroke; }
         if (!App.style.penFill) obj.fill = null;
         cell.objects.push(obj);
@@ -738,6 +741,7 @@ tool("pencil", (() => {
       History.push();
       const st = styleProps();
       const o = { id: uid(), type: "path", nodes, closed, m: M.id(), ...st, stroke: App.style.strokeOn ? App.style.stroke : (typeof App.style.fill === "string" ? App.style.fill : "#111"), fill: closed && App.style.pencilFill ? st.fill : null };
+      remember(o.stroke, o.fill);
       const cell = editableCell(); cell.objects.push(o); addMirrors(cell, o);
       pts = null; changed("pencil");
     },
@@ -760,6 +764,7 @@ tool("vbrush", (() => {
       History.push();
       const b = App.style.brush;
       obj = { id: uid(), type: "brush", pts: [p.x, p.y, p.p], size: b.size, pressure: b.pressure, taper: b.taper, style: b.style || "pressure", dot: b.dot ?? 1, sp: b.sp ?? 1, amt: b.amt ?? 0.5, ang: b.ang ?? 45, freq: b.freq ?? 1, seed: 1 + Math.floor(Math.random() * 9999), m: M.id(), fill: App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke), stroke: null, opacity: App.style.opacity, blend: App.style.blend };
+      remember(typeof obj.fill === "string" ? obj.fill : null);
       sm = { x: p.x, y: p.y, p: p.p };
       const cell = editableCell(); cell.objects.push(obj);
       const copies = Sym.transforms().map((T) => ({ ...obj, id: uid(), m: T, pts: obj.pts }));
@@ -807,6 +812,7 @@ function shapeTool(kind) {
       if (!obj) {
         History.push();
         const st = styleProps(), sh = App.style.shape;
+        remember(st.fill, st.stroke);
         obj = { id: uid(), type: kind === "line" ? "path" : kind, m: M.id(), ...st };
         if (kind === "rect") obj.r = sh.radius;
         if (kind === "poly") { obj.n = sh.points; obj.star = sh.star; obj.inner = sh.inner; }
@@ -857,6 +863,7 @@ const TextTool = (App.TextTool = {
     else {
       const t = App.style.text, st = styleProps();
       const o = { id: uid(), type: "text", text, font: t.font, size: t.size, weight: t.weight, italic: t.italic, align: t.align, m: M.translate(p.x, p.y), ...st, fill: st.fill || "#111" };
+      remember(o.fill, o.stroke);
       if (!o.stroke) o.sw = 0;
       cell.objects.push(o); App.state.selection = [o.id];
     }
@@ -1188,6 +1195,7 @@ function paintTool(erase) {
       const g = b.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, d.width, d.height);
       let kind = cfg().brush || "round";
       if (erase && !App.ERASER_BRUSHES.includes(kind)) kind = "round";
+      if (!erase && !PAINT_BRUSHES[kind].direct) remember(cfg().color);
       const direct = !erase && !!PAINT_BRUSHES[kind].direct;
       // oil, smudge & blur work straight on the layer's pixels (they change what's there)
       if (direct && !cell.raster) rasterForPaint(cell);
@@ -1292,7 +1300,7 @@ tool("bucket", {
     if (!layerEditable()) return;
     const hit = currentObjects().slice().reverse().find((o) => o.fill !== undefined && o.type !== "text" && o.type !== "image" && Render.hit(o, p.x, p.y, 0));
     if (hit && hit.type !== "brush") {
-      History.push(); const c = editableCell(); const o = c.objects.find((x) => x.id === hit.id); o.fill = App.style.grad ? { ...App.style.grad } : App.style.paint.color; changed("fill"); return;
+      History.push(); const c = editableCell(); const o = c.objects.find((x) => x.id === hit.id); o.fill = App.style.grad ? { ...App.style.grad } : App.style.paint.color; remember(o.fill); changed("fill"); return;
     }
     const d = App.doc, x0 = Math.floor(p.x), y0 = Math.floor(p.y);
     if (x0 < 0 || y0 < 0 || x0 >= d.width || y0 >= d.height) return;
@@ -1321,6 +1329,7 @@ tool("bucket", {
     const grown = new Uint8Array(mask);
     for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) { const i = y * W + x; if (!mask[i] && (mask[i - 1] || mask[i + 1] || mask[i - W] || mask[i + W])) grown[i] = 1; }
     const [R, G, B, A] = Color.parse(App.style.paint.color);
+    remember(App.style.paint.color);
     const fill = sg.createImageData(W, H);
     for (let i = 0; i < grown.length; i++) if (grown[i]) { fill.data[i * 4] = R; fill.data[i * 4 + 1] = G; fill.data[i * 4 + 2] = B; fill.data[i * 4 + 3] = A * 255; }
     History.push();
@@ -1333,7 +1342,7 @@ tool("bucket", {
 
 // ---- Eyedropper
 tool("eyedropper", {
-  down(p) { this.pick(p); }, move(p) { this.pick(p); },
+  down(p) { this.pick(p); }, move(p) { this.pick(p); }, up() { if (this._last) remember(this._last); this._last = null; },
   pick(p) {
     const d = App.doc; if (p.x < 0 || p.y < 0 || p.x >= d.width || p.y >= d.height) return;
     const c = document.createElement("canvas"); c.width = c.height = 1;
@@ -1341,6 +1350,7 @@ tool("eyedropper", {
     const [r, gg, b] = g.getImageData(0, 0, 1, 1).data;
     const hex = "#" + [r, gg, b].map((v) => v.toString(16).padStart(2, "0")).join("");
     App.style.fill = hex; App.style.grad = null; App.style.paint.color = hex;
+    this._last = hex;
     App.emit("style");
   }
 });

@@ -86,6 +86,9 @@ async function start() {
   $("zoomMinus").onclick = () => View.zoomAt(0.8);
   $("zoomPlus").onclick = () => View.zoomAt(1.25);
   $("propsToggle").onclick = () => document.body.classList.toggle("props-open");
+  $("tabColour").onclick = () => UI.showTab("colour");
+  $("tabProps").onclick = () => UI.showTab("props");
+  UI.showTab("props"); document.body.classList.remove("props-open");
   $("propsClose").onclick = () => UI.closeProps();
   $("importFile").onchange = (e) => { UI.importFiles(e.target.files || []); e.target.value = ""; };
   $("projectFile").onchange = async (e) => {

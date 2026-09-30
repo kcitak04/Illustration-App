@@ -82,6 +82,16 @@ body.dropping .dropHint { display: grid; }
 /* properties */
 .props { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); overflow-y: auto; min-height: 0; }
 .props-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--rule); position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.ptabs { display: flex; gap: 2px; background: var(--panel-2); border-radius: 7px; padding: 2px; }
+.ptabs button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 5px 12px; border-radius: 5px; cursor: pointer; }
+.ptabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+.recent { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; }
+.recent .chip, .recent .empty { aspect-ratio: 1; width: 100%; height: auto; border-radius: 6px; }
+.recent .empty { border: 1px dashed var(--rule); }
+.cur-colours { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.cur-colours .dot { width: 22px; height: 22px; border-radius: 5px; border: 1px solid var(--rule); background-clip: padding-box; }
+.hexrow { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 8px; align-items: center; font-size: 13px; }
+.hexrow input { width: 100%; min-width: 0; font-family: ui-monospace, monospace; background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 5px; padding: 5px 7px; }
 .props-head strong { font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 #propsClose { display: none; }
 .psec { padding: 10px 12px; border-bottom: 1px solid var(--rule); display: flex; flex-direction: column; gap: 7px; }
@@ -226,8 +236,15 @@ kbd { font-family: var(--font-mono); font-size: 11px; background: var(--panel-2)
       <div class="dropHint">Drop images, videos, GIFs, sounds or a project to import</div>
     </main>
     <aside class="props" id="props" aria-label="Properties">
-      <div class="props-head"><strong>Properties</strong><button class="btn tiny" id="propsClose" type="button" aria-label="Close properties">✕</button></div>
-      <div id="propsBody"></div>
+      <div class="props-head">
+        <div class="ptabs" role="tablist" aria-label="Panel">
+          <button type="button" role="tab" id="tabColour" aria-controls="colourBody">Colour</button>
+          <button type="button" role="tab" id="tabProps" aria-controls="propsBody">Properties</button>
+        </div>
+        <button class="btn tiny" id="propsClose" type="button" aria-label="Close panel">✕</button>
+      </div>
+      <div id="colourBody" role="tabpanel" hidden></div>
+      <div id="propsBody" role="tabpanel"></div>
     </aside>
   </div>
 
