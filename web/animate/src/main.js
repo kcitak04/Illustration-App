@@ -43,6 +43,7 @@ function fileMenu(e) {
     ["Import files…", () => $("importFile").click()],
     ["Export… (Ctrl+E)", () => Exporter.open()],
     ["-"],
+    ["Canvas size…", () => UI.canvasSizeDialog()],
     ["Animation settings…", () => UI.docSettings()],
     ["Stylus: " + (App.settings.palm ? "fingers only pan (on)" : "fingers draw too"), () => { App.settings.palm = !App.settings.palm; toast(App.settings.palm ? "Once a stylus is used, fingers only pan and zoom." : "Fingers draw as well as the stylus."); }],
     ["Keyboard shortcuts", () => UI.help()]

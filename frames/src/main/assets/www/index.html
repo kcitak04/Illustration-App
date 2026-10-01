@@ -98,6 +98,10 @@ body.dropping .dropHint { display: grid; }
 .psec h3 { margin: 0; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
 .row { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 8px; font-size: 13px; }
 .maskhint { color: #e11d48 !important; font-weight: 600; }
+.cs-preview { display: block; margin: 8px auto 0; background: var(--panel-2); border-radius: 6px; max-width: 100%; }
+.anchor { display: grid; grid-template-columns: repeat(3, 30px); gap: 3px; }
+.anchor .btn { width: 30px; height: 26px; padding: 0; font-size: 9px; }
+.anchor .btn.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .grouplist { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-height: 45vh; overflow: auto; }
 .seg2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .seg2 .btn.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
@@ -3462,6 +3466,55 @@ const Layers = (App.Layers = {
   select(i) { if (i === App.state.layer) return; TextTool.cancel(); Tools.get("pen").finish?.(); App.state.layer = i; App.state.selection = []; App.emit("layers"); App.emit("selection"); View.redraw(); }
 });
 
+// ---------------------------------------------------------------- canvas size
+/**
+ * Changes the animation's size at any time. fit: "scale" (keep proportions, fit inside), "fill"
+ * (keep proportions, fill and crop), "stretch", or "none" (keep artwork size; crop / add space
+ * around it from the anchor, ax / ay = 0 left/top, 0.5 centre, 1 right/bottom).
+ */
+App.resizeCanvas = function (nw, nh, fit = "scale", ax = 0.5, ay = 0.5) {
+  const d = App.doc, W = d.width, H = d.height;
+  nw = clamp(Math.round(nw), 16, 4096); nh = clamp(Math.round(nh), 16, 4096);
+  if (nw === W && nh === H) return;
+  let T;
+  if (fit === "stretch") T = M.scale(nw / W, nh / H);
+  else if (fit === "scale" || fit === "fill") {
+    const u = fit === "scale" ? Math.min(nw / W, nh / H) : Math.max(nw / W, nh / H);
+    T = M.mul(M.translate((nw - W * u) / 2, (nh - H * u) / 2), M.scale(u, u));
+  } else T = M.translate((nw - W) * ax, (nh - H) * ay);
+  const ux = Math.hypot(T[0], T[1]), uy = Math.hypot(T[2], T[3]);
+  History.push();
+  const remap = (c, fillNew) => {
+    const n = document.createElement("canvas"); n.width = nw; n.height = nh;
+    const g = n.getContext("2d"); g.imageSmoothingQuality = "high";
+    if (fillNew) { g.fillStyle = "#fff"; g.fillRect(0, 0, nw, nh); g.setTransform(...T); g.clearRect(0, 0, W, H); }
+    g.setTransform(...T); g.drawImage(c, 0, 0); return n;
+  };
+  for (const L of d.layers) {
+    if (L.cells) for (const c of L.cells) if (c) {
+      if (c.raster) c.raster = remap(c.raster);
+      for (const o of c.objects) o.m = M.mul(T, o.m);
+    }
+    // layer masks: newly added space stays visible
+    if (L.mask && L.mask.canvas) L.mask = { ...L.mask, canvas: remap(L.mask.canvas, true) };
+    if (L.kind === "media" && L.settings && L.media) {
+      const s = L.settings;
+      if (!(fit !== "none" && ["contain", "cover", "stretch"].includes(s.fit))) {
+        // keep the clip where it was relative to the artwork
+        const sw = L.media.w || 1, sh = L.media.h || 1;
+        const k = s.fit === "contain" ? Math.min(W / sw, H / sh) : s.fit === "cover" ? Math.max(W / sw, H / sh) : s.fit === "stretch" ? Math.sqrt((W / sw) * (H / sh)) : 1;
+        const [cx, cy] = M.apply(T, W / 2 + s.x, H / 2 + s.y);
+        s.scale = s.scale * k * Math.sqrt(ux * uy); s.fit = "none"; s.x = cx - nw / 2; s.y = cy - nh / 2;
+      } else { s.x *= ux; s.y *= uy; }
+    }
+  }
+  d.width = nw; d.height = nh;
+  const sy = App.style.sym; sy.cx = sy.cy = null;
+  if (App.Mask) App.Mask.current = null;
+  App.state.selection = [];
+  changed("doc"); App.emit("layers"); App.emit("selection"); App.View.fit(); App.UI.syncTimelineControls();
+};
+
 // ---------------------------------------------------------------- timeline UI
 const TL = (App.TL = { cw: 16, rh: 30, ruler: 22 });
 TL.init = function () {
@@ -3899,6 +3952,8 @@ UI.buildProps = function () {
     }
     box.append(section(`Layer · ${L.name}`, ...kids));
   }
+  const d = App.doc;
+  box.append(section(`Canvas · ${d.width} × ${d.height}`, h("div", { class: "btnrow" }, btn("Change size…", () => UI.canvasSizeDialog()), btn("Animation settings…", () => UI.docSettings()))));
 };
 // ---------------------------------------------------------------- symmetry & repeat copies
 const SYM_MODES = [["off", "Off"], ["x", "Left ↔ right"], ["y", "Top ↕ bottom"], ["xy", "Four-way"], ["radial", "Radial (rotate)"], ["kaleido", "Kaleidoscope (rotate + mirror)"]];
@@ -4266,14 +4321,58 @@ UI.gradientDialog = function () {
   ]);
 };
 
+UI.canvasSizeDialog = function () {
+  const d = App.doc, v = { w: d.width, h: d.height, fit: "scale", ax: 0.5, ay: 0.5, lock: false };
+  const ratio = d.width / d.height;
+  const presets = [["", "Custom size"], ["1080x1080", "Square 1080 × 1080"], ["1920x1080", "HD 1920 × 1080"], ["1080x1920", "Vertical / story 1080 × 1920"], ["1080x1350", "Portrait post 1080 × 1350"], ["3000x3000", "Album cover 3000 × 3000"], ["1280x720", "720p 1280 × 720"], ["3840x2160", "4K 3840 × 2160"], ["800x600", "800 × 600"], ["512x512", "Sticker 512 × 512"]];
+  const wIn = h("input", { type: "number", value: v.w, min: 16, max: 4096, id: "csW" }), hIn = h("input", { type: "number", value: v.h, min: 16, max: 4096, id: "csH" });
+  // preview of the current frame in the new canvas
+  const snap = document.createElement("canvas"); snap.width = d.width; snap.height = d.height; Render.frame(snap.getContext("2d"), App.state.frame);
+  const pv = h("canvas", { width: 260, height: 200, class: "cs-preview", "aria-label": "Preview of the new canvas" });
+  const anchor = h("div", { class: "anchor", role: "group", "aria-label": "Anchor" });
+  const draw = () => {
+    const g = pv.getContext("2d"); g.clearRect(0, 0, pv.width, pv.height);
+    const nw = clamp(+wIn.value || v.w, 16, 4096), nh = clamp(+hIn.value || v.h, 16, 4096), W = d.width, H = d.height;
+    const k = Math.min((pv.width - 20) / Math.max(nw, W), (pv.height - 20) / Math.max(nh, H)), ox = (pv.width - nw * k) / 2, oy = (pv.height - nh * k) / 2;
+    let T;
+    if (v.fit === "stretch") T = [nw / W, 0, 0, nh / H, 0, 0];
+    else if (v.fit === "scale" || v.fit === "fill") { const u = v.fit === "scale" ? Math.min(nw / W, nh / H) : Math.max(nw / W, nh / H); T = [u, 0, 0, u, (nw - W * u) / 2, (nh - H * u) / 2]; }
+    else T = [1, 0, 0, 1, (nw - W) * v.ax, (nh - H) * v.ay];
+    g.save(); g.translate(ox, oy); g.scale(k, k);
+    g.fillStyle = d.transparent ? "#ddd" : d.background; g.fillRect(0, 0, nw, nh);
+    g.save(); g.beginPath(); g.rect(0, 0, nw, nh); g.clip(); g.transform(...T); g.drawImage(snap, 0, 0); g.restore();
+    g.save(); g.transform(...T); g.setLineDash([4 / k, 3 / k]); g.strokeStyle = "rgba(225,29,72,.9)"; g.lineWidth = 1.5 / k / Math.max(T[0], 0.01); g.strokeRect(0, 0, W, H); g.restore();
+    g.strokeStyle = "#2f80ff"; g.lineWidth = 2 / k; g.strokeRect(0, 0, nw, nh); g.restore();
+    anchorRow.style.display = v.fit === "none" ? "" : "none";
+    info.textContent = `${d.width} × ${d.height} → ${nw} × ${nh}. Dashed red = your current artwork area.`;
+  };
+  const info = h("p", { class: "hint" });
+  for (const ay of [0, 0.5, 1]) for (const ax of [0, 0.5, 1]) {
+    const b = h("button", { type: "button", class: "btn tiny" + (ax === v.ax && ay === v.ay ? " on" : ""), "aria-label": `Anchor ${ay === 0 ? "top" : ay === 1 ? "bottom" : "middle"} ${ax === 0 ? "left" : ax === 1 ? "right" : "centre"}`, onclick: () => { v.ax = ax; v.ay = ay; anchor.querySelectorAll("button").forEach((x) => x.classList.remove("on")); b.classList.add("on"); draw(); } }, "●");
+    anchor.append(b);
+  }
+  const anchorRow = h("div", { class: "row" }, h("label", {}, "Anchor"), anchor);
+  const syncW = () => { if (v.lock) hIn.value = Math.round(+wIn.value / ratio); draw(); };
+  const syncH = () => { if (v.lock) wIn.value = Math.round(+hIn.value * ratio); draw(); };
+  wIn.addEventListener("input", syncW); hIn.addEventListener("input", syncH);
+  const body = h("div", {},
+    select("Preset", presets, () => `${v.w}x${v.h}`, (p) => { if (!p) return; const [a, b] = p.split("x").map(Number); wIn.value = a; hIn.value = b; draw(); }, { record: false }),
+    h("div", { class: "row" }, h("label", { for: "csW" }, "Width (px)"), wIn), h("div", { class: "row" }, h("label", { for: "csH" }, "Height (px)"), hIn),
+    check("Keep proportions", () => v.lock, (x) => { v.lock = x; syncW(); }, { record: false }),
+    select("Your artwork", [["scale", "Scale to fit (keep proportions)"], ["fill", "Scale to fill (keep proportions, may crop)"], ["stretch", "Stretch to the new size"], ["none", "Keep its size — crop or add space"]], () => v.fit, (x) => { v.fit = x; draw(); }, { record: false }),
+    anchorRow,
+    pv, info,
+    h("p", { class: "hint" }, "Every frame, layer, mask and imported clip is adjusted. You can undo this.")
+  );
+  const dlg = UI.dialog("Canvas size", body, [btn("Cancel", () => dlg.close()), btn("Resize", () => { const nw = +wIn.value, nh = +hIn.value; dlg.close(); App.resizeCanvas(nw, nh, v.fit, v.ax, v.ay); toast(`Canvas is now ${App.doc.width} × ${App.doc.height}.`); }, "primary")]);
+  draw();
+};
+
 UI.docSettings = function () {
   const d = App.doc, v = { name: d.name, w: d.width, h: d.height, fps: d.fps, frames: d.frames, speed: d.speed, bg: d.background, transparent: d.transparent };
-  const presets = [["", "Custom"], ["1080x1080", "Square 1080 × 1080"], ["1920x1080", "HD 1920 × 1080"], ["1080x1920", "Vertical 1080 × 1920"], ["3000x3000", "Album cover 3000 × 3000"], ["1280x720", "720p 1280 × 720"], ["800x600", "800 × 600"], ["512x512", "Sticker 512 × 512"]];
-  const wIn = h("input", { type: "number", value: v.w, min: 16, max: 4096, id: "dsW" }), hIn = h("input", { type: "number", value: v.h, min: 16, max: 4096, id: "dsH" });
   const body = h("div", {},
     h("div", { class: "row" }, h("label", { for: "dsName" }, "Name"), h("input", { id: "dsName", value: v.name, oninput: (e) => (v.name = e.target.value) })),
-    select("Canvas preset", presets, () => `${v.w}x${v.h}`, (p) => { if (!p) return; const [a, b] = p.split("x").map(Number); wIn.value = a; hIn.value = b; }, { record: false }),
-    h("div", { class: "row" }, h("label", { for: "dsW" }, "Width"), wIn), h("div", { class: "row" }, h("label", { for: "dsH" }, "Height"), hIn),
+    h("div", { class: "row" }, h("label", {}, "Canvas size"), btn(`${d.width} × ${d.height} — change…`, () => { dlg.close(); UI.canvasSizeDialog(); })),
     numberField("Frame rate (fps)", () => v.fps, (x) => (v.fps = x), { min: 1, max: 60, record: false }),
     numberField("Length (frames)", () => v.frames, (x) => (v.frames = x), { min: 1, max: 7200, record: false }),
     select("Playback speed", [[0.25, "0.25×"], [0.5, "0.5×"], [0.75, "0.75×"], [1, "1× (normal)"], [1.25, "1.25×"], [1.5, "1.5×"], [2, "2×"], [3, "3×"], [4, "4×"]], () => v.speed, (x) => (v.speed = +x), { record: false }),
@@ -4282,11 +4381,6 @@ UI.docSettings = function () {
   );
   const dlg = UI.dialog("Animation settings", body, [btn("Cancel", () => dlg.close()), btn("Apply", () => {
     History.push();
-    const nw = clamp(+wIn.value || d.width, 16, 4096), nh = clamp(+hIn.value || d.height, 16, 4096);
-    if (nw !== d.width || nh !== d.height) {
-      for (const L of d.layers) if (L.cells) for (const c of L.cells) if (c && c.raster) { const n = document.createElement("canvas"); n.width = nw; n.height = nh; n.getContext("2d").drawImage(c.raster, 0, 0); c.raster = n; }
-      d.width = nw; d.height = nh;
-    }
     d.name = v.name.trim() || d.name; d.fps = clamp(Math.round(v.fps), 1, 60); d.speed = v.speed; d.background = v.bg; d.transparent = v.transparent;
     if (v.frames !== d.frames) Frames.setLength(v.frames);
     changed("doc"); View.fit(); UI.syncTimelineControls(); dlg.close();
@@ -5023,6 +5117,7 @@ function fileMenu(e) {
     ["Import files…", () => $("importFile").click()],
     ["Export… (Ctrl+E)", () => Exporter.open()],
     ["-"],
+    ["Canvas size…", () => UI.canvasSizeDialog()],
     ["Animation settings…", () => UI.docSettings()],
     ["Stylus: " + (App.settings.palm ? "fingers only pan (on)" : "fingers draw too"), () => { App.settings.palm = !App.settings.palm; toast(App.settings.palm ? "Once a stylus is used, fingers only pan and zoom." : "Fingers draw as well as the stylus."); }],
     ["Keyboard shortcuts", () => UI.help()]

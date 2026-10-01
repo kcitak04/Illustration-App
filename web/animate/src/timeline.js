@@ -213,6 +213,55 @@ const Layers = (App.Layers = {
   select(i) { if (i === App.state.layer) return; TextTool.cancel(); Tools.get("pen").finish?.(); App.state.layer = i; App.state.selection = []; App.emit("layers"); App.emit("selection"); View.redraw(); }
 });
 
+// ---------------------------------------------------------------- canvas size
+/**
+ * Changes the animation's size at any time. fit: "scale" (keep proportions, fit inside), "fill"
+ * (keep proportions, fill and crop), "stretch", or "none" (keep artwork size; crop / add space
+ * around it from the anchor, ax / ay = 0 left/top, 0.5 centre, 1 right/bottom).
+ */
+App.resizeCanvas = function (nw, nh, fit = "scale", ax = 0.5, ay = 0.5) {
+  const d = App.doc, W = d.width, H = d.height;
+  nw = clamp(Math.round(nw), 16, 4096); nh = clamp(Math.round(nh), 16, 4096);
+  if (nw === W && nh === H) return;
+  let T;
+  if (fit === "stretch") T = M.scale(nw / W, nh / H);
+  else if (fit === "scale" || fit === "fill") {
+    const u = fit === "scale" ? Math.min(nw / W, nh / H) : Math.max(nw / W, nh / H);
+    T = M.mul(M.translate((nw - W * u) / 2, (nh - H * u) / 2), M.scale(u, u));
+  } else T = M.translate((nw - W) * ax, (nh - H) * ay);
+  const ux = Math.hypot(T[0], T[1]), uy = Math.hypot(T[2], T[3]);
+  History.push();
+  const remap = (c, fillNew) => {
+    const n = document.createElement("canvas"); n.width = nw; n.height = nh;
+    const g = n.getContext("2d"); g.imageSmoothingQuality = "high";
+    if (fillNew) { g.fillStyle = "#fff"; g.fillRect(0, 0, nw, nh); g.setTransform(...T); g.clearRect(0, 0, W, H); }
+    g.setTransform(...T); g.drawImage(c, 0, 0); return n;
+  };
+  for (const L of d.layers) {
+    if (L.cells) for (const c of L.cells) if (c) {
+      if (c.raster) c.raster = remap(c.raster);
+      for (const o of c.objects) o.m = M.mul(T, o.m);
+    }
+    // layer masks: newly added space stays visible
+    if (L.mask && L.mask.canvas) L.mask = { ...L.mask, canvas: remap(L.mask.canvas, true) };
+    if (L.kind === "media" && L.settings && L.media) {
+      const s = L.settings;
+      if (!(fit !== "none" && ["contain", "cover", "stretch"].includes(s.fit))) {
+        // keep the clip where it was relative to the artwork
+        const sw = L.media.w || 1, sh = L.media.h || 1;
+        const k = s.fit === "contain" ? Math.min(W / sw, H / sh) : s.fit === "cover" ? Math.max(W / sw, H / sh) : s.fit === "stretch" ? Math.sqrt((W / sw) * (H / sh)) : 1;
+        const [cx, cy] = M.apply(T, W / 2 + s.x, H / 2 + s.y);
+        s.scale = s.scale * k * Math.sqrt(ux * uy); s.fit = "none"; s.x = cx - nw / 2; s.y = cy - nh / 2;
+      } else { s.x *= ux; s.y *= uy; }
+    }
+  }
+  d.width = nw; d.height = nh;
+  const sy = App.style.sym; sy.cx = sy.cy = null;
+  if (App.Mask) App.Mask.current = null;
+  App.state.selection = [];
+  changed("doc"); App.emit("layers"); App.emit("selection"); App.View.fit(); App.UI.syncTimelineControls();
+};
+
 // ---------------------------------------------------------------- timeline UI
 const TL = (App.TL = { cw: 16, rh: 30, ruler: 22 });
 TL.init = function () {
