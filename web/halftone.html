@@ -122,6 +122,14 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
 .ink-row .name small { color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
 .ink-row input[type=range] { grid-column: 2 / 3; }
 
+.fx-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.fx-chip { display: flex; align-items: center; gap: 8px; text-align: left; border: 1px solid var(--rule); background: var(--paper); border-radius: var(--r); padding: 6px 8px; cursor: pointer; font-size: 12.5px; font-weight: 500; min-width: 0; }
+.fx-chip canvas { width: 34px; height: 34px; border-radius: 3px; flex: none; background: #ccc; }
+.fx-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-chip[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--panel); }
+.fx-chip[aria-pressed="true"] span::after { content: " ✓"; color: var(--accent); }
+.fx-ctl { border-left: 3px solid var(--accent); padding: 4px 0 4px 10px; display: flex; flex-direction: column; gap: 6px; }
+.fx-ctl strong { font-size: 12.5px; }
 .btn {
   border: 1px solid var(--rule); background: var(--paper); border-radius: var(--r);
   padding: 8px 12px; cursor: pointer; font-weight: 500;
@@ -211,6 +219,14 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
       </div>
       <p class="hint">Opens your phone's photo library or files — photos and videos both work. You can also drop a file or paste an image onto the proof. Nothing leaves your device.</p>
       <p class="hint">If the photo picker doesn't open inside the Claude app, open this page in Chrome or Safari instead.</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Effects</legend>
+      <p class="hint">Stack up to all 10 — each reshapes the picture before it's screened into dots. Tap again to turn one off.</p>
+      <div class="fx-grid" id="fxGrid"></div>
+      <div id="fxControls" class="fx-list"></div>
+      <div class="btn-row"><button class="btn" id="fxRandom" type="button">Surprise me</button><button class="btn" id="fxClear" type="button">Clear effects</button></div>
     </fieldset>
 
     <fieldset>
@@ -390,8 +406,176 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     return c;
   }
 
+  // ------------------------------------------------------------------ effects (modern art filters)
+  // Each works on the picture before screening. amt = strength 0..1, p = the effect's own setting 0..1.
+  const EFFECTS = [
+    { id: "pop", name: "Pop Art", p: "Colour bands", def: 0.4, hint: "Warhol-style: punchy saturated colour in a few flat bands." },
+    { id: "riso", name: "Riso misprint", p: "Plate shift", def: 0.35, hint: "Risograph look: each ink plate slightly off register, plus paper grain." },
+    { id: "glitch", name: "Glitch", p: "Slices", def: 0.5, hint: "RGB split and torn horizontal slices." },
+    { id: "solar", name: "Solarize", p: "Threshold", def: 0.5, hint: "Man Ray darkroom effect: the brightest tones flip negative." },
+    { id: "neon", name: "Neon map", p: "Palette", def: 0, hint: "Maps light to dark onto a neon gradient (vaporwave, sunset, acid, ice)." },
+    { id: "thermal", name: "Thermal", p: "Shift", def: 0, hint: "Heat-camera false colour." },
+    { id: "lino", name: "Linocut", p: "Line weight", def: 0.4, hint: "Bold carved outlines and two-tone shapes, like a block print." },
+    { id: "mosaic", name: "Mosaic", p: "Tile size", def: 0.3, hint: "Big square pixels before the dots — pixel-art meets print." },
+    { id: "poster", name: "Posterize", p: "Levels", def: 0.3, hint: "Flattens the tones into a few steps, screen-print style." },
+    { id: "wave", name: "Wave warp", p: "Ripples", def: 0.4, hint: "Psychedelic sine-wave distortion." }
+  ];
+  state.fx = {};
+  let srcVersion = 0, fxCache = { key: "", canvas: null };
+  const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+  function hash(n) { n = Math.sin(n * 127.1 + 311.7) * 43758.5453; return n - Math.floor(n); }
+  const NEON = [
+    [[24, 6, 64], [255, 46, 136], [45, 226, 230]],      // vaporwave
+    [[30, 10, 60], [255, 94, 58], [255, 215, 90]],      // sunset
+    [[10, 20, 10], [190, 255, 40], [255, 40, 220]],     // acid
+    [[8, 14, 40], [40, 120, 255], [220, 250, 255]]      // ice
+  ];
+  const HEAT = [[0, 0, 0], [40, 0, 140], [190, 0, 160], [255, 40, 40], [255, 190, 0], [255, 255, 220]];
+  function ramp(stops, t) {
+    t = clamp01(t) * (stops.length - 1); const i = Math.min(stops.length - 2, Math.floor(t)), f = t - i, a = stops[i], b = stops[i + 1];
+    return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+  }
+  /** The picture with the active effects applied (cached until the picture or the effects change). */
+  function effectSource() {
+    const active = EFFECTS.filter((e) => state.fx[e.id] && state.fx[e.id].on && !(e.id === "riso" && state.fx.riso.amt <= 0));
+    if (!active.length) return source;
+    const key = srcVersion + "|" + JSON.stringify(state.fx);
+    if (fxCache.key === key && fxCache.canvas) return fxCache.canvas;
+    const k = Math.min(1, 1100 / Math.max(source.width, source.height));
+    const w = Math.max(1, Math.round(source.width * k)), h = Math.max(1, Math.round(source.height * k));
+    const c = fxCache.canvas && fxCache.canvas.width === w && fxCache.canvas.height === h ? fxCache.canvas : document.createElement("canvas");
+    c.width = w; c.height = h;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    g.clearRect(0, 0, w, h); g.imageSmoothingQuality = "high"; g.drawImage(source, 0, 0, w, h);
+    const img = g.getImageData(0, 0, w, h); let d = img.data;
+    const F = (id) => (state.fx[id] && state.fx[id].on ? state.fx[id] : null);
+    const lum = (i) => (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+    const mix = (i, r, gg, b, a) => { d[i] += (r - d[i]) * a; d[i + 1] += (gg - d[i + 1]) * a; d[i + 2] += (b - d[i + 2]) * a; };
+    let fx;
+    // geometry first: wave, mosaic, glitch
+    if ((fx = F("wave"))) {
+      const out = new Uint8ClampedArray(d), amp = fx.amt * w * 0.05, fr = (1 + fx.p * 9) * Math.PI * 2 / h;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const sx = Math.round(x + Math.sin(y * fr) * amp), sy = Math.round(y + Math.sin(x * fr * 0.8 + 1.3) * amp * 0.6);
+        const cx = sx < 0 ? 0 : sx >= w ? w - 1 : sx, cy = sy < 0 ? 0 : sy >= h ? h - 1 : sy, i = (y * w + x) * 4, j = (cy * w + cx) * 4;
+        out[i] = d[j]; out[i + 1] = d[j + 1]; out[i + 2] = d[j + 2]; out[i + 3] = d[j + 3];
+      }
+      d.set(out);
+    }
+    if ((fx = F("mosaic"))) {
+      const B = Math.max(2, Math.round((4 + fx.p * 46) * (w / 1100) * (0.3 + fx.amt * 0.7) * 2));
+      for (let by = 0; by < h; by += B) for (let bx = 0; bx < w; bx += B) {
+        let r = 0, gg = 0, b = 0, a = 0, n = 0;
+        for (let y = by; y < Math.min(h, by + B); y++) for (let x = bx; x < Math.min(w, bx + B); x++) { const i = (y * w + x) * 4; r += d[i]; gg += d[i + 1]; b += d[i + 2]; a += d[i + 3]; n++; }
+        for (let y = by; y < Math.min(h, by + B); y++) for (let x = bx; x < Math.min(w, bx + B); x++) { const i = (y * w + x) * 4; d[i] = r / n; d[i + 1] = gg / n; d[i + 2] = b / n; d[i + 3] = a / n; }
+      }
+    }
+    if ((fx = F("glitch"))) {
+      const out = new Uint8ClampedArray(d), sh = Math.round(fx.amt * w * 0.03) + 1, slices = Math.round(2 + fx.p * 22);
+      for (let y = 0; y < h; y++) {
+        // torn slices shift sideways
+        const band = Math.floor((y / h) * slices * 3), torn = hash(band * 7.1 + srcVersion % 3) < 0.33 ? Math.round((hash(band * 3.3) - 0.5) * fx.amt * w * 0.25) : 0;
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4, at = (xx) => { xx = xx - torn; return (y * w + (xx < 0 ? 0 : xx >= w ? w - 1 : xx)) * 4; };
+          out[i] = d[at(x - sh)]; out[i + 1] = d[at(x) + 1]; out[i + 2] = d[at(x + sh) + 2];
+        }
+      }
+      d.set(out);
+    }
+    // colour
+    for (let i = 0; i < d.length; i += 4) {
+      if ((fx = F("pop"))) {
+        const L = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2], sat = 1 + fx.amt * 2.2, lv = Math.round(2 + fx.p * 4);
+        let r = L + (d[i] - L) * sat, gg = L + (d[i + 1] - L) * sat, b = L + (d[i + 2] - L) * sat;
+        const q = (v) => Math.round(clamp01(v / 255) * (lv - 1)) / (lv - 1) * 255;
+        mix(i, q(r), q(gg), q(b), fx.amt);
+      }
+      if ((fx = F("poster"))) { const lv = Math.round(2 + fx.p * 6), q = (v) => Math.round((v / 255) * (lv - 1)) / (lv - 1) * 255; mix(i, q(d[i]), q(d[i + 1]), q(d[i + 2]), fx.amt); }
+      if ((fx = F("solar"))) { const t = 255 * (0.25 + fx.p * 0.6), f = (v) => (v > t ? 255 - v : v); mix(i, f(d[i]), f(d[i + 1]), f(d[i + 2]), fx.amt); }
+      if ((fx = F("neon"))) { const c3 = ramp(NEON[Math.min(3, Math.floor(fx.p * 4))], lum(i)); mix(i, c3[0], c3[1], c3[2], fx.amt); }
+      if ((fx = F("thermal"))) { const c3 = ramp(HEAT, (lum(i) + fx.p) % 1.0001); mix(i, c3[0], c3[1], c3[2], fx.amt); }
+    }
+    if ((fx = F("lino"))) {
+      // carved look: two-tone shapes + dark Sobel outlines
+      const L = new Float32Array(w * h); for (let k2 = 0, i = 0; k2 < L.length; k2++, i += 4) L[k2] = lum(i);
+      const thick = 0.35 - fx.p * 0.3;
+      for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+        const k2 = y * w + x;
+        const gx = -L[k2 - w - 1] - 2 * L[k2 - 1] - L[k2 + w - 1] + L[k2 - w + 1] + 2 * L[k2 + 1] + L[k2 + w + 1];
+        const gy = -L[k2 - w - 1] - 2 * L[k2 - w] - L[k2 - w + 1] + L[k2 + w - 1] + 2 * L[k2 + w] + L[k2 + w + 1];
+        const edge = Math.hypot(gx, gy) > thick, i = k2 * 4;
+        const v = edge ? 0 : L[k2] > 0.5 ? 255 : L[k2] > 0.25 ? 130 : 20;
+        mix(i, v * d[i] / 255 * 0.3 + v * 0.7, v * d[i + 1] / 255 * 0.3 + v * 0.7, v * d[i + 2] / 255 * 0.3 + v * 0.7, fx.amt);
+      }
+    }
+    if ((fx = F("riso"))) { const gr = fx.amt * 46; for (let i = 0; i < d.length; i += 4) { const n = (hash(i * 0.37 + 11) - 0.5) * gr; d[i] += n; d[i + 1] += n; d[i + 2] += n; } }
+    g.putImageData(img, 0, 0);
+    fxCache = { key, canvas: c };
+    return c;
+  }
+
+  // effect chips with a little preview of each look
+  const fxThumb = (() => { const c = document.createElement("canvas"); c.width = c.height = 68; return c; })();
+  function renderFx() {
+    const grid = $("fxGrid"), ctl = $("fxControls");
+    grid.textContent = ""; ctl.textContent = "";
+    for (const e of EFFECTS) {
+      const st = state.fx[e.id];
+      const b = document.createElement("button"); b.type = "button"; b.className = "fx-chip"; b.title = e.hint;
+      b.setAttribute("aria-pressed", String(!!(st && st.on)));
+      const cv = document.createElement("canvas"); cv.width = cv.height = 68; cv.dataset.fx = e.id;
+      const nm = document.createElement("span"); nm.textContent = e.name;
+      b.append(cv, nm);
+      b.addEventListener("click", () => {
+        const cur = state.fx[e.id] || { on: false, amt: 0.7, p: e.def };
+        cur.on = !cur.on; state.fx[e.id] = cur; renderFx(); schedule();
+      });
+      grid.append(b);
+      if (st && st.on) {
+        const box = document.createElement("div"); box.className = "fx-ctl";
+        const t = document.createElement("strong"); t.textContent = e.name;
+        const hn = document.createElement("p"); hn.className = "hint"; hn.textContent = e.hint;
+        box.append(t, hn, fxSlider("Strength", e.id, "amt"), fxSlider(e.p, e.id, "p"));
+        ctl.append(box);
+      }
+    }
+    drawFxThumbs();
+  }
+  function fxSlider(label, id, key) {
+    const row = document.createElement("div"); row.className = "slider";
+    const uid = `fx-${id}-${key}`;
+    const l = document.createElement("label"); l.htmlFor = uid; l.textContent = label;
+    const r = document.createElement("input"); r.type = "range"; r.min = "0"; r.max = "1"; r.step = "0.01"; r.id = uid; r.value = String(state.fx[id][key]);
+    const o = document.createElement("output"); o.textContent = Math.round(state.fx[id][key] * 100) + "%";
+    r.addEventListener("input", () => { state.fx[id][key] = parseFloat(r.value); o.textContent = Math.round(state.fx[id][key] * 100) + "%"; schedule(); });
+    r.addEventListener("change", drawFxThumbs);
+    row.append(l, r, o); return row;
+  }
+  /** Each chip shows the current picture with just that effect (at its current settings). */
+  function drawFxThumbs() {
+    if (!source) return;
+    const saved = state.fx, savedSrc = source, savedCache = fxCache;
+    const tg = fxThumb.getContext("2d"); tg.clearRect(0, 0, 68, 68);
+    const k = Math.max(68 / source.width, 68 / source.height);
+    tg.drawImage(source, (68 - source.width * k) / 2, (68 - source.height * k) / 2, source.width * k, source.height * k);
+    for (const cv of document.querySelectorAll("#fxGrid canvas")) {
+      const id = cv.dataset.fx, cur = saved[id] || { amt: 0.7, p: EFFECTS.find((e) => e.id === id).def };
+      state.fx = { [id]: { on: true, amt: Math.max(0.5, cur.amt), p: cur.p } }; source = fxThumb; fxCache = { key: "", canvas: null }; srcVersion++;
+      const out = effectSource(), g = cv.getContext("2d"); g.clearRect(0, 0, 68, 68); g.drawImage(out, 0, 0, 68, 68);
+      if (id === "riso") { g.globalCompositeOperation = "multiply"; g.globalAlpha = 0.6; g.drawImage(out, 3, 2, 68, 68); g.globalAlpha = 1; g.globalCompositeOperation = "source-over"; }
+    }
+    state.fx = saved; source = savedSrc; fxCache = savedCache; srcVersion++;
+  }
+  $("fxClear").addEventListener("click", () => { for (const k of Object.keys(state.fx)) state.fx[k].on = false; renderFx(); schedule(); });
+  $("fxRandom").addEventListener("click", () => {
+    for (const k of Object.keys(state.fx)) state.fx[k].on = false;
+    const pool = EFFECTS.slice().sort(() => Math.random() - 0.5).slice(0, 1 + Math.floor(Math.random() * 3));
+    for (const e of pool) state.fx[e.id] = { on: true, amt: 0.4 + Math.random() * 0.6, p: Math.random() };
+    renderFx(); schedule();
+  });
+
   function setSource(canvas, name) {
-    source = canvas; sourceName = name;
+    source = canvas; sourceName = name; srcVersion++; setTimeout(drawFxThumbs, 0);
     $("sourceChip").textContent = name;
     schedule();
   }
@@ -438,7 +622,8 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   // ------------------------------------------------------------------ sampling
   // Downscale in halving steps so each grid cell holds an area average of the photo.
   function sampleGrid(w, h) {
-    let c = source, cw = source.width, ch = source.height;
+    const src = effectSource();
+    let c = src, cw = src.width, ch = src.height;
     while (cw / 2 > w && ch / 2 > h) {
       const n = document.createElement("canvas");
       n.width = Math.max(1, Math.round(cw / 2)); n.height = Math.max(1, Math.round(ch / 2));
@@ -507,6 +692,13 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
       return al;
     }
 
+    // Riso misprint: every ink plate lands slightly off register
+    const riso = state.fx.riso;
+    const misreg = inks.map((_, s) => {
+      if (!riso || !riso.on || nScreens < 2) return [0, 0];
+      const a = s * 2.399 + 0.7, m = riso.amt * cell * (0.6 + riso.p * 2.4);
+      return [Math.cos(a) * m, Math.sin(a) * m];
+    });
     for (let s = 0; s < nScreens; s++) {
       const ink = inks[s];
       const th = ink.angle * Math.PI / 180, co = Math.cos(th), si = Math.sin(th);
@@ -516,7 +708,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
           const x = cx + (u * co - v * si) * cell;
           const y = cy + (u * si + v * co) * cell;
           if (x < -cell || y < -cell || x > W + cell || y > H + cell) continue;
-          const alpha = sample(x, y);
+          const alpha = sample(x - misreg[s][0], y - misreg[s][1]);
           if (alpha < 0.02) continue;
           let d = coverages(pix[0], pix[1], pix[2])[s] * alpha;
           if (state.invert) d = 1 - d;
@@ -795,7 +987,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     const k = Math.min(1, 1600 / Math.max(w, h)), cw = Math.round(w * k), ch = Math.round(h * k);
     if (vsrc.width !== cw || vsrc.height !== ch) { vsrc.width = cw; vsrc.height = ch; }
     const g = vsrc.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(video, 0, 0, cw, ch);
-    source = vsrc; return true;
+    source = vsrc; srcVersion++; return true;
   }
   function updateTime() {
     $("timeOut").textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
@@ -1037,6 +1229,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   pressGroup("modeSeg", "mode", state.mode);
   pressGroup("shapeSeg", "shape", state.shape);
   renderInks();
+  renderFx();
   setSource(makeSample(), "Sample image");
 })();
 </script>
