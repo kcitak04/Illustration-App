@@ -1162,7 +1162,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     $("videoEst").textContent = `${p.n} frames · ${p.W}×${p.H} · ${(p.t1 - p.t0).toFixed(1)} s. Dense screens and long clips take a while — every frame is re-screened.`;
     const h = $("videoAlphaHint"), alpha = videoWantsAlpha();
     h.hidden = !alpha;
-    h.textContent = p.fmt === "webm" ? "Transparent areas stay transparent in the WebM (it plays in Chrome, Firefox and editors like Premiere / After Effects / DaVinci)." : "MP4 can't hold transparency, so it gets the paper colour behind it. Choose WebM to keep the see-through areas.";
+    h.textContent = p.fmt === "webm" ? "Transparent areas stay transparent in the WebM (it plays see-through in Chrome, Firefox, Edge, OBS and ffmpeg-based tools; some editors need a WebM plugin)." : "MP4 can't hold transparency, so it gets the paper colour behind it. Choose WebM to keep the see-through areas.";
   }
   for (const id of ["vFormat", "vWidth", "vFps", "vStart", "vEnd"]) $(id).addEventListener("change", updateEstimate);
 
