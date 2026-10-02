@@ -128,6 +128,9 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
 .fx-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fx-chip[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--panel); }
 .fx-chip[aria-pressed="true"] span::after { content: " ✓"; color: var(--accent); }
+.fx-chip.halftone { grid-column: 1 / -1; }
+fieldset.dim { opacity: .5; }
+fieldset.dim::after { content: "Halftone dots are off — turn them on in Effects to use these."; font-size: 12px; color: var(--muted); }
 .fx-ctl { border-left: 3px solid var(--accent); padding: 4px 0 4px 10px; display: flex; flex-direction: column; gap: 6px; }
 .fx-ctl strong { font-size: 12.5px; }
 .btn {
@@ -229,7 +232,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
       <div class="btn-row"><button class="btn" id="fxRandom" type="button">Surprise me</button><button class="btn" id="fxClear" type="button">Clear effects</button></div>
     </fieldset>
 
-    <fieldset>
+    <fieldset id="sepSet">
       <legend>Separation</legend>
       <div class="seg" role="group" aria-label="Mode" id="modeSeg">
         <button type="button" data-mode="mono">Mono</button>
@@ -278,6 +281,8 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
         <input id="paperColor" type="color" aria-label="Paper colour" style="width:34px;height:30px;padding:0;border:1px solid var(--rule);border-radius:4px;background:none">
         <label class="check"><input id="transparent" type="checkbox"> Transparent (dots only)</label>
       </div>
+      <label class="check"><input id="keepAlpha" type="checkbox" checked> Keep see-through parts of the picture empty</label>
+      <p class="hint" id="alphaHint">For PNGs with transparency: no paper, dots or effects appear where the picture is see-through.</p>
     </fieldset>
 
     <fieldset>
@@ -421,6 +426,21 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     { id: "wave", name: "Wave warp", p: "Ripples", def: 0.4, hint: "Psychedelic sine-wave distortion." }
   ];
   state.fx = {};
+  state.halftone = true;      // the dot screen itself can be switched off like any effect
+  state.keepAlpha = true;     // see-through parts of the picture stay empty
+  let alphaCache = { v: -1, has: false };
+  /** Does the current picture have see-through areas? */
+  function srcHasAlpha() {
+    if (!source) return false;
+    if (alphaCache.v === srcVersion) return alphaCache.has;
+    const c = document.createElement("canvas"), k = Math.min(1, 256 / Math.max(source.width, source.height));
+    c.width = Math.max(1, Math.round(source.width * k)); c.height = Math.max(1, Math.round(source.height * k));
+    const g = c.getContext("2d", { willReadFrequently: true }); g.drawImage(source, 0, 0, c.width, c.height);
+    const d = g.getImageData(0, 0, c.width, c.height).data; let has = false;
+    for (let i = 3; i < d.length; i += 4) if (d[i] < 250) { has = true; break; }
+    alphaCache = { v: srcVersion, has }; return has;
+  }
+  const masking = () => state.keepAlpha && srcHasAlpha();
   let srcVersion = 0, fxCache = { key: "", canvas: null };
   const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
   function hash(n) { n = Math.sin(n * 127.1 + 311.7) * 43758.5453; return n - Math.floor(n); }
@@ -508,7 +528,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
         mix(i, v * d[i] / 255 * 0.3 + v * 0.7, v * d[i + 1] / 255 * 0.3 + v * 0.7, v * d[i + 2] / 255 * 0.3 + v * 0.7, fx.amt);
       }
     }
-    if ((fx = F("riso"))) { const gr = fx.amt * 46; for (let i = 0; i < d.length; i += 4) { const n = (hash(i * 0.37 + 11) - 0.5) * gr; d[i] += n; d[i + 1] += n; d[i + 2] += n; } }
+    if ((fx = F("riso"))) { const gr = fx.amt * 46; for (let i = 0; i < d.length; i += 4) { if (!d[i + 3]) continue; const n = (hash(i * 0.37 + 11) - 0.5) * gr; d[i] += n; d[i + 1] += n; d[i + 2] += n; } }
     g.putImageData(img, 0, 0);
     fxCache = { key, canvas: c };
     return c;
@@ -519,6 +539,13 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   function renderFx() {
     const grid = $("fxGrid"), ctl = $("fxControls");
     grid.textContent = ""; ctl.textContent = "";
+    const ht = document.createElement("button"); ht.type = "button"; ht.className = "fx-chip halftone"; ht.title = "The halftone dot screen itself. Turn it off to use the effects on their own.";
+    ht.setAttribute("aria-pressed", String(state.halftone));
+    const hc = document.createElement("canvas"); hc.width = hc.height = 68; drawDotsIcon(hc);
+    const hn = document.createElement("span"); hn.textContent = "Halftone dots";
+    ht.append(hc, hn);
+    ht.addEventListener("click", () => { state.halftone = !state.halftone; renderFx(); syncHalftoneUi(); schedule(); });
+    grid.append(ht);
     for (const e of EFFECTS) {
       const st = state.fx[e.id];
       const b = document.createElement("button"); b.type = "button"; b.className = "fx-chip"; b.title = e.hint;
@@ -558,13 +585,21 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     const tg = fxThumb.getContext("2d"); tg.clearRect(0, 0, 68, 68);
     const k = Math.max(68 / source.width, 68 / source.height);
     tg.drawImage(source, (68 - source.width * k) / 2, (68 - source.height * k) / 2, source.width * k, source.height * k);
-    for (const cv of document.querySelectorAll("#fxGrid canvas")) {
+    for (const cv of document.querySelectorAll("#fxGrid canvas[data-fx]")) {
       const id = cv.dataset.fx, cur = saved[id] || { amt: 0.7, p: EFFECTS.find((e) => e.id === id).def };
       state.fx = { [id]: { on: true, amt: Math.max(0.5, cur.amt), p: cur.p } }; source = fxThumb; fxCache = { key: "", canvas: null }; srcVersion++;
       const out = effectSource(), g = cv.getContext("2d"); g.clearRect(0, 0, 68, 68); g.drawImage(out, 0, 0, 68, 68);
       if (id === "riso") { g.globalCompositeOperation = "multiply"; g.globalAlpha = 0.6; g.drawImage(out, 3, 2, 68, 68); g.globalAlpha = 1; g.globalCompositeOperation = "source-over"; }
     }
     state.fx = saved; source = savedSrc; fxCache = savedCache; srcVersion++;
+  }
+  function drawDotsIcon(cv) {
+    const g = cv.getContext("2d"); g.fillStyle = "#f7f5f0"; g.fillRect(0, 0, 68, 68); g.fillStyle = "#15171b";
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const r = 0.6 + ((x + y) / 14) * 3.4; g.beginPath(); g.arc(4 + x * 8.5, 4 + y * 8.5, r, 0, Math.PI * 2); g.fill(); }
+  }
+  function syncHalftoneUi() {
+    for (const id of ["sepSet"]) $(id).classList.toggle("dim", !state.halftone);
+    const scr = $("cell").closest("fieldset"); scr.classList.toggle("dim", !state.halftone);
   }
   $("fxClear").addEventListener("click", () => { for (const k of Object.keys(state.fx)) state.fx[k].on = false; renderFx(); schedule(); });
   $("fxRandom").addEventListener("click", () => {
@@ -665,6 +700,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     const W = R.W;
     const H = Math.max(1, Math.round(W * source.height / source.width));
     outH = H;
+    if (!state.halftone) { screens = []; return; }
     const cell = R.cell;
     const gw = Math.max(1, Math.round(W / cell)), gh = Math.max(1, Math.round(H / cell));
     const px = sampleGrid(gw, gh);
@@ -753,6 +789,8 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     ctx.clearRect(0, 0, W, H);
     const rgb = state.mode === "rgb";
     if (!state.transparent) { ctx.fillStyle = rgb ? state.paperRgb : state.paper; ctx.fillRect(0, 0, W, H); }
+    // halftone off: just the picture with its effects
+    if (!state.halftone) { ctx.imageSmoothingQuality = "high"; ctx.drawImage(effectSource(), 0, 0, W, H); }
     const lg = layer.getContext("2d");
     for (const sc of screens) {
       lg.clearRect(0, 0, W, H);
@@ -769,10 +807,13 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
       ctx.globalCompositeOperation = rgb ? "screen" : (screens.length > 1 ? "multiply" : "source-over");
       ctx.drawImage(layer, 0, 0);
     }
+    // see-through parts of the picture stay empty: cut paper and dots to the picture's own shape
+    if (masking()) { ctx.globalCompositeOperation = "destination-in"; ctx.drawImage(effectSource(), 0, 0, W, H); }
     ctx.globalCompositeOperation = "source-over";
     const dots = screens.reduce((n, s) => n + s.dots.length / 3, 0);
+    if (!state.halftone) { $("stats").textContent = `${W}×${H} px${W !== state.outW ? " (preview)" : ""} · halftone dots off — effects only${masking() ? " · transparency kept" : ""}`; return; }
     const lpi = (state.outW / state.cell) / 12.375;
-    $("stats").textContent = `${W}×${H} px${W !== state.outW ? " (preview)" : ""} · ${screens.length} ${screens.length === 1 ? "ink" : "inks"} · ${Math.round(dots).toLocaleString()} dots · ≈ ${lpi.toFixed(0)} LPI on a 12.375″ LP sleeve`;
+    $("stats").textContent = `${W}×${H} px${W !== state.outW ? " (preview)" : ""} · ${screens.length} ${screens.length === 1 ? "ink" : "inks"} · ${Math.round(dots).toLocaleString()} dots · ≈ ${lpi.toFixed(0)} LPI on a 12.375″ LP sleeve${masking() ? " · transparency kept" : ""}`;
   }
 
   let pending = 0;
@@ -788,7 +829,18 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
     const W = R.W, H = outH, f = (v) => Math.round(v * 100) / 100;
     const rgb = state.mode === "rgb";
     const parts = [`<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n`];
+    if (masking()) {
+      // a white-where-solid picture used as a mask keeps the see-through areas empty
+      const mc = document.createElement("canvas"); mc.width = W; mc.height = H; const mg = mc.getContext("2d");
+      mg.fillStyle = "#fff"; mg.fillRect(0, 0, W, H); mg.globalCompositeOperation = "destination-in"; mg.drawImage(effectSource(), 0, 0, W, H);
+      parts.push(`<defs><mask id="keep" maskUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}"><image width="${W}" height="${H}" href="${mc.toDataURL("image/png")}"/></mask></defs>\n<g mask="url(#keep)">\n`);
+    }
     if (!state.transparent) parts.push(`<rect id="paper" width="${W}" height="${H}" fill="${rgb ? state.paperRgb : state.paper}"/>\n`);
+    if (!state.halftone) {
+      // dots off: the filtered picture itself
+      const c = document.createElement("canvas"); c.width = W; c.height = H; c.getContext("2d").drawImage(effectSource(), 0, 0, W, H);
+      parts.push(`<image id="picture" width="${W}" height="${H}" href="${c.toDataURL("image/png")}"/>\n`);
+    }
     const blend = rgb ? "screen" : "multiply";
     MODES[state.mode].forEach((ink, idx) => {
       const sc = screens[idx]; if (!sc) return;
@@ -816,6 +868,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
       }
       parts.push("</g>\n");
     });
+    if (masking()) parts.push("</g>\n");
     parts.push("</svg>\n");
     return new Blob(parts, { type: "image/svg+xml" });
   }
@@ -889,6 +942,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   $("outW").addEventListener("change", () => { state.outW = parseInt($("outW").value, 10); schedule(); });
   $("invert").addEventListener("change", e => { state.invert = e.target.checked; schedule(); });
   $("transparent").addEventListener("change", e => { state.transparent = e.target.checked; schedule(); });
+  $("keepAlpha").addEventListener("change", e => { state.keepAlpha = e.target.checked; schedule(); });
   $("paperColor").addEventListener("input", e => {
     if (state.mode === "rgb") state.paperRgb = e.target.value; else state.paper = e.target.value;
     schedule();
@@ -1229,7 +1283,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
   pressGroup("modeSeg", "mode", state.mode);
   pressGroup("shapeSeg", "shape", state.shape);
   renderInks();
-  renderFx();
+  renderFx(); syncHalftoneUi();
   setSource(makeSample(), "Sample image");
 })();
 </script>
