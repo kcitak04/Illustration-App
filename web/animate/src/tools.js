@@ -913,69 +913,148 @@ function stamp(color, hardness) {
 }
 // ---- Knife: draw a line across shapes to slice them into separate pieces
 /** Splits a picture object in two along the cut line; null if the line doesn't divide it. */
-function splitImage(o, side) {
+function splitImage(o, side, line, gap) {
   const im = Render.imageCanvas ? Render.imageCanvas(o.src) : null; if (!im) return null;
   const W = im.width || im.naturalWidth, H = im.height || im.naturalHeight; if (!W || !H) return null;
   const inv = M.mul(M.scale(W / o.w, H / o.h), M.inv(o.m));   // document -> picture pixels
-  const path = new Path2D(); side[0][0].forEach(([x, y], i) => { const [u, v] = M.apply(inv, x, y); i ? path.lineTo(u, v) : path.moveTo(u, v); }); path.closePath();
+  const toPath = (pts, close) => { const path = new Path2D(); pts.forEach(([x, y], i) => { const [u, v] = M.apply(inv, x, y); i ? path.lineTo(u, v) : path.moveTo(u, v); }); if (close) path.closePath(); return path; };
+  const path = toPath(side[0][0], true), cutLine = gap > 0 ? toPath(line, false) : null, px = (W / o.w) * M.scaleFactor(M.inv(o.m));
   const make = (keepInside) => {
     const c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d", { willReadFrequently: true });
     g.drawImage(im, 0, 0); g.globalCompositeOperation = keepInside ? "destination-in" : "destination-out"; g.fill(path);
+    if (cutLine) { g.globalCompositeOperation = "destination-out"; g.lineWidth = gap * px; g.lineCap = "round"; g.lineJoin = "round"; g.stroke(cutLine); }
     const k = Math.max(1, Math.floor(Math.max(W, H) / 256)), d = g.getImageData(0, 0, W, H).data;
     for (let i = 3; i < d.length; i += 4 * k) if (d[i] > 8) return c;
     return null;
   };
   const a = make(true), b = make(false);
   if (!a || !b) return null;
-  return [a, b].map((c, i) => { const src = c.toDataURL("image/png"); Render.cacheImage(src, c); return { ...o, id: i === 0 ? o.id : uid(), group: undefined, src }; });
+  return [a, b].map((c, i) => { const src = c.toDataURL("image/png"); Render.cacheImage(src, c); return { ...o, id: i === 0 ? o.id : uid(), group: undefined, src, _side: i === 0 ? 1 : -1 }; });
 }
+/** Points of the knife's shape for the current mode (document coordinates). closed = a cookie-cutter outline. */
+function knifeShape(mode, a, b, snapDeg) {
+  if (mode === "rect" || mode === "ellipse") {
+    const x0 = Math.min(a[0], b[0]), y0 = Math.min(a[1], b[1]), x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]);
+    if (mode === "rect") return { pts: [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]], closed: true };
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, rx = (x1 - x0) / 2, ry = (y1 - y0) / 2, out = [];
+    for (let i = 0; i <= 72; i++) { const t = (i / 72) * Math.PI * 2; out.push([cx + Math.cos(t) * rx, cy + Math.sin(t) * ry]); }
+    return { pts: out, closed: true };
+  }
+  return { pts: [a, snapPoint(a, b, snapDeg)], closed: false };
+}
+/** b moved so the line a→b sits on the nearest multiple of snapDeg (0 = free angle). */
+function snapPoint(a, b, snapDeg) {
+  if (!snapDeg) return b;
+  const st = (snapDeg * Math.PI) / 180, ang = Math.round(Math.atan2(b[1] - a[1], b[0] - a[0]) / st) * st, len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  return [a[0] + Math.cos(ang) * len, a[1] + Math.sin(ang) * len];
+}
+App.knifeModes = [["free", "Freehand"], ["line", "Straight line"], ["poly", "Multi-point line"], ["rect", "Rectangle cutter"], ["ellipse", "Circle / oval cutter"]];
 tool("knife", (() => {
-  let pts = null;
-  return {
-    down(p) { if (!layerEditable()) return; pts = [[p.x, p.y]]; },
-    move(p) { if (!pts) return; const l = pts[pts.length - 1]; if (Math.hypot(p.x - l[0], p.y - l[1]) > docLen(3)) pts.push([p.x, p.y]); },
-    up(p) {
-      if (!pts) return;
-      if (p) pts.push([p.x, p.y]);
-      let line = rdp(pts, docLen(1.5)); pts = null;
-      if (line.length < 2 || Math.hypot(line[line.length - 1][0] - line[0][0], line[line.length - 1][1] - line[0][1]) < docLen(8)) return;
-      if (typeof polygonClipping === "undefined") { toast("The shape library didn't load; check your connection and reload."); return; }
-      const side = Geo.knifeSide(line);
-      // cut the selection if there is one, otherwise everything on this layer (and linked layers)
-      const sel = App.state.selection.length ? new Set(App.state.selection) : null;
-      const plan = [];
-      const collect = (only) => {
+  let pts = null, start = null, cur = null, poly = null;
+  const K = () => App.style.knife;
+  const snapOf = (p) => (p && p.shift ? 45 : +K().snap || 0);
+  /** Slices everything the cut line (or cookie-cutter outline) crosses. */
+  function performCut(line, closed) {
+    if (line.length < 2) return;
+    const span = Math.max(...line.map((q) => Math.hypot(q[0] - line[0][0], q[1] - line[0][1])));
+    if (span < docLen(8)) return;
+    if (typeof polygonClipping === "undefined") { toast("The shape library didn't load; check your connection and reload."); return; }
+    const k = K(), gap = Math.max(0, +k.gap || 0);
+    const side = closed ? [[line.concat([line[0]]).map(([x, y]) => [x, y])]] : Geo.knifeSide(line);
+    const outline = closed ? line.concat([line[0]]) : line;
+    const opts = {
+      thinBand: Geo.eraserRegion([outline.map(([x, y]) => [x, y, 1.6])]),
+      gapBand: gap > 0 ? Geo.eraserRegion([outline.map(([x, y]) => [x, y, gap / 2])]) : null
+    };
+    const sel = App.state.selection.length ? new Set(App.state.selection) : null;
+    const plan = [];
+    const collect = (only) => {
       for (const i of linkedLayers()) {
         const objs = objectsOf(i).filter((o) => !only || only.has(o.id));
         const cutMap = new Map();
         for (const o of objs) {
           let r = null;
-          try { r = o.type === "image" ? (Render.docBounds(o) && splitImage(o, side)) : Geo.knife(o, line, side); } catch (e) { r = null; }
+          try { r = o.type === "image" ? splitImage(o, side, outline, gap) : Geo.knife(o, outline, side, opts); } catch (e) { r = null; }
           if (r) cutMap.set(o.id, r);
         }
         if (cutMap.size) plan.push([i, cutMap]);
       }
-      };
-      // the selected shapes if the line crosses one of them, otherwise everything under the line
-      if (sel) collect(sel);
-      if (!plan.length) collect(null);
-      if (!plan.length) { toast("The cut line didn't go all the way across anything. Draw it right through a shape."); return; }
-      History.push();
-      const made = [];
-      for (const [i, cutMap] of plan) {
-        const cell = withLayer(i, () => editableCell());
-        cell.objects = cell.objects.flatMap((o) => (cutMap.has(o.id) ? cutMap.get(o.id) : [o]));
-        for (const r of cutMap.values()) made.push(...r.map((x) => x.id));
+    };
+    if (k.target === "selection") { if (!sel) { toast("Select what to cut first (or set “Cut” to everything under the line)."); return; } collect(sel); }
+    else if (k.target === "all") collect(null);
+    else { if (sel) collect(sel); if (!plan.length) collect(null); }   // the selection if the line crosses it, otherwise everything
+    if (!plan.length) { toast(closed ? "The cutter didn't overlap anything — draw it across the edge of a shape." : "The cut line didn't go all the way across anything. Draw it right through a shape."); return; }
+    // pull the pieces apart along the cut (a cookie cutter lifts its inside pieces up and to the right)
+    const spread = Math.max(0, +k.spread || 0);
+    let nx = 0, ny = 0;
+    if (closed) { nx = Math.SQRT1_2; ny = -Math.SQRT1_2; }
+    else { const a = line[0], b = line[line.length - 1], l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1; nx = -(b[1] - a[1]) / l; ny = (b[0] - a[0]) / l; }
+    History.push();
+    const made = [];
+    for (const [i, cutMap] of plan) {
+      const cell = withLayer(i, () => editableCell());
+      for (const r of cutMap.values()) for (const piece of r) {
+        if (spread) { const d = closed ? (piece._side > 0 ? spread : 0) : (piece._side * spread) / 2; piece.m = M.mul(M.translate(nx * d, ny * d), piece.m); }
+        delete piece._side;
       }
-      App.state.selection = made;
-      changed("knife"); App.emit("selection");
-      toast(`Cut into ${made.length} pieces — they're selected; drag them apart with the Select tool (V).`);
+      cell.objects = cell.objects.flatMap((o) => (cutMap.has(o.id) ? cutMap.get(o.id) : [o]));
+      for (const r of cutMap.values()) made.push(...r.map((x) => x.id));
+    }
+    App.state.selection = made;
+    changed("knife"); App.emit("selection");
+    toast(`Cut into ${made.length} pieces — they're selected; drag them with the Select tool (V).`);
+  }
+  return {
+    down(p) {
+      if (!layerEditable()) return;
+      const m = K().mode;
+      if (m === "poly") {
+        if (!poly) poly = [[p.x, p.y]];
+        else {
+          const last = poly[poly.length - 1], q = snapPoint(last, [p.x, p.y], snapOf(p));
+          // tapping the first point again closes the shape into a cookie cutter
+          if (poly.length > 2 && Math.hypot(q[0] - poly[0][0], q[1] - poly[0][1]) < docLen(12)) { const pl = poly; poly = null; cur = null; performCut(pl, true); return; }
+          poly.push(q);
+        }
+        cur = [p.x, p.y]; return;
+      }
+      start = [p.x, p.y]; cur = start; pts = m === "free" ? [[p.x, p.y]] : null;
     },
-    cancel() { pts = null; },
+    move(p) {
+      if (K().mode === "poly") { if (poly) cur = [p.x, p.y]; return; }
+      if (!start) return;
+      cur = [p.x, p.y];
+      if (pts) { const l = pts[pts.length - 1]; if (Math.hypot(p.x - l[0], p.y - l[1]) > docLen(3)) pts.push([p.x, p.y]); }
+    },
+    hover(p) { if (K().mode === "poly" && poly) { cur = [p.x, p.y]; this._shift = p.shift; } },
+    up(p) {
+      const m = K().mode;
+      if (m === "poly") return;
+      if (!start) return;
+      const a = start, b = p ? [p.x, p.y] : cur; start = null; cur = null;
+      if (m === "free") { const line = rdp(pts.concat([b]), docLen(1.5)); pts = null; performCut(line, false); return; }
+      if (m === "rect" || m === "ellipse") { let bb = b; if (p && (p.shift || K().snap)) { const s = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])); bb = [a[0] + Math.sign(b[0] - a[0] || 1) * s, a[1] + Math.sign(b[1] - a[1] || 1) * s]; } const sh = knifeShape(m, a, bb); performCut(sh.pts.slice(0, -1), true); return; }
+      const sh = knifeShape(m, a, b, snapOf(p)); performCut(sh.pts, false);
+    },
+    dbl() { this.finish(); },
+    /** Multi-point line: cut along the points placed so far. */
+    finish() { if (poly && poly.length > 1) { const pl = poly; poly = null; cur = null; performCut(pl, false); } else { poly = null; cur = null; } View.redraw(); },
+    cancel() { pts = null; start = null; cur = null; poly = null; },
     overlay(g) {
-      if (!pts || pts.length < 2) return;
+      const m = K().mode, line = [];
+      if (m === "poly" && poly) { line.push(...poly); if (cur) line.push(snapPoint(poly[poly.length - 1], cur, this._shift ? 45 : +K().snap || 0)); }
+      else if (start && cur) {
+        if (m === "free" && pts) line.push(...pts);
+        else if (m === "rect" || m === "ellipse") line.push(...knifeShape(m, start, cur).pts);
+        else line.push(...knifeShape(m, start, cur, +K().snap || 0).pts);
+      }
+      if (line.length < 2) return;
       g.save(); g.lineWidth = 2; g.strokeStyle = "#e11d48"; g.setLineDash([7, 5]); g.beginPath();
-      pts.forEach(([x, y], i) => { const [a, b] = toScreen(x, y); i ? g.lineTo(a, b) : g.moveTo(a, b); }); g.stroke(); g.restore();
+      line.forEach(([x, y], i) => { const [a, b] = toScreen(x, y); i ? g.lineTo(a, b) : g.moveTo(a, b); }); g.stroke();
+      // gap preview
+      if (+K().gap > 0) { g.globalAlpha = 0.18; g.setLineDash([]); g.lineWidth = +K().gap * App.state.zoom; g.lineCap = "round"; g.lineJoin = "round"; g.stroke(); }
+      g.restore();
+      if (m === "poly" && poly) for (const [x, y] of poly) { const [a, b] = toScreen(x, y); g.fillStyle = "#fff"; g.strokeStyle = "#e11d48"; g.lineWidth = 1.5; g.fillRect(a - 4, b - 4, 8, 8); g.strokeRect(a - 4, b - 4, 8, 8); }
     }
   };
 })());

@@ -103,6 +103,7 @@ App.style = {
   paint: { brush: "round", size: 24, hardness: 0.7, opacity: 1, flow: 1, mix: 0.35, pressureSize: true, pressureOpacity: false, color: "#111827" },
   eraser: { size: 40, mode: "all" },   // all | pixels | cut (parts of vectors) | objects (whole vectors)
   sym: { mode: "off", n: 6, cx: null, cy: null },   // off | x | y | xy | radial | kaleido; centre null = canvas centre
+  knife: { mode: "free", snap: 0, gap: 0, spread: 0, target: "auto" },
   repeat: { count: 3, dx: 40, dy: 0, rotate: 0, scale: 100, fade: 100, pivot: "selection" },
   shape: { radius: 0, points: 5, star: true, inner: 0.45, constrain: false },
   text: { font: "Anton", size: 120, weight: 700, italic: false, align: "left" },

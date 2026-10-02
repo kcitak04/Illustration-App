@@ -202,6 +202,24 @@ UI.buildProps = function () {
     } else opts.push(slider("Size", 2, 400, 1, () => s.eraser.size, (v) => (s.eraser.size = v), { record: false }));
     opts.push(h("p", { class: "hint" }, "Tip: flip your stylus to use its eraser end with any tool."));
   }
+  if (t === "knife") {
+    const kn = s.knife, hints = {
+      free: "Draw any line through shapes to cut them apart.",
+      line: "Drag a straight cut. Hold Shift (or use Angle snap) for neat angles.",
+      poly: "Tap to place points; double-tap, press Enter or “Cut now” to cut along them. Tap the first point to close it into a cutter.",
+      rect: "Drag a rectangle: shapes are cut along its edges into inside and outside pieces.",
+      ellipse: "Drag an oval (Shift or Angle snap for a circle): shapes are cut into inside and outside pieces."
+    };
+    opts.push(select("Cut shape", App.knifeModes, () => kn.mode, (v) => { kn.mode = v; Tools.get("knife").cancel(); UI.buildProps(); View.redraw(); }, { record: false }),
+      h("p", { class: "hint" }, hints[kn.mode]));
+    if (kn.mode === "line" || kn.mode === "poly") opts.push(select("Angle snap", [[0, "Off"], [15, "Every 15°"], [45, "Every 45°"], [90, "Horizontal / vertical"]], () => kn.snap, (v) => (kn.snap = +v), { record: false }));
+    if (kn.mode === "rect" || kn.mode === "ellipse") opts.push(check(kn.mode === "rect" ? "Perfect square" : "Perfect circle", () => !!kn.snap, (v) => (kn.snap = v ? 90 : 0), { record: false }));
+    if (kn.mode === "poly") opts.push(h("div", { class: "btnrow" }, btn("Cut now", () => Tools.get("knife").finish()), btn("Cancel points", () => { Tools.get("knife").cancel(); View.redraw(); })));
+    opts.push(slider("Gap", 0, 60, 1, () => kn.gap, (v) => { kn.gap = v; View.redraw(); }, { record: false, fmt: (v) => v + " px" }),
+      slider("Pull pieces apart", 0, 200, 1, () => kn.spread, (v) => (kn.spread = v), { record: false, fmt: (v) => v + " px" }),
+      select("Cut", [["auto", "Selection if crossed, else everything"], ["selection", "Only the selection"], ["all", "Everything under the line"]], () => kn.target, (v) => (kn.target = v), { record: false }),
+      h("p", { class: "hint" }, "Gap leaves a space along the cut; Pull pieces apart moves them away from each other after cutting. Text isn't cut."));
+  }
   if (t === "bucket") opts.push(slider("Tolerance", 0, 128, 1, () => s.bucket.tolerance, (v) => (s.bucket.tolerance = v), { record: false }), h("p", { class: "hint" }, "Click inside a vector shape to recolour it, or anywhere else to flood-fill pixels. Lines drawn with any tool act as borders."));
   if (t === "rect") opts.push(slider("Corner radius", 0, 400, 1, () => s.shape.radius, (v) => { s.shape.radius = v; if (editSel) Cmd.editSelected((o) => { if (o.type === "rect") o.r = v; }); }, { record: false }));
   if (t === "poly") opts.push(slider("Points", 3, 24, 1, () => s.shape.points, (v) => (s.shape.points = v), { record: false }), check("Star", () => s.shape.star, (v) => (s.shape.star = v), { record: false }), slider("Inner radius", 0.1, 0.95, 0.01, () => s.shape.inner, (v) => (s.shape.inner = v), { record: false, fmt: (v) => Math.round(v * 100) + "%" }));
@@ -856,6 +874,7 @@ UI.bindKeys = function () {
     if (mod && k.toLowerCase() === "a") { e.preventDefault(); Cmd.selectAll(); return; }
     if (mod && k.toLowerCase() === "s") { e.preventDefault(); App.Exporter.saveProject(); return; }
     if (mod && k.toLowerCase() === "e") { e.preventDefault(); App.Exporter.open(); return; }
+    if (App.state.tool === "knife" && (k === "Enter" || k === "Escape")) { e.preventDefault(); k === "Enter" ? Tools.get("knife").finish() : (Tools.get("knife").cancel(), View.redraw()); return; }
     if (k === "Enter") { e.preventDefault(); if (App.state.tool === "pen") Tools.get("pen").finish(); else Player.toggle(); return; }
     if (!mod && k.toLowerCase() === "q") { e.preventDefault(); App.Mask.current ? App.Mask.clear() : App.Mask.fromSelection(true); return; }
     if (k === "Escape") { Tools.get("pen").finish(); App.state.selection = []; App.emit("selection"); View.redraw(); return; }

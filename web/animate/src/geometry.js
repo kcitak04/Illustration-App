@@ -407,7 +407,7 @@ Geo.knifeSide = knifeSide;
  * otherwise the pieces: filled shapes and brush strokes become separate shapes, outlines become
  * separate lines, pictures (paint strokes) are split into two pictures.
  */
-Geo.knife = function (o, pts, sideGeom) {
+Geo.knife = function (o, pts, sideGeom, opts = {}) {
   if (o.type === "text" || pts.length < 2) return null;
   const b = Render.docBounds(o);
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -417,15 +417,18 @@ Geo.knife = function (o, pts, sideGeom) {
   const hasStroke = !!(o.stroke && o.sw > 0 && o.type !== "brush");
   if (o.fill) {
     const geom = fillGeom(o); if (!geom.length) return null;
-    const A = polygonClipping.intersection(geom, sideGeom), B = polygonClipping.difference(geom, sideGeom);
+    let A = polygonClipping.intersection(geom, sideGeom), B = polygonClipping.difference(geom, sideGeom);
     if (!A.length || !B.length) return null;
+    if (opts.gapBand) { A = polygonClipping.difference(A, opts.gapBand); B = polygonClipping.difference(B, opts.gapBand); }
     const k = M.scaleFactor(o.m);
-    return [...A, ...B].map((P, i) => ({ ...baseProps(o, i === 0 ? o.id : uid()), group: undefined, type: "rings", polys: [P.map((r) => r.flat())], stroke: hasStroke ? o.stroke : null, sw: hasStroke ? o.sw * k : 0 }));
+    // _side: +1 = the piece on the cut's "inside" side, -1 = the other side (used to pull pieces apart)
+    return [...A.map((P) => [P, 1]), ...B.map((P) => [P, -1])].map(([P, side], i) => ({ ...baseProps(o, i === 0 ? o.id : uid()), group: undefined, type: "rings", polys: [P.map((r) => r.flat())], stroke: hasStroke ? o.stroke : null, sw: hasStroke ? o.sw * k : 0, _side: side }));
   }
   if (hasStroke) {
-    const band = Geo.eraserRegion([pts.map(([x, y]) => [x, y, 1.6])]);
+    const band = opts.gapBand || opts.thinBand || Geo.eraserRegion([pts.map(([x, y]) => [x, y, 1.6])]);
     const r = cutStroke(o, band);
-    return r && r.length > 1 ? r.map((p) => ({ ...p, group: undefined })) : null;
+    if (!r || r.length < 2) return null;
+    return r.map((p) => { const n = p.nodes[Math.floor(p.nodes.length / 2)]; return { ...p, group: undefined, _side: insideRegion(sideGeom, n.x, n.y) ? 1 : -1 }; });
   }
   return null;
 };
