@@ -75,6 +75,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 #stage { display: block; width: 100%; height: 100%; touch-action: none; }
 .dropHint { display: none; position: absolute; inset: 8px; border: 2px dashed var(--accent); border-radius: var(--r); place-items: center; font-weight: 700; background: var(--accent-soft); pointer-events: none; }
 body.dropping .dropHint { display: grid; }
+.editbar { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 4; display: flex; align-items: center; gap: 4px; padding: 4px; background: var(--panel); border: 1px solid var(--rule); border-radius: 999px; box-shadow: 0 6px 20px rgba(0,0,0,.3); max-width: calc(100% - 16px); overflow-x: auto; }
+.editbar[hidden] { display: none; }
+.editbar .btn { border-radius: 999px; white-space: nowrap; }
+.editbar .btn:disabled { opacity: .4; }
+.editbar .count { font-size: 11px; color: var(--muted); padding: 0 8px; white-space: nowrap; }
 .textEditor { position: absolute; z-index: 5; background: var(--panel); border: 1px solid var(--accent); border-radius: var(--r); padding: 6px; display: flex; flex-direction: column; gap: 6px; width: 250px; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
 .textEditor textarea { width: 100%; background: var(--panel-2); border: 1px solid var(--rule); border-radius: 6px; padding: 6px; resize: vertical; }
 .textEditor div { display: flex; gap: 6px; justify-content: flex-end; }
@@ -537,6 +542,8 @@ const Render = (App.Render = {});
 const imgCache = new Map();
 /** Lets a freshly made image object draw immediately (before its data URL has loaded). */
 Render.cacheImage = (src, canvas) => imgCache.set(src, canvas);
+/** The decoded picture for a src (canvas or loaded image), or null if it isn't ready yet. */
+Render.imageCanvas = (src) => { const im = imageFor(src); return im instanceof HTMLCanvasElement || (im.complete && im.naturalWidth) ? im : null; };
 function imageFor(src) {
   let im = imgCache.get(src);
   if (!im) { im = new Image(); im.onload = () => changed("image"); im.src = src; imgCache.set(src, im); }
@@ -1317,6 +1324,46 @@ Geo.combine = function (objs, op) {
   const src = op === "subtract" ? objs[0] : objs[objs.length - 1];
   const fill = src.fill ? cloneObj(src.fill) : src.stroke || "#111";
   return { ...baseProps(src, uid()), group: undefined, type: "rings", fill, stroke: null, sw: 0, polys: res.map((P) => P.map((r) => r.flat())) };
+};
+
+// ---------------------------------------------------------------- knife
+/** One side of a freehand cut line, as a big polygon (the line is extended far past both ends). */
+function knifeSide(pts) {
+  const n = pts.length, a = pts[0], b = pts[n - 1], BIG = 2e4;
+  const nrm = (v) => { const l = Math.hypot(v[0], v[1]) || 1; return [v[0] / l, v[1] / l]; };
+  const d0 = nrm([pts[1][0] - a[0], pts[1][1] - a[1]]), d1 = nrm([b[0] - pts[n - 2][0], b[1] - pts[n - 2][1]]);
+  const E0 = [a[0] - d0[0] * BIG, a[1] - d0[1] * BIG], E1 = [b[0] + d1[0] * BIG, b[1] + d1[1] * BIG];
+  const g = nrm([E1[0] - E0[0], E1[1] - E0[1]]), side = [-g[1], g[0]];
+  const ring = [E0, ...pts, E1, [E1[0] + side[0] * BIG, E1[1] + side[1] * BIG], [E0[0] + side[0] * BIG, E0[1] + side[1] * BIG], E0];
+  return [[ring.map(([x, y]) => [x, y])]];
+}
+Geo.knifeSide = knifeSide;
+/**
+ * Slices one object along a cut line (document coordinates). Returns null when the line misses it,
+ * otherwise the pieces: filled shapes and brush strokes become separate shapes, outlines become
+ * separate lines, pictures (paint strokes) are split into two pictures.
+ */
+Geo.knife = function (o, pts, sideGeom) {
+  if (o.type === "text" || pts.length < 2) return null;
+  const b = Render.docBounds(o);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of pts) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  if (b.x > x1 || b.y > y1 || b.x + b.w < x0 || b.y + b.h < y0) return null;
+  if (o.type === "image") return null;   // pictures are split by the tool (needs pixels)
+  const hasStroke = !!(o.stroke && o.sw > 0 && o.type !== "brush");
+  if (o.fill) {
+    const geom = fillGeom(o); if (!geom.length) return null;
+    const A = polygonClipping.intersection(geom, sideGeom), B = polygonClipping.difference(geom, sideGeom);
+    if (!A.length || !B.length) return null;
+    const k = M.scaleFactor(o.m);
+    return [...A, ...B].map((P, i) => ({ ...baseProps(o, i === 0 ? o.id : uid()), group: undefined, type: "rings", polys: [P.map((r) => r.flat())], stroke: hasStroke ? o.stroke : null, sw: hasStroke ? o.sw * k : 0 }));
+  }
+  if (hasStroke) {
+    const band = Geo.eraserRegion([pts.map(([x, y]) => [x, y, 1.6])]);
+    const r = cutStroke(o, band);
+    return r && r.length > 1 ? r.map((p) => ({ ...p, group: undefined })) : null;
+  }
+  return null;
 };
 
 /** Erases the region from every vector object of a cell. Returns the ids that are gone or changed. */
@@ -2678,6 +2725,75 @@ function stamp(color, hardness) {
   if (stampCache.size > 40) stampCache.clear();
   stampCache.set(key, c); return c;
 }
+// ---- Knife: draw a line across shapes to slice them into separate pieces
+/** Splits a picture object in two along the cut line; null if the line doesn't divide it. */
+function splitImage(o, side) {
+  const im = Render.imageCanvas ? Render.imageCanvas(o.src) : null; if (!im) return null;
+  const W = im.width || im.naturalWidth, H = im.height || im.naturalHeight; if (!W || !H) return null;
+  const inv = M.mul(M.scale(W / o.w, H / o.h), M.inv(o.m));   // document -> picture pixels
+  const path = new Path2D(); side[0][0].forEach(([x, y], i) => { const [u, v] = M.apply(inv, x, y); i ? path.lineTo(u, v) : path.moveTo(u, v); }); path.closePath();
+  const make = (keepInside) => {
+    const c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d", { willReadFrequently: true });
+    g.drawImage(im, 0, 0); g.globalCompositeOperation = keepInside ? "destination-in" : "destination-out"; g.fill(path);
+    const k = Math.max(1, Math.floor(Math.max(W, H) / 256)), d = g.getImageData(0, 0, W, H).data;
+    for (let i = 3; i < d.length; i += 4 * k) if (d[i] > 8) return c;
+    return null;
+  };
+  const a = make(true), b = make(false);
+  if (!a || !b) return null;
+  return [a, b].map((c, i) => { const src = c.toDataURL("image/png"); Render.cacheImage(src, c); return { ...o, id: i === 0 ? o.id : uid(), group: undefined, src }; });
+}
+tool("knife", (() => {
+  let pts = null;
+  return {
+    down(p) { if (!layerEditable()) return; pts = [[p.x, p.y]]; },
+    move(p) { if (!pts) return; const l = pts[pts.length - 1]; if (Math.hypot(p.x - l[0], p.y - l[1]) > docLen(3)) pts.push([p.x, p.y]); },
+    up(p) {
+      if (!pts) return;
+      if (p) pts.push([p.x, p.y]);
+      let line = rdp(pts, docLen(1.5)); pts = null;
+      if (line.length < 2 || Math.hypot(line[line.length - 1][0] - line[0][0], line[line.length - 1][1] - line[0][1]) < docLen(8)) return;
+      if (typeof polygonClipping === "undefined") { toast("The shape library didn't load; check your connection and reload."); return; }
+      const side = Geo.knifeSide(line);
+      // cut the selection if there is one, otherwise everything on this layer (and linked layers)
+      const sel = App.state.selection.length ? new Set(App.state.selection) : null;
+      const plan = [];
+      const collect = (only) => {
+      for (const i of linkedLayers()) {
+        const objs = objectsOf(i).filter((o) => !only || only.has(o.id));
+        const cutMap = new Map();
+        for (const o of objs) {
+          let r = null;
+          try { r = o.type === "image" ? (Render.docBounds(o) && splitImage(o, side)) : Geo.knife(o, line, side); } catch (e) { r = null; }
+          if (r) cutMap.set(o.id, r);
+        }
+        if (cutMap.size) plan.push([i, cutMap]);
+      }
+      };
+      // the selected shapes if the line crosses one of them, otherwise everything under the line
+      if (sel) collect(sel);
+      if (!plan.length) collect(null);
+      if (!plan.length) { toast("The cut line didn't go all the way across anything. Draw it right through a shape."); return; }
+      History.push();
+      const made = [];
+      for (const [i, cutMap] of plan) {
+        const cell = withLayer(i, () => editableCell());
+        cell.objects = cell.objects.flatMap((o) => (cutMap.has(o.id) ? cutMap.get(o.id) : [o]));
+        for (const r of cutMap.values()) made.push(...r.map((x) => x.id));
+      }
+      App.state.selection = made;
+      changed("knife"); App.emit("selection");
+      toast(`Cut into ${made.length} pieces — they're selected; drag them apart with the Select tool (V).`);
+    },
+    cancel() { pts = null; },
+    overlay(g) {
+      if (!pts || pts.length < 2) return;
+      g.save(); g.lineWidth = 2; g.strokeStyle = "#e11d48"; g.setLineDash([7, 5]); g.beginPath();
+      pts.forEach(([x, y], i) => { const [a, b] = toScreen(x, y); i ? g.lineTo(a, b) : g.moveTo(a, b); }); g.stroke(); g.restore();
+    }
+  };
+})());
+
 // ---- Paint brush presets & engine
 /**
  * Each brush's starting settings. Every brush understands the common settings (size, opacity, flow,
@@ -3195,6 +3311,11 @@ const Cmd = (App.Cmd = {
     History.push(); const cell = editableCell();
     const copies = regroup(Cmd.clipboard.map((o) => ({ ...cloneObj(o), id: uid(), m: inPlace ? o.m.slice() : M.mul(M.translate(20, 20), o.m) })));
     cell.objects.push(...copies); App.state.selection = copies.map((o) => o.id); changed("paste"); App.emit("selection");
+  },
+  cut() {
+    if (!App.state.selection.length) { toast("Select something to cut first."); return; }
+    Cmd.copy(); Cmd.delete();
+    if (Cmd.clipboard.length) toast(`Cut ${Cmd.clipboard.length} ${Cmd.clipboard.length === 1 ? "object" : "objects"} — paste with Ctrl+V or the Paste button.`);
   },
   duplicate() {
     if (!App.state.selection.length || !layerEditable()) return;
@@ -3768,6 +3889,7 @@ const ICON = {
   text: '<path d="M5 5h14M12 5v15M9 20h6"/>',
   eyedropper: '<path d="M4 20l9-9"/><path d="M11 9l4 4"/><circle cx="17.5" cy="6.5" r="3.5" fill="currentColor"/>',
   hand: '<path d="M8 13V6M11 11V4.5M14 11V5M17 12V7"/><path d="M17 12v3c0 4-3 6-6 6s-5-3-6.5-7l3.5-1"/>',
+  knife: '<path d="M4 20L15 9l3 3L9 20z" fill="currentColor" opacity=".3"/><path d="M4 20L15 9l3 3L9 20z"/><path d="M15 9l3-5 2 2-2 6"/>',
   eye: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><circle cx="12" cy="12" r="2.8" fill="currentColor"/>',
   eyeOff: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><path d="M4 4l16 16"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
@@ -3783,6 +3905,7 @@ const TOOLS = [
   ["vbrush", "Vector brush with pressure (B)", "b"], ["paint", "Paint brush: pixels (K)", "k"],
   ["eraser", "Eraser (E)", "e"], ["bucket", "Fill bucket (G)", "g"],
   ["rect", "Rectangle (M)", "m"], ["ellipse", "Ellipse (L)", "l"], ["poly", "Polygon / star (O)", "o"], ["line", "Line (\\)", "\\"],
+  ["knife", "Knife: draw a line through shapes to cut them apart (X)", "x"],
   ["text", "Type (T)", "t"], ["eyedropper", "Eyedropper (I)", "i"], ["hand", "Hand: pan the canvas (H)", "h"]
 ];
 const BLENDS = [["source-over", "Normal"], ["multiply", "Multiply"], ["screen", "Screen"], ["overlay", "Overlay"], ["darken", "Darken"], ["lighten", "Lighten"], ["color-dodge", "Color dodge"], ["color-burn", "Color burn"], ["hard-light", "Hard light"], ["soft-light", "Soft light"], ["difference", "Difference"], ["exclusion", "Exclusion"], ["hue", "Hue"], ["saturation", "Saturation"], ["color", "Color"], ["luminosity", "Luminosity"]];
@@ -3872,6 +3995,7 @@ App.setTool = function (name) {
   if (App.state.tool === "pen" && name !== "pen") Tools.get("pen").finish();
   TextTool.commit();
   App.state.tool = name;
+  setTimeout(UI.syncEditBar, 0);
   document.querySelectorAll(".tool").forEach((b) => b.classList.toggle("on", b.dataset.tool === name));
   $("stage").style.cursor = name === "hand" ? "grab" : ["select", "direct"].includes(name) ? "default" : "crosshair";
   UI.buildProps(); View.redraw();
@@ -3971,6 +4095,7 @@ UI.buildProps = function () {
     const kids = [
       slider("Opacity", 0, 1, 0.01, () => o.opacity ?? 1, (v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.opacity = v; }); changed("op"); }, { fmt: (v) => Math.round(v * 100) + "%" }),
       select("Blend", BLENDS, () => o.blend || "source-over", (v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.blend = v; }); changed("blend"); }),
+      h("div", { class: "btnrow" }, btn("Copy", () => Cmd.copy()), btn("Cut", () => Cmd.cut()), btn("Paste", () => Cmd.paste(false))),
       h("div", { class: "btnrow" }, btn("Duplicate", () => Cmd.duplicate()), btn("Repeat…", () => UI.repeatDialog()), btn("Delete", () => Cmd.delete())),
       h("div", { class: "btnrow" }, btn("Mirror copy ↔", () => Cmd.mirrorCopy(true)), btn("Mirror copy ↕", () => Cmd.mirrorCopy(false)), btn("To path", () => Cmd.toPath())),
       h("div", { class: "btnrow" }, btn("Group", () => Cmd.group()), btn("Ungroup", () => Cmd.ungroup())),
@@ -4188,6 +4313,27 @@ UI.vbrushPreview = function (cv, style, params) {
   const fill = App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke || "#111");
   const q = params || {};
   Render.drawObj(g, { type: "brush", pts, size: 8, pressure: 0.8, taper: true, style, seed: 7, sp: q.sp ?? 1, amt: q.amt ?? 0.5, ang: q.ang ?? 45, freq: q.freq ?? 1, dot: q.dot ?? 1, m: M.id(), fill, opacity: 1 });
+};
+
+// ---------------------------------------------------------------- edit bar (copy / cut / paste) over the canvas
+UI.syncEditBar = function () {
+  const bar = document.getElementById("editBar"); if (!bar) return;
+  const t = App.state.tool, n = App.state.selection.length, clip = Cmd.clipboard.length;
+  const show = !App.state.playing && ["select", "direct", "knife"].includes(t) && (n || clip);
+  bar.hidden = !show; if (!show) return;
+  bar.querySelector("[data-a=copy]").disabled = !n; bar.querySelector("[data-a=cut]").disabled = !n;
+  bar.querySelector("[data-a=dup]").disabled = !n; bar.querySelector("[data-a=del]").disabled = !n;
+  bar.querySelector("[data-a=paste]").disabled = !clip;
+  bar.querySelector("[data-a=count]").textContent = n ? `${n} selected` : `${clip} on clipboard`;
+};
+UI.buildEditBar = function () {
+  const wrap = document.getElementById("canvasWrap"); if (!wrap || document.getElementById("editBar")) return;
+  const b = (a, label, fn) => h("button", { type: "button", class: "btn tiny", "data-a": a, onclick: () => { fn(); UI.syncEditBar(); } }, label);
+  const bar = h("div", { class: "editbar", id: "editBar", role: "toolbar", "aria-label": "Edit selection", hidden: true },
+    h("span", { class: "count", "data-a": "count" }),
+    b("copy", "Copy", () => Cmd.copy()), b("cut", "Cut", () => Cmd.cut()), b("paste", "Paste", () => Cmd.paste(false)),
+    b("dup", "Duplicate", () => Cmd.duplicate()), b("del", "Delete", () => Cmd.delete()));
+  wrap.append(bar);
 };
 
 UI.syncSwatch = function () {
@@ -4459,7 +4605,7 @@ UI.docSettings = function () {
 UI.help = function () {
   const rows = [["Space + drag / two fingers", "Pan"], ["Ctrl + wheel / pinch", "Zoom"], ["Enter", "Play / stop"], [", and .", "Previous / next frame"], ["Shift + , and .", "Previous / next key"],
     ["F6", "New blank key"], ["F7", "Duplicate key"], ["F5", "Hold one more frame"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Two-finger tap", "Undo"],
-    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Ctrl+Shift+D", "Repeat copies…"], ["Ctrl+G / Ctrl+Shift+G", "Group / ungroup"], ["Ctrl+M", "Merge (unite) shapes"], ["Q", "Mask on (paint outside selection) / off"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
+    ["Ctrl+C / X / V / D", "Copy / cut / paste / duplicate objects"], ["X", "Knife: cut shapes apart"], ["Ctrl+Shift+D", "Repeat copies…"], ["Ctrl+G / Ctrl+Shift+G", "Group / ungroup"], ["Ctrl+M", "Merge (unite) shapes"], ["Q", "Mask on (paint outside selection) / off"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
   const tbl = h("table", { class: "keys" }, rows.map(([k, v]) => h("tr", {}, h("td", {}, h("kbd", {}, k)), h("td", {}, v))));
   const tools = h("table", { class: "keys" }, TOOLS.map(([, t]) => h("tr", {}, h("td", {}, t))));
   UI.dialog("Shortcuts", h("div", { class: "cols" }, tbl, tools), []);
@@ -4564,6 +4710,7 @@ UI.bindKeys = function () {
     if (mod && k.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? History.doRedo() : History.doUndo(); return; }
     if (mod && k.toLowerCase() === "y") { e.preventDefault(); History.doRedo(); return; }
     if (mod && k.toLowerCase() === "c") { Cmd.copy(); return; }
+    if (mod && k.toLowerCase() === "x") { e.preventDefault(); Cmd.cut(); return; }
     if (mod && k.toLowerCase() === "v") { e.preventDefault(); Cmd.paste(true); return; }
     if (mod && k.toLowerCase() === "g") { e.preventDefault(); e.shiftKey ? Cmd.ungroup() : Cmd.group(); return; }
     if (mod && k.toLowerCase() === "m") { e.preventDefault(); Cmd.merge("unite"); return; }
@@ -5210,8 +5357,10 @@ window.__androidPause = function () { if (App.state.playing) Player.stop(); Auto
 async function start() {
   App.doc = demoDoc();
   App.state.layer = 1; App.state.tool = "select";
-  View.init(); UI.buildToolbar(); UI.bindTimelineControls(); UI.bindKeys(); TL.init();
-  App.on("selection", () => { UI.buildProps(); View.redraw(); });
+  View.init(); UI.buildToolbar(); UI.buildEditBar(); UI.bindTimelineControls(); UI.bindKeys(); TL.init();
+  App.on("selection", () => { UI.buildProps(); View.redraw(); UI.syncEditBar(); });
+  App.on("changed", () => UI.syncEditBar());
+  App.on("playing", () => UI.syncEditBar());
   App.on("layers", () => { UI.buildProps(); TL.updateReadout(); });
   App.on("style", () => { UI.buildProps(); UI.syncSwatch(); });
   App.on("frame", () => { if (!App.state.playing) UI.buildPropsSoon(); });

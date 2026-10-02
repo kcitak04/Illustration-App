@@ -903,6 +903,75 @@ function stamp(color, hardness) {
   if (stampCache.size > 40) stampCache.clear();
   stampCache.set(key, c); return c;
 }
+// ---- Knife: draw a line across shapes to slice them into separate pieces
+/** Splits a picture object in two along the cut line; null if the line doesn't divide it. */
+function splitImage(o, side) {
+  const im = Render.imageCanvas ? Render.imageCanvas(o.src) : null; if (!im) return null;
+  const W = im.width || im.naturalWidth, H = im.height || im.naturalHeight; if (!W || !H) return null;
+  const inv = M.mul(M.scale(W / o.w, H / o.h), M.inv(o.m));   // document -> picture pixels
+  const path = new Path2D(); side[0][0].forEach(([x, y], i) => { const [u, v] = M.apply(inv, x, y); i ? path.lineTo(u, v) : path.moveTo(u, v); }); path.closePath();
+  const make = (keepInside) => {
+    const c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d", { willReadFrequently: true });
+    g.drawImage(im, 0, 0); g.globalCompositeOperation = keepInside ? "destination-in" : "destination-out"; g.fill(path);
+    const k = Math.max(1, Math.floor(Math.max(W, H) / 256)), d = g.getImageData(0, 0, W, H).data;
+    for (let i = 3; i < d.length; i += 4 * k) if (d[i] > 8) return c;
+    return null;
+  };
+  const a = make(true), b = make(false);
+  if (!a || !b) return null;
+  return [a, b].map((c, i) => { const src = c.toDataURL("image/png"); Render.cacheImage(src, c); return { ...o, id: i === 0 ? o.id : uid(), group: undefined, src }; });
+}
+tool("knife", (() => {
+  let pts = null;
+  return {
+    down(p) { if (!layerEditable()) return; pts = [[p.x, p.y]]; },
+    move(p) { if (!pts) return; const l = pts[pts.length - 1]; if (Math.hypot(p.x - l[0], p.y - l[1]) > docLen(3)) pts.push([p.x, p.y]); },
+    up(p) {
+      if (!pts) return;
+      if (p) pts.push([p.x, p.y]);
+      let line = rdp(pts, docLen(1.5)); pts = null;
+      if (line.length < 2 || Math.hypot(line[line.length - 1][0] - line[0][0], line[line.length - 1][1] - line[0][1]) < docLen(8)) return;
+      if (typeof polygonClipping === "undefined") { toast("The shape library didn't load; check your connection and reload."); return; }
+      const side = Geo.knifeSide(line);
+      // cut the selection if there is one, otherwise everything on this layer (and linked layers)
+      const sel = App.state.selection.length ? new Set(App.state.selection) : null;
+      const plan = [];
+      const collect = (only) => {
+      for (const i of linkedLayers()) {
+        const objs = objectsOf(i).filter((o) => !only || only.has(o.id));
+        const cutMap = new Map();
+        for (const o of objs) {
+          let r = null;
+          try { r = o.type === "image" ? (Render.docBounds(o) && splitImage(o, side)) : Geo.knife(o, line, side); } catch (e) { r = null; }
+          if (r) cutMap.set(o.id, r);
+        }
+        if (cutMap.size) plan.push([i, cutMap]);
+      }
+      };
+      // the selected shapes if the line crosses one of them, otherwise everything under the line
+      if (sel) collect(sel);
+      if (!plan.length) collect(null);
+      if (!plan.length) { toast("The cut line didn't go all the way across anything. Draw it right through a shape."); return; }
+      History.push();
+      const made = [];
+      for (const [i, cutMap] of plan) {
+        const cell = withLayer(i, () => editableCell());
+        cell.objects = cell.objects.flatMap((o) => (cutMap.has(o.id) ? cutMap.get(o.id) : [o]));
+        for (const r of cutMap.values()) made.push(...r.map((x) => x.id));
+      }
+      App.state.selection = made;
+      changed("knife"); App.emit("selection");
+      toast(`Cut into ${made.length} pieces — they're selected; drag them apart with the Select tool (V).`);
+    },
+    cancel() { pts = null; },
+    overlay(g) {
+      if (!pts || pts.length < 2) return;
+      g.save(); g.lineWidth = 2; g.strokeStyle = "#e11d48"; g.setLineDash([7, 5]); g.beginPath();
+      pts.forEach(([x, y], i) => { const [a, b] = toScreen(x, y); i ? g.lineTo(a, b) : g.moveTo(a, b); }); g.stroke(); g.restore();
+    }
+  };
+})());
+
 // ---- Paint brush presets & engine
 /**
  * Each brush's starting settings. Every brush understands the common settings (size, opacity, flow,
@@ -1420,6 +1489,11 @@ const Cmd = (App.Cmd = {
     History.push(); const cell = editableCell();
     const copies = regroup(Cmd.clipboard.map((o) => ({ ...cloneObj(o), id: uid(), m: inPlace ? o.m.slice() : M.mul(M.translate(20, 20), o.m) })));
     cell.objects.push(...copies); App.state.selection = copies.map((o) => o.id); changed("paste"); App.emit("selection");
+  },
+  cut() {
+    if (!App.state.selection.length) { toast("Select something to cut first."); return; }
+    Cmd.copy(); Cmd.delete();
+    if (Cmd.clipboard.length) toast(`Cut ${Cmd.clipboard.length} ${Cmd.clipboard.length === 1 ? "object" : "objects"} — paste with Ctrl+V or the Paste button.`);
   },
   duplicate() {
     if (!App.state.selection.length || !layerEditable()) return;

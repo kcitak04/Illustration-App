@@ -5,6 +5,8 @@ const Render = (App.Render = {});
 const imgCache = new Map();
 /** Lets a freshly made image object draw immediately (before its data URL has loaded). */
 Render.cacheImage = (src, canvas) => imgCache.set(src, canvas);
+/** The decoded picture for a src (canvas or loaded image), or null if it isn't ready yet. */
+Render.imageCanvas = (src) => { const im = imageFor(src); return im instanceof HTMLCanvasElement || (im.complete && im.naturalWidth) ? im : null; };
 function imageFor(src) {
   let im = imgCache.get(src);
   if (!im) { im = new Image(); im.onload = () => changed("image"); im.src = src; imgCache.set(src, im); }

@@ -256,6 +256,46 @@ Geo.combine = function (objs, op) {
   return { ...baseProps(src, uid()), group: undefined, type: "rings", fill, stroke: null, sw: 0, polys: res.map((P) => P.map((r) => r.flat())) };
 };
 
+// ---------------------------------------------------------------- knife
+/** One side of a freehand cut line, as a big polygon (the line is extended far past both ends). */
+function knifeSide(pts) {
+  const n = pts.length, a = pts[0], b = pts[n - 1], BIG = 2e4;
+  const nrm = (v) => { const l = Math.hypot(v[0], v[1]) || 1; return [v[0] / l, v[1] / l]; };
+  const d0 = nrm([pts[1][0] - a[0], pts[1][1] - a[1]]), d1 = nrm([b[0] - pts[n - 2][0], b[1] - pts[n - 2][1]]);
+  const E0 = [a[0] - d0[0] * BIG, a[1] - d0[1] * BIG], E1 = [b[0] + d1[0] * BIG, b[1] + d1[1] * BIG];
+  const g = nrm([E1[0] - E0[0], E1[1] - E0[1]]), side = [-g[1], g[0]];
+  const ring = [E0, ...pts, E1, [E1[0] + side[0] * BIG, E1[1] + side[1] * BIG], [E0[0] + side[0] * BIG, E0[1] + side[1] * BIG], E0];
+  return [[ring.map(([x, y]) => [x, y])]];
+}
+Geo.knifeSide = knifeSide;
+/**
+ * Slices one object along a cut line (document coordinates). Returns null when the line misses it,
+ * otherwise the pieces: filled shapes and brush strokes become separate shapes, outlines become
+ * separate lines, pictures (paint strokes) are split into two pictures.
+ */
+Geo.knife = function (o, pts, sideGeom) {
+  if (o.type === "text" || pts.length < 2) return null;
+  const b = Render.docBounds(o);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of pts) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  if (b.x > x1 || b.y > y1 || b.x + b.w < x0 || b.y + b.h < y0) return null;
+  if (o.type === "image") return null;   // pictures are split by the tool (needs pixels)
+  const hasStroke = !!(o.stroke && o.sw > 0 && o.type !== "brush");
+  if (o.fill) {
+    const geom = fillGeom(o); if (!geom.length) return null;
+    const A = polygonClipping.intersection(geom, sideGeom), B = polygonClipping.difference(geom, sideGeom);
+    if (!A.length || !B.length) return null;
+    const k = M.scaleFactor(o.m);
+    return [...A, ...B].map((P, i) => ({ ...baseProps(o, i === 0 ? o.id : uid()), group: undefined, type: "rings", polys: [P.map((r) => r.flat())], stroke: hasStroke ? o.stroke : null, sw: hasStroke ? o.sw * k : 0 }));
+  }
+  if (hasStroke) {
+    const band = Geo.eraserRegion([pts.map(([x, y]) => [x, y, 1.6])]);
+    const r = cutStroke(o, band);
+    return r && r.length > 1 ? r.map((p) => ({ ...p, group: undefined })) : null;
+  }
+  return null;
+};
+
 /** Erases the region from every vector object of a cell. Returns the ids that are gone or changed. */
 Geo.cutCell = function (cell, region, skip) {
   if (!region.length || typeof polygonClipping === "undefined") return { changed: 0, removed: [] };

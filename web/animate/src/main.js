@@ -67,8 +67,10 @@ window.__androidPause = function () { if (App.state.playing) Player.stop(); Auto
 async function start() {
   App.doc = demoDoc();
   App.state.layer = 1; App.state.tool = "select";
-  View.init(); UI.buildToolbar(); UI.bindTimelineControls(); UI.bindKeys(); TL.init();
-  App.on("selection", () => { UI.buildProps(); View.redraw(); });
+  View.init(); UI.buildToolbar(); UI.buildEditBar(); UI.bindTimelineControls(); UI.bindKeys(); TL.init();
+  App.on("selection", () => { UI.buildProps(); View.redraw(); UI.syncEditBar(); });
+  App.on("changed", () => UI.syncEditBar());
+  App.on("playing", () => UI.syncEditBar());
   App.on("layers", () => { UI.buildProps(); TL.updateReadout(); });
   App.on("style", () => { UI.buildProps(); UI.syncSwatch(); });
   App.on("frame", () => { if (!App.state.playing) UI.buildPropsSoon(); });

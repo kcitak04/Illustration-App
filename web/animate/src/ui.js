@@ -17,6 +17,7 @@ const ICON = {
   text: '<path d="M5 5h14M12 5v15M9 20h6"/>',
   eyedropper: '<path d="M4 20l9-9"/><path d="M11 9l4 4"/><circle cx="17.5" cy="6.5" r="3.5" fill="currentColor"/>',
   hand: '<path d="M8 13V6M11 11V4.5M14 11V5M17 12V7"/><path d="M17 12v3c0 4-3 6-6 6s-5-3-6.5-7l3.5-1"/>',
+  knife: '<path d="M4 20L15 9l3 3L9 20z" fill="currentColor" opacity=".3"/><path d="M4 20L15 9l3 3L9 20z"/><path d="M15 9l3-5 2 2-2 6"/>',
   eye: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><circle cx="12" cy="12" r="2.8" fill="currentColor"/>',
   eyeOff: '<path d="M2 12c4-7 16-7 20 0-4 7-16 7-20 0z"/><path d="M4 4l16 16"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
@@ -32,6 +33,7 @@ const TOOLS = [
   ["vbrush", "Vector brush with pressure (B)", "b"], ["paint", "Paint brush: pixels (K)", "k"],
   ["eraser", "Eraser (E)", "e"], ["bucket", "Fill bucket (G)", "g"],
   ["rect", "Rectangle (M)", "m"], ["ellipse", "Ellipse (L)", "l"], ["poly", "Polygon / star (O)", "o"], ["line", "Line (\\)", "\\"],
+  ["knife", "Knife: draw a line through shapes to cut them apart (X)", "x"],
   ["text", "Type (T)", "t"], ["eyedropper", "Eyedropper (I)", "i"], ["hand", "Hand: pan the canvas (H)", "h"]
 ];
 const BLENDS = [["source-over", "Normal"], ["multiply", "Multiply"], ["screen", "Screen"], ["overlay", "Overlay"], ["darken", "Darken"], ["lighten", "Lighten"], ["color-dodge", "Color dodge"], ["color-burn", "Color burn"], ["hard-light", "Hard light"], ["soft-light", "Soft light"], ["difference", "Difference"], ["exclusion", "Exclusion"], ["hue", "Hue"], ["saturation", "Saturation"], ["color", "Color"], ["luminosity", "Luminosity"]];
@@ -121,6 +123,7 @@ App.setTool = function (name) {
   if (App.state.tool === "pen" && name !== "pen") Tools.get("pen").finish();
   TextTool.commit();
   App.state.tool = name;
+  setTimeout(UI.syncEditBar, 0);
   document.querySelectorAll(".tool").forEach((b) => b.classList.toggle("on", b.dataset.tool === name));
   $("stage").style.cursor = name === "hand" ? "grab" : ["select", "direct"].includes(name) ? "default" : "crosshair";
   UI.buildProps(); View.redraw();
@@ -220,6 +223,7 @@ UI.buildProps = function () {
     const kids = [
       slider("Opacity", 0, 1, 0.01, () => o.opacity ?? 1, (v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.opacity = v; }); changed("op"); }, { fmt: (v) => Math.round(v * 100) + "%" }),
       select("Blend", BLENDS, () => o.blend || "source-over", (v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id)) x.blend = v; }); changed("blend"); }),
+      h("div", { class: "btnrow" }, btn("Copy", () => Cmd.copy()), btn("Cut", () => Cmd.cut()), btn("Paste", () => Cmd.paste(false))),
       h("div", { class: "btnrow" }, btn("Duplicate", () => Cmd.duplicate()), btn("Repeat…", () => UI.repeatDialog()), btn("Delete", () => Cmd.delete())),
       h("div", { class: "btnrow" }, btn("Mirror copy ↔", () => Cmd.mirrorCopy(true)), btn("Mirror copy ↕", () => Cmd.mirrorCopy(false)), btn("To path", () => Cmd.toPath())),
       h("div", { class: "btnrow" }, btn("Group", () => Cmd.group()), btn("Ungroup", () => Cmd.ungroup())),
@@ -437,6 +441,27 @@ UI.vbrushPreview = function (cv, style, params) {
   const fill = App.style.grad ? { ...App.style.grad } : (App.style.fill || App.style.stroke || "#111");
   const q = params || {};
   Render.drawObj(g, { type: "brush", pts, size: 8, pressure: 0.8, taper: true, style, seed: 7, sp: q.sp ?? 1, amt: q.amt ?? 0.5, ang: q.ang ?? 45, freq: q.freq ?? 1, dot: q.dot ?? 1, m: M.id(), fill, opacity: 1 });
+};
+
+// ---------------------------------------------------------------- edit bar (copy / cut / paste) over the canvas
+UI.syncEditBar = function () {
+  const bar = document.getElementById("editBar"); if (!bar) return;
+  const t = App.state.tool, n = App.state.selection.length, clip = Cmd.clipboard.length;
+  const show = !App.state.playing && ["select", "direct", "knife"].includes(t) && (n || clip);
+  bar.hidden = !show; if (!show) return;
+  bar.querySelector("[data-a=copy]").disabled = !n; bar.querySelector("[data-a=cut]").disabled = !n;
+  bar.querySelector("[data-a=dup]").disabled = !n; bar.querySelector("[data-a=del]").disabled = !n;
+  bar.querySelector("[data-a=paste]").disabled = !clip;
+  bar.querySelector("[data-a=count]").textContent = n ? `${n} selected` : `${clip} on clipboard`;
+};
+UI.buildEditBar = function () {
+  const wrap = document.getElementById("canvasWrap"); if (!wrap || document.getElementById("editBar")) return;
+  const b = (a, label, fn) => h("button", { type: "button", class: "btn tiny", "data-a": a, onclick: () => { fn(); UI.syncEditBar(); } }, label);
+  const bar = h("div", { class: "editbar", id: "editBar", role: "toolbar", "aria-label": "Edit selection", hidden: true },
+    h("span", { class: "count", "data-a": "count" }),
+    b("copy", "Copy", () => Cmd.copy()), b("cut", "Cut", () => Cmd.cut()), b("paste", "Paste", () => Cmd.paste(false)),
+    b("dup", "Duplicate", () => Cmd.duplicate()), b("del", "Delete", () => Cmd.delete()));
+  wrap.append(bar);
 };
 
 UI.syncSwatch = function () {
@@ -708,7 +733,7 @@ UI.docSettings = function () {
 UI.help = function () {
   const rows = [["Space + drag / two fingers", "Pan"], ["Ctrl + wheel / pinch", "Zoom"], ["Enter", "Play / stop"], [", and .", "Previous / next frame"], ["Shift + , and .", "Previous / next key"],
     ["F6", "New blank key"], ["F7", "Duplicate key"], ["F5", "Hold one more frame"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Two-finger tap", "Undo"],
-    ["Ctrl+C / V / D", "Copy / paste / duplicate objects"], ["Ctrl+Shift+D", "Repeat copies…"], ["Ctrl+G / Ctrl+Shift+G", "Group / ungroup"], ["Ctrl+M", "Merge (unite) shapes"], ["Q", "Mask on (paint outside selection) / off"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
+    ["Ctrl+C / X / V / D", "Copy / cut / paste / duplicate objects"], ["X", "Knife: cut shapes apart"], ["Ctrl+Shift+D", "Repeat copies…"], ["Ctrl+G / Ctrl+Shift+G", "Group / ungroup"], ["Ctrl+M", "Merge (unite) shapes"], ["Q", "Mask on (paint outside selection) / off"], ["Delete", "Delete selection"], ["Arrows (Shift = 10px)", "Nudge"], ["Stylus eraser end", "Erase"], ["Stylus side button", "Eyedropper"]];
   const tbl = h("table", { class: "keys" }, rows.map(([k, v]) => h("tr", {}, h("td", {}, h("kbd", {}, k)), h("td", {}, v))));
   const tools = h("table", { class: "keys" }, TOOLS.map(([, t]) => h("tr", {}, h("td", {}, t))));
   UI.dialog("Shortcuts", h("div", { class: "cols" }, tbl, tools), []);
@@ -813,6 +838,7 @@ UI.bindKeys = function () {
     if (mod && k.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? History.doRedo() : History.doUndo(); return; }
     if (mod && k.toLowerCase() === "y") { e.preventDefault(); History.doRedo(); return; }
     if (mod && k.toLowerCase() === "c") { Cmd.copy(); return; }
+    if (mod && k.toLowerCase() === "x") { e.preventDefault(); Cmd.cut(); return; }
     if (mod && k.toLowerCase() === "v") { e.preventDefault(); Cmd.paste(true); return; }
     if (mod && k.toLowerCase() === "g") { e.preventDefault(); e.shiftKey ? Cmd.ungroup() : Cmd.group(); return; }
     if (mod && k.toLowerCase() === "m") { e.preventDefault(); Cmd.merge("unite"); return; }
