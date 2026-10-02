@@ -723,6 +723,14 @@ tool("pen", (() => {
 })());
 
 // ---- Pencil: freehand, simplified into a smooth editable path
+/** rdp for a line whose ends meet (a loop): split at the farthest point so it can't collapse to nothing. */
+function rdpLoop(pts, eps) {
+  const a = pts[0], b = pts[pts.length - 1];
+  if (pts.length < 4 || Math.hypot(b[0] - a[0], b[1] - a[1]) > eps * 4) return rdp(pts, eps);
+  let far = 1, fd = -1;
+  pts.forEach((q, i) => { const d = Math.hypot(q[0] - a[0], q[1] - a[1]); if (d > fd) { fd = d; far = i; } });
+  return rdp(pts.slice(0, far + 1), eps).slice(0, -1).concat(rdp(pts.slice(far), eps));
+}
 function rdp(pts, eps) {
   if (pts.length < 3) return pts;
   const a = pts[0], b = pts[pts.length - 1], len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1e-9;
@@ -738,7 +746,7 @@ tool("pencil", (() => {
     move(p) { if (pts) { const l = pts[pts.length - 1]; if (Math.hypot(p.x - l[0], p.y - l[1]) > docLen(1.5)) pts.push([p.x, p.y]); } },
     up() {
       if (!pts || pts.length < 3) { pts = null; return; }
-      let s = rdp(pts, docLen(2.2));
+      let s = rdpLoop(pts, docLen(2.2));
       const closed = s.length > 3 && Math.hypot(s[0][0] - s[s.length - 1][0], s[0][1] - s[s.length - 1][1]) < docLen(12);
       if (closed) s = s.slice(0, -1);
       const n = s.length;
@@ -1489,6 +1497,23 @@ const Cmd = (App.Cmd = {
     History.push(); const cell = editableCell();
     const copies = regroup(Cmd.clipboard.map((o) => ({ ...cloneObj(o), id: uid(), m: inPlace ? o.m.slice() : M.mul(M.translate(20, 20), o.m) })));
     cell.objects.push(...copies); App.state.selection = copies.map((o) => o.id); changed("paste"); App.emit("selection");
+  },
+  /** Simplify: fewer points, same shape. strength 0..1; repeated calls re-run from the original selection. */
+  simplify(strength) {
+    const sel = selectedObjects().filter(Geo.canSimplify);
+    if (!sel.length) { toast("Select a path, pencil line, brush stroke or merged / cut shape to simplify."); return null; }
+    const ids = sel.map((o) => o.id).sort().join(",");
+    if (!Cmd._simp || Cmd._simp.ids !== ids) { History.push(); Cmd._simp = { ids, base: new Map(sel.map((o) => [o.id, cloneObj(o)])) }; }
+    const err = 0.12 + strength * strength * 2.4;   // at most ~2.5 document px of drift
+    let before = 0, after = 0;
+    for (const { cell } of selCells()) cell.objects = cell.objects.map((o) => {
+      const b = Cmd._simp.base.get(o.id); if (!b) return o;
+      const r = strength > 0 ? Geo.simplify(cloneObj(b), err) : cloneObj(b);
+      before += Geo.pointCount(b); after += Geo.pointCount(r);
+      return r;
+    });
+    changed("simplify");
+    return { before, after };
   },
   cut() {
     if (!App.state.selection.length) { toast("Select something to cut first."); return; }

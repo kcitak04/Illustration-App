@@ -69,6 +69,7 @@ async function start() {
   App.state.layer = 1; App.state.tool = "select";
   View.init(); UI.buildToolbar(); UI.buildEditBar(); UI.bindTimelineControls(); UI.bindKeys(); TL.init();
   App.on("selection", () => { UI.buildProps(); View.redraw(); UI.syncEditBar(); });
+  App.on("changed", (w) => { if (w !== "simplify") Cmd._simp = null; });   // a new edit starts a fresh simplify
   App.on("changed", () => UI.syncEditBar());
   App.on("playing", () => UI.syncEditBar());
   App.on("layers", () => { UI.buildProps(); TL.updateReadout(); });

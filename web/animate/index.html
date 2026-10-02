@@ -1326,6 +1326,140 @@ Geo.combine = function (objs, op) {
   return { ...baseProps(src, uid()), group: undefined, type: "rings", fill, stroke: null, sw: 0, polys: res.map((P) => P.map((r) => r.flat())) };
 };
 
+// ---------------------------------------------------------------- simplify (fewer points, same shape)
+/** Least-squares cubic Bézier fitting (Philip Schneider's algorithm, Graphics Gems 1990). */
+const V = {
+  add: (a, b) => [a[0] + b[0], a[1] + b[1]], sub: (a, b) => [a[0] - b[0], a[1] - b[1]], mul: (a, k) => [a[0] * k, a[1] * k],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1], len: (a) => Math.hypot(a[0], a[1]),
+  norm: (a) => { const l = Math.hypot(a[0], a[1]) || 1; return [a[0] / l, a[1] / l]; }
+};
+function bez(b, t) { const u = 1 - t; return [u * u * u * b[0][0] + 3 * u * u * t * b[1][0] + 3 * u * t * t * b[2][0] + t * t * t * b[3][0], u * u * u * b[0][1] + 3 * u * u * t * b[1][1] + 3 * u * t * t * b[2][1] + t * t * t * b[3][1]]; }
+function bezD1(b, t) { const u = 1 - t; return [3 * u * u * (b[1][0] - b[0][0]) + 6 * u * t * (b[2][0] - b[1][0]) + 3 * t * t * (b[3][0] - b[2][0]), 3 * u * u * (b[1][1] - b[0][1]) + 6 * u * t * (b[2][1] - b[1][1]) + 3 * t * t * (b[3][1] - b[2][1])]; }
+function bezD2(b, t) { const u = 1 - t; return [6 * u * (b[2][0] - 2 * b[1][0] + b[0][0]) + 6 * t * (b[3][0] - 2 * b[2][0] + b[1][0]), 6 * u * (b[2][1] - 2 * b[1][1] + b[0][1]) + 6 * t * (b[3][1] - 2 * b[2][1] + b[1][1])]; }
+function chordParams(P) { const u = [0]; for (let i = 1; i < P.length; i++) u.push(u[i - 1] + V.len(V.sub(P[i], P[i - 1]))); const L = u[u.length - 1] || 1; return u.map((x) => x / L); }
+function genBezier(P, u, t1, t2) {
+  const a = P[0], b = P[P.length - 1];
+  let c00 = 0, c01 = 0, c11 = 0, x0 = 0, x1 = 0;
+  for (let i = 0; i < P.length; i++) {
+    const t = u[i], s = 1 - t, b1 = 3 * s * s * t, b2 = 3 * s * t * t, A1 = V.mul(t1, b1), A2 = V.mul(t2, b2);
+    c00 += V.dot(A1, A1); c01 += V.dot(A1, A2); c11 += V.dot(A2, A2);
+    const tmp = V.sub(P[i], V.add(V.mul(a, s * s * s + b1), V.mul(b, b2 + t * t * t)));
+    x0 += V.dot(A1, tmp); x1 += V.dot(A2, tmp);
+  }
+  const det = c00 * c11 - c01 * c01, seg = V.len(V.sub(b, a));
+  let al = det ? (x0 * c11 - x1 * c01) / det : 0, ar = det ? (c00 * x1 - c01 * x0) / det : 0;
+  if (!(al > seg * 1e-6) || !(ar > seg * 1e-6)) { al = ar = seg / 3; }   // fall back to a simple guess
+  return [a, V.add(a, V.mul(t1, al)), V.add(b, V.mul(t2, ar)), b];
+}
+function maxErr(P, b, u) { let m = 0, at = Math.floor(P.length / 2); for (let i = 1; i < P.length - 1; i++) { const d = V.len(V.sub(bez(b, u[i]), P[i])); if (d > m) { m = d; at = i; } } return [m, at]; }
+function reparam(b, P, u) { return u.map((t, i) => { const d = V.sub(bez(b, t), P[i]), d1 = bezD1(b, t), d2 = bezD2(b, t), den = V.dot(d1, d1) + V.dot(d, d2); return den ? Math.min(1, Math.max(0, t - V.dot(d, d1) / den)) : t; }); }
+function fitCubic(P, t1, t2, err, out, depth = 0) {
+  if (P.length === 2) { const d = V.len(V.sub(P[1], P[0])) / 3; out.push([P[0], V.add(P[0], V.mul(t1, d)), V.add(P[1], V.mul(t2, d)), P[1]]); return; }
+  let u = chordParams(P), b = genBezier(P, u, t1, t2), [e, split] = maxErr(P, b, u);
+  if (e < err) { out.push(b); return; }
+  if (e < err * 4) for (let k = 0; k < 20; k++) { u = reparam(b, P, u); b = genBezier(P, u, t1, t2); [e, split] = maxErr(P, b, u); if (e < err) { out.push(b); return; } }
+  if (depth > 40) { out.push(b); return; }
+  const tc = V.norm(V.sub(P[split - 1], P[split + 1]));
+  fitCubic(P.slice(0, split + 1), t1, tc, err, out, depth + 1);
+  fitCubic(P.slice(split), V.mul(tc, -1), t2, err, out, depth + 1);
+}
+/** Indices where a polyline turns sharply (kept as corners). */
+function cornerIdx(P, closed) {
+  const n = P.length, out = [], look = 3;
+  for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) {
+    const a = P[(i - 1 + n) % n], b = P[(i + 1) % n];
+    // compare directions over a few points so a dense, smooth curve isn't mistaken for corners
+    const a2 = P[(i - look + n * 4) % n], b2 = P[(i + look) % n];
+    const d1 = V.norm(V.sub(P[i], closed || i - look >= 0 ? a2 : a)), d2 = V.norm(V.sub(closed || i + look < n ? b2 : b, P[i]));
+    const e1 = V.norm(V.sub(P[i], a)), e2 = V.norm(V.sub(b, P[i]));
+    if (V.dot(e1, e2) < Math.cos((50 * Math.PI) / 180) && V.dot(d1, d2) < Math.cos((40 * Math.PI) / 180)) out.push(i);
+  }
+  return out;
+}
+/** Fits nodes (path format) through one polyline sub-path. */
+function fitNodes(P, closed, err) {
+  // drop exact duplicates
+  P = P.filter((p, i) => i === 0 || V.len(V.sub(p, P[i - 1])) > 1e-6);
+  if (closed && P.length > 2 && V.len(V.sub(P[0], P[P.length - 1])) < 1e-6) P.pop();
+  if (P.length < 2) return [];
+  // fill in long straight edges so corners are judged locally (original points are all kept)
+  const step = Math.max(0.5, err * 0.75), Q = [];
+  for (let i = 0; i < P.length; i++) {
+    const a = P[i], b = closed ? P[(i + 1) % P.length] : P[i + 1];
+    Q.push(a);
+    if (!b) break;
+    const n = Math.floor(V.len(V.sub(b, a)) / step);
+    for (let j = 1; j < n; j++) Q.push([a[0] + ((b[0] - a[0]) * j) / n, a[1] + ((b[1] - a[1]) * j) / n]);
+  }
+  P = Q;
+  const node = (p) => ({ x: p[0], y: p[1], ix: p[0], iy: p[1], ox: p[0], oy: p[1], smooth: false });
+  const corners = cornerIdx(P, closed);
+  let runs = [];
+  if (closed) {
+    if (corners.length) {
+      const k = corners[0], R = P.slice(k).concat(P.slice(0, k + 1)), cs = corners.map((c) => (c - k + P.length) % P.length).concat([P.length]);
+      for (let i = 0; i < cs.length - 1; i++) runs.push(R.slice(cs[i], cs[i + 1] + 1));
+    } else runs = [P.concat([P[0]])];
+  } else {
+    const cs = [0, ...corners, P.length - 1];
+    for (let i = 0; i < cs.length - 1; i++) runs.push(P.slice(cs[i], cs[i + 1] + 1));
+  }
+  const segs = [];
+  for (const R of runs) {
+    if (R.length < 2) continue;
+    let t1 = V.norm(V.sub(R[1], R[0])), t2 = V.norm(V.sub(R[R.length - 2], R[R.length - 1]));
+    if (closed && !corners.length) { const t = V.norm(V.sub(R[1], R[R.length - 2])); t1 = t; t2 = V.mul(t, -1); }
+    const out = []; fitCubic(R, t1, t2, err, out);
+    // straight pieces get no handles
+    for (const b of out) { const L = V.len(V.sub(b[3], b[0])) || 1, off = (p) => Math.abs((b[3][0] - b[0][0]) * (b[0][1] - p[1]) - (b[0][0] - p[0]) * (b[3][1] - b[0][1])) / L; if (off(b[1]) < err * 0.15 && off(b[2]) < err * 0.15) { b[1] = b[0]; b[2] = b[3]; } }
+    segs.push(...out.map((b) => ({ b, cornerStart: segs.length === 0 || out.indexOf(b) === 0 })));
+  }
+  if (!segs.length) return [];
+  const nodes = [node(segs[0].b[0])];
+  segs.forEach(({ b }, i) => {
+    nodes[nodes.length - 1].ox = b[1][0]; nodes[nodes.length - 1].oy = b[1][1];
+    const isLast = i === segs.length - 1;
+    if (isLast && closed) { nodes[0].ix = b[2][0]; nodes[0].iy = b[2][1]; }
+    else { const nd = node(b[3]); nd.ix = b[2][0]; nd.iy = b[2][1]; nodes.push(nd); }
+  });
+  for (const nd of nodes) {
+    const a = [nd.ix - nd.x, nd.iy - nd.y], c = [nd.ox - nd.x, nd.oy - nd.y];
+    nd.smooth = V.len(a) > 1e-6 && V.len(c) > 1e-6 && V.dot(V.norm(a), V.norm(c)) < -0.995;
+  }
+  return nodes;
+}
+const pointCount = (o) => (o.type === "path" ? o.nodes.length : o.type === "rings" ? o.polys.reduce((n, P) => n + P.reduce((m, r) => m + r.length / 2, 0), 0) : o.type === "brush" ? o.pts.length / 3 : 0);
+Geo.pointCount = pointCount;
+Geo.canSimplify = (o) => o.type === "path" || o.type === "rings" || o.type === "brush";
+/**
+ * Fewer points, same look. err = how far (document pixels) the new outline may stray from the old one.
+ * Paths and merged / cut shapes become smooth Bézier paths; vector brush strokes keep fewer samples.
+ */
+Geo.simplify = function (o, err) {
+  const k = M.scaleFactor(o.m) || 1, e = Math.max(0.05, err / k);
+  if (o.type === "brush") {
+    const pts = []; for (let i = 0; i < o.pts.length; i += 3) pts.push([o.pts[i], o.pts[i + 1], i / 3]);
+    if (pts.length < 3) return o;
+    const keep = rdpLoop(pts, e * 0.6), out = [];
+    for (const q of keep) { const i = q[2] * 3; out.push(o.pts[i], o.pts[i + 1], o.pts[i + 2]); }
+    return { ...o, pts: out };
+  }
+  if (o.type !== "path" && o.type !== "rings") return o;
+  const rec = new PolyRecorder(Math.max(1, k * 2));
+  Render.localPath(o, rec);
+  let nodes = [];
+  const closed = o.type === "rings" ? true : !!o.closed;
+  for (const sub of rec.subs) {
+    const nd = fitNodes(sub.pts.map((p) => [p[0], p[1]]), closed, e);
+    if (nd.length < 2) continue;
+    if (nodes.length) nd[0].start = true;
+    nodes = nodes.concat(nd);
+  }
+  if (nodes.length < 2) return o;
+  const { polys, ...rest } = o;
+  return { ...rest, type: "path", closed, nodes };
+};
+
 // ---------------------------------------------------------------- knife
 /** One side of a freehand cut line, as a big polygon (the line is extended far past both ends). */
 function knifeSide(pts) {
@@ -2545,6 +2679,14 @@ tool("pen", (() => {
 })());
 
 // ---- Pencil: freehand, simplified into a smooth editable path
+/** rdp for a line whose ends meet (a loop): split at the farthest point so it can't collapse to nothing. */
+function rdpLoop(pts, eps) {
+  const a = pts[0], b = pts[pts.length - 1];
+  if (pts.length < 4 || Math.hypot(b[0] - a[0], b[1] - a[1]) > eps * 4) return rdp(pts, eps);
+  let far = 1, fd = -1;
+  pts.forEach((q, i) => { const d = Math.hypot(q[0] - a[0], q[1] - a[1]); if (d > fd) { fd = d; far = i; } });
+  return rdp(pts.slice(0, far + 1), eps).slice(0, -1).concat(rdp(pts.slice(far), eps));
+}
 function rdp(pts, eps) {
   if (pts.length < 3) return pts;
   const a = pts[0], b = pts[pts.length - 1], len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1e-9;
@@ -2560,7 +2702,7 @@ tool("pencil", (() => {
     move(p) { if (pts) { const l = pts[pts.length - 1]; if (Math.hypot(p.x - l[0], p.y - l[1]) > docLen(1.5)) pts.push([p.x, p.y]); } },
     up() {
       if (!pts || pts.length < 3) { pts = null; return; }
-      let s = rdp(pts, docLen(2.2));
+      let s = rdpLoop(pts, docLen(2.2));
       const closed = s.length > 3 && Math.hypot(s[0][0] - s[s.length - 1][0], s[0][1] - s[s.length - 1][1]) < docLen(12);
       if (closed) s = s.slice(0, -1);
       const n = s.length;
@@ -3311,6 +3453,23 @@ const Cmd = (App.Cmd = {
     History.push(); const cell = editableCell();
     const copies = regroup(Cmd.clipboard.map((o) => ({ ...cloneObj(o), id: uid(), m: inPlace ? o.m.slice() : M.mul(M.translate(20, 20), o.m) })));
     cell.objects.push(...copies); App.state.selection = copies.map((o) => o.id); changed("paste"); App.emit("selection");
+  },
+  /** Simplify: fewer points, same shape. strength 0..1; repeated calls re-run from the original selection. */
+  simplify(strength) {
+    const sel = selectedObjects().filter(Geo.canSimplify);
+    if (!sel.length) { toast("Select a path, pencil line, brush stroke or merged / cut shape to simplify."); return null; }
+    const ids = sel.map((o) => o.id).sort().join(",");
+    if (!Cmd._simp || Cmd._simp.ids !== ids) { History.push(); Cmd._simp = { ids, base: new Map(sel.map((o) => [o.id, cloneObj(o)])) }; }
+    const err = 0.12 + strength * strength * 2.4;   // at most ~2.5 document px of drift
+    let before = 0, after = 0;
+    for (const { cell } of selCells()) cell.objects = cell.objects.map((o) => {
+      const b = Cmd._simp.base.get(o.id); if (!b) return o;
+      const r = strength > 0 ? Geo.simplify(cloneObj(b), err) : cloneObj(b);
+      before += Geo.pointCount(b); after += Geo.pointCount(r);
+      return r;
+    });
+    changed("simplify");
+    return { before, after };
   },
   cut() {
     if (!App.state.selection.length) { toast("Select something to cut first."); return; }
@@ -4113,6 +4272,15 @@ UI.buildProps = function () {
       kids.unshift(...UI.vbrushParams(fb.style || "pressure", (k) => fb[k], setSel, true));
     }
     if (fb) kids.unshift(select("Brush style", Render.VBRUSHES, () => (sel.find((x) => x.type === "brush").style || "pressure"), (v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") { x.style = v; if (!x.seed) x.seed = 1 + Math.floor(Math.random() * 9999); } }); changed("style"); UI.buildProps(); }));
+    if (sel.some((x) => Geo.canSimplify(x))) {
+      const total = sel.filter((x) => Geo.canSimplify(x)).reduce((n, x) => n + Geo.pointCount(x), 0);
+      const info = h("p", { class: "hint" }, Cmd._simp && UI._simpMsg ? UI._simpMsg : `${Math.round(total)} points. Simplify removes points but keeps the shape; sharp corners stay sharp.`);
+      const show = (r) => { if (r) info.textContent = UI._simpMsg = `Points: ${Math.round(r.before)} → ${Math.round(r.after)} (same shape, sharp corners kept)`; };
+      kids.unshift(
+        h("div", { class: "btnrow" }, btn("Simplify shape", () => { Cmd._simp = null; show(Cmd.simplify(0.45)); App.emit("selection"); })),
+        slider("Simplify amount", 0, 1, 0.01, () => 0, (v) => show(Cmd.simplify(v)), { record: false, fmt: (v) => Math.round(v * 100) + "%" }),
+        info);
+    }
     if (o.type === "text") kids.unshift(btn("Edit text", () => TextTool.edit(o)), slider("Text size", 8, 600, 1, () => o.size, (v) => { const c = App.selCell(); c.objects.forEach((x) => { if (x.id === o.id) x.size = v; }); changed("size"); }));
     const grouped = sel.length > 1 && sel[0].group && sel.every((x) => x.group === sel[0].group);
     box.append(section(`Selection · ${grouped ? "group of " : ""}${sel.length} ${sel.length === 1 ? "object" : "objects"}`, ...kids));
@@ -5359,6 +5527,7 @@ async function start() {
   App.state.layer = 1; App.state.tool = "select";
   View.init(); UI.buildToolbar(); UI.buildEditBar(); UI.bindTimelineControls(); UI.bindKeys(); TL.init();
   App.on("selection", () => { UI.buildProps(); View.redraw(); UI.syncEditBar(); });
+  App.on("changed", (w) => { if (w !== "simplify") Cmd._simp = null; });   // a new edit starts a fresh simplify
   App.on("changed", () => UI.syncEditBar());
   App.on("playing", () => UI.syncEditBar());
   App.on("layers", () => { UI.buildProps(); TL.updateReadout(); });

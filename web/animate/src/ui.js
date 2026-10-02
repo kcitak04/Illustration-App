@@ -241,6 +241,15 @@ UI.buildProps = function () {
       kids.unshift(...UI.vbrushParams(fb.style || "pressure", (k) => fb[k], setSel, true));
     }
     if (fb) kids.unshift(select("Brush style", Render.VBRUSHES, () => (sel.find((x) => x.type === "brush").style || "pressure"), (v) => { const c = App.selCell(); const ids = new Set(App.state.selection); c.objects.forEach((x) => { if (ids.has(x.id) && x.type === "brush") { x.style = v; if (!x.seed) x.seed = 1 + Math.floor(Math.random() * 9999); } }); changed("style"); UI.buildProps(); }));
+    if (sel.some((x) => Geo.canSimplify(x))) {
+      const total = sel.filter((x) => Geo.canSimplify(x)).reduce((n, x) => n + Geo.pointCount(x), 0);
+      const info = h("p", { class: "hint" }, Cmd._simp && UI._simpMsg ? UI._simpMsg : `${Math.round(total)} points. Simplify removes points but keeps the shape; sharp corners stay sharp.`);
+      const show = (r) => { if (r) info.textContent = UI._simpMsg = `Points: ${Math.round(r.before)} → ${Math.round(r.after)} (same shape, sharp corners kept)`; };
+      kids.unshift(
+        h("div", { class: "btnrow" }, btn("Simplify shape", () => { Cmd._simp = null; show(Cmd.simplify(0.45)); App.emit("selection"); })),
+        slider("Simplify amount", 0, 1, 0.01, () => 0, (v) => show(Cmd.simplify(v)), { record: false, fmt: (v) => Math.round(v * 100) + "%" }),
+        info);
+    }
     if (o.type === "text") kids.unshift(btn("Edit text", () => TextTool.edit(o)), slider("Text size", 8, 600, 1, () => o.size, (v) => { const c = App.selCell(); c.objects.forEach((x) => { if (x.id === o.id) x.size = v; }); changed("size"); }));
     const grouped = sel.length > 1 && sel[0].group && sel.every((x) => x.group === sel[0].group);
     box.append(section(`Selection · ${grouped ? "group of " : ""}${sel.length} ${sel.length === 1 ? "object" : "objects"}`, ...kids));
