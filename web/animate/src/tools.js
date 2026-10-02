@@ -49,9 +49,12 @@ function loop() {
 let strokeCache = null;
 function buildStrokeCache() {
   const d = App.doc, f = App.state.frame, ai = App.state.layer;
-  const mk = () => { const c = document.createElement("canvas"); c.width = d.width; c.height = d.height; return c; };
+  // cached at the screen's own resolution (the view can't pan or zoom during a stroke), so nothing goes soft
+  const sc = stage(), z = App.state.zoom;
+  const mk = () => { const c = document.createElement("canvas"); c.width = sc.width; c.height = sc.height; return c; };
   const under = mk(), over = mk();
   const ug = under.getContext("2d"), og = over.getContext("2d");
+  for (const g of [ug, og]) { g.setTransform(dpr * z, 0, 0, dpr * z, dpr * App.state.panX, dpr * App.state.panY); g.beginPath(); g.rect(0, 0, d.width, d.height); g.clip(); g.imageSmoothingQuality = "high"; }
   if (!d.transparent) { ug.fillStyle = d.background; ug.fillRect(0, 0, d.width, d.height); }
   const L = d.layers[ai];
   // with masks / clipping involved, redraw everything live instead (the layers depend on each other)
@@ -82,9 +85,10 @@ function paint() {
   if (strokeCache && strokeCache.full && L) {
     Render.frame(g, s.frame, { liveIndex: s.layer, live: (x) => drawActiveContent(x, L) });
   } else if (strokeCache && L) {
-    g.drawImage(strokeCache.under, 0, 0);
+    const pix = (c) => { g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(c, 0, 0); g.restore(); };
+    pix(strokeCache.under);
     drawActiveLayerLive(g, L);
-    g.drawImage(strokeCache.over, 0, 0);
+    pix(strokeCache.over);
   } else {
     Render.frame(g, s.frame);
   }
@@ -101,13 +105,18 @@ function paint() {
   g.restore();
 }
 const liveBufs = [document.createElement("canvas"), document.createElement("canvas")];
+/** Paint strokes are drawn at this many pixels per document pixel, so they stay crisp when zoomed in. */
+function paintScale() { const d = App.doc; return Math.max(1, Math.min(2, 4096 / Math.max(d.width, d.height))); }
 function liveBuf(i) {
-  const c = liveBufs[i], d = App.doc;
-  if (c.width !== d.width || c.height !== d.height) { c.width = d.width; c.height = d.height; }
+  const c = liveBufs[i], d = App.doc, s = paintScale(), W = Math.round(d.width * s), H = Math.round(d.height * s);
+  if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
   const x = c.getContext("2d"); x.setTransform(1, 0, 0, 1, 0, 0); x.globalAlpha = 1; x.globalCompositeOperation = "source-over"; x.clearRect(0, 0, c.width, c.height);
+  x.setTransform(s, 0, 0, s, 0, 0); x.imageSmoothingQuality = "high";
   return x;
 }
-function applyLive(x) { x.save(); x.globalAlpha = Paint.live.alpha; x.globalCompositeOperation = Paint.live.erase ? "destination-out" : Paint.live.blend || "source-over"; x.drawImage(Paint.buffer, 0, 0); x.restore(); }
+/** Draws the stroke buffer in document coordinates. */
+function drawBuffer(x) { const d = App.doc; x.drawImage(Paint.buffer, 0, 0, d.width, d.height); }
+function applyLive(x) { x.save(); x.globalAlpha = Paint.live.alpha; x.globalCompositeOperation = Paint.live.erase ? "destination-out" : Paint.live.blend || "source-over"; drawBuffer(x); x.restore(); }
 /** While the layer mask is being edited, its hidden parts are tinted red over the canvas. */
 const tintBuf = document.createElement("canvas");
 function drawMaskTint(g, L) {
@@ -131,19 +140,20 @@ function drawActiveContent(g, L) {
       for (const o of Render.cellObjectsAt(L, f)) Render.drawObj(g, o);
     } else {
       // paint into an off-screen copy of the layer so erasing never punches through the layers below
+      const d = App.doc, objs = Render.cellObjectsAt(L, f);
       const a = liveBuf(0);
-      const r = Render.cellRasterAt(L, f); if (r) a.drawImage(r, 0, 0);
-      if (lv.pixels) applyLive(a);
-      const objs = Render.cellObjectsAt(L, f);
+      const r = Render.cellRasterAt(L, f); if (r) a.drawImage(r, 0, 0, d.width, d.height);
+      if (lv.pixels && !lv.asObject) applyLive(a);
+      g.drawImage(liveBufs[0], 0, 0, d.width, d.height);
       if (lv.vectors && objs.length) {
         const b = liveBuf(1);
         for (const o of objs) Render.drawObj(b, o);
-        applyLive(b); a.drawImage(liveBufs[1], 0, 0);
-      } else for (const o of objs) Render.drawObj(a, o);
-      g.drawImage(liveBufs[0], 0, 0);
+        applyLive(b); g.drawImage(liveBufs[1], 0, 0, d.width, d.height);
+      } else for (const o of objs) Render.drawObj(g, o);   // shapes go straight to the screen: always sharp
+      if (lv.asObject) applyLive(g);                        // a new paint stroke sits on top, as it will when done
     }
   } else Media.draw(g, L, App.state.frame);
-  if (L.mask && L.mask.canvas && L.mask.on !== false) { g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(L.mask.canvas, 0, 0); g.restore(); }
+  if (L.mask && L.mask.canvas && L.mask.on !== false) { g.save(); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(L.mask.canvas, 0, 0, App.doc.width, App.doc.height); g.restore(); }
 }
 
 // ---------------------------------------------------------------- input routing
@@ -441,7 +451,7 @@ const Mask = (App.Mask = {
   /** Is painting allowed at this document point? */
   allows(x, y) { const m = this.current; if (!m) return true; return Geo.inside(m.area, x, y) !== m.invert; },
   /** Keeps only the allowed part of a stroke buffer. */
-  clipBuffer(g) { const m = this.current; if (!m) return; g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(m.allow, 0, 0); g.restore(); },
+  clipBuffer(g) { const m = this.current; if (!m) return; g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(m.allow, 0, 0, g.canvas.width, g.canvas.height); g.restore(); },
   /** Puts back the protected pixels (for brushes that paint straight onto the layer). */
   restore(g, before) {
     const m = this.current; if (!m) return;
@@ -1141,7 +1151,7 @@ Object.assign(App.style.eraser, { ...brushDefaults("round"), hardness: 0.8, size
 function textureErase(cell, trails, alpha, only) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const t of trails) for (const [x, y, r] of t) { x0 = Math.min(x0, x - r); y0 = Math.min(y0, y - r); x1 = Math.max(x1, x + r); y1 = Math.max(y1, y + r); }
-  const d = App.doc, bg = Paint.buffer.getContext("2d");
+  const d = App.doc, bg = Paint.buffer.getContext("2d"), S = Paint.buffer.width / d.width;
   const skip = Mask.current ? Mask.current.ids : null;
   let n = 0;
   cell.objects = cell.objects.map((o) => {
@@ -1150,18 +1160,40 @@ function textureErase(cell, trails, alpha, only) {
     const ix0 = Math.max(0, Math.floor(Math.max(b.x, x0))), iy0 = Math.max(0, Math.floor(Math.max(b.y, y0)));
     const ix1 = Math.min(d.width, Math.ceil(Math.min(b.x + b.w, x1))), iy1 = Math.min(d.height, Math.ceil(Math.min(b.y + b.h, y1)));
     if (ix1 <= ix0 || iy1 <= iy0) return o;
-    const px = bg.getImageData(ix0, iy0, ix1 - ix0, iy1 - iy0).data;
+    const px = bg.getImageData(Math.floor(ix0 * S), Math.floor(iy0 * S), Math.max(1, Math.round((ix1 - ix0) * S)), Math.max(1, Math.round((iy1 - iy0) * S))).data;
     let hit = false; for (let k = 3; k < px.length; k += 16) if (px[k]) { hit = true; break; }
     if (!hit) return o;
     const bx = Math.floor(b.x) - 1, by = Math.floor(b.y) - 1, bw = Math.max(1, Math.ceil(b.w) + 3), bh = Math.max(1, Math.ceil(b.h) + 3);
-    const c = document.createElement("canvas"); c.width = bw; c.height = bh;
-    const g = c.getContext("2d"); g.translate(-bx, -by);
+    const c = document.createElement("canvas"); c.width = Math.ceil(bw * S); c.height = Math.ceil(bh * S);
+    const g = c.getContext("2d"); g.imageSmoothingQuality = "high"; g.setTransform(S, 0, 0, S, -bx * S, -by * S);
     Render.drawObj(g, { ...o, opacity: 1, blend: "source-over" });
-    g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = alpha; g.globalCompositeOperation = "destination-out"; g.drawImage(Paint.buffer, -bx, -by);
+    g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = alpha; g.globalCompositeOperation = "destination-out"; g.drawImage(Paint.buffer, -bx * S, -by * S);
     const src = c.toDataURL("image/png"); Render.cacheImage(src, c); n++;
     return { id: o.id, group: o.group, type: "image", src, w: bw, h: bh, m: M.translate(bx, by), fill: null, stroke: null, sw: 0, opacity: o.opacity ?? 1, blend: o.blend || "source-over" };
   });
   if (n) App.emit("selection");
+}
+
+/** Clears the stroke buffer at paint resolution and returns its context (document coordinates). */
+function prepBuffer() {
+  const d = App.doc, b = Paint.buffer, s = paintScale(), W = Math.round(d.width * s), H = Math.round(d.height * s);
+  if (b.width !== W || b.height !== H) { b.width = W; b.height = H; }
+  const g = b.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, W, H);
+  g.setTransform(s, 0, 0, s, 0, 0);
+  return g;
+}
+/** Turns the finished paint stroke into its own picture object, so it can be selected, moved and deleted. */
+function strokeObject(box, lv) {
+  if (!box) return null;
+  const d = App.doc, S = Paint.buffer.width / d.width;
+  const x0 = Math.max(0, Math.floor(box[0])), y0 = Math.max(0, Math.floor(box[1]));
+  const x1 = Math.min(d.width, Math.ceil(box[2])), y1 = Math.min(d.height, Math.ceil(box[3]));
+  if (x1 <= x0 || y1 <= y0) return null;
+  const w = x1 - x0, h = y1 - y0, c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(w * S)); c.height = Math.max(1, Math.round(h * S));
+  c.getContext("2d").drawImage(Paint.buffer, Math.round(x0 * S), Math.round(y0 * S), c.width, c.height, 0, 0, c.width, c.height);
+  const src = c.toDataURL("image/png"); Render.cacheImage(src, c);
+  return { id: uid(), type: "image", paint: true, src, w, h, m: M.translate(x0, y0), fill: null, stroke: null, sw: 0, opacity: lv.alpha, blend: lv.blend || "source-over" };
 }
 
 function paintTool(erase) {
@@ -1171,10 +1203,14 @@ function paintTool(erase) {
   const mode = () => (erase ? App.style.eraser.mode || "all" : "pixels");
   // a mirrored copy of a stroke also mirrors its direction
   const turn = (T, a) => Math.atan2(T[1] * Math.cos(a) + T[3] * Math.sin(a), T[0] * Math.cos(a) + T[2] * Math.sin(a));
+  let box = null;   // what the stroke covers (document coordinates)
   const dab = (g, x, y, p, dir = 0) => {
     Sym.all().forEach((T, i) => {
       const [px, py] = M.apply(T, x, y);
       painter.dab(px, py, p, turn(T, dir), i);
+      const c = cfg(), pad = c.size * (0.6 + (c.scatter || 0)) + 3;
+      if (!box) box = [px - pad, py - pad, px + pad, py + pad];
+      else { box[0] = Math.min(box[0], px - pad); box[1] = Math.min(box[1], py - pad); box[2] = Math.max(box[2], px + pad); box[3] = Math.max(box[3], py + pad); }
       if (trails) (trails[i] = trails[i] || []).push([px, py, painter.lastSize / 2]);
     });
   };
@@ -1190,9 +1226,8 @@ function paintTool(erase) {
       before = cell.raster || null;   // the untouched pixels (history keeps them), used by the mask
       if (pixels && (cell.raster || !erase)) rasterForPaint(cell);
       buildStrokeCache();
-      const d = App.doc, b = Paint.buffer;
-      if (b.width !== d.width || b.height !== d.height) { b.width = d.width; b.height = d.height; }
-      const g = b.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, d.width, d.height);
+      const g = prepBuffer();
+      box = null;
       let kind = cfg().brush || "round";
       if (erase && !App.ERASER_BRUSHES.includes(kind)) kind = "round";
       if (!erase && !PAINT_BRUSHES[kind].direct) remember(cfg().color);
@@ -1200,7 +1235,7 @@ function paintTool(erase) {
       // oil, smudge & blur work straight on the layer's pixels (they change what's there)
       if (direct && !cell.raster) rasterForPaint(cell);
       painter = makePainter(direct ? cell.raster.getContext("2d") : g, kind, cfg(), erase ? "#000" : cfg().color, erase);
-      Paint.live = { alpha: direct ? 1 : cfg().opacity, erase, pixels: pixels && !direct, vectors, direct, blend: erase ? null : PAINT_BRUSHES[kind].blend };
+      Paint.live = { alpha: direct ? 1 : cfg().opacity, erase, pixels: pixels && !direct, vectors, direct, blend: erase ? null : PAINT_BRUSHES[kind].blend, asObject: !erase && !direct && App.style.paint.asObject !== false };
       trails = vectors || erase ? [] : null;   // the eraser always records its path (pictures on the layer are erased too)
       sm = { x: p.x, y: p.y, p: p.p };
       last = p; leftover = 0; dab(g, p.x, p.y, p.p); this.masked(); changed("paint");
@@ -1231,9 +1266,7 @@ function paintTool(erase) {
       maskLayer = L; maskBefore = L.mask.canvas;
       L.mask = { ...L.mask, canvas: cloneCanvas(maskBefore) };   // copy-on-write keeps undo intact
       buildStrokeCache();
-      const d = App.doc, b = Paint.buffer;
-      if (b.width !== d.width || b.height !== d.height) { b.width = d.width; b.height = d.height; }
-      const g = b.getContext("2d"); g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, d.width, d.height);
+      const g = prepBuffer();
       let kind = cfg().brush || "round"; if (PAINT_BRUSHES[kind].direct) kind = "round";
       painter = makePainter(g, kind, cfg(), "#000", true);
       Paint.live = { alpha: cfg().opacity, erase, pixels: false, vectors: false, maskEdit: true };
@@ -1243,17 +1276,20 @@ function paintTool(erase) {
     maskUpdate() {
       const mg = maskLayer.mask.canvas.getContext("2d");
       mg.save(); mg.globalAlpha = 1; mg.globalCompositeOperation = "copy"; mg.drawImage(maskBefore, 0, 0);
-      mg.globalAlpha = Paint.live.alpha; mg.globalCompositeOperation = erase ? "source-over" : "destination-out"; mg.drawImage(Paint.buffer, 0, 0); mg.restore();
+      mg.globalAlpha = Paint.live.alpha; mg.globalCompositeOperation = erase ? "source-over" : "destination-out"; drawBuffer(mg); mg.restore();
     },
     up() {
       this._erasing = false;
       if (maskLayer) { maskLayer = null; maskBefore = null; Paint.live = null; painter = null; last = null; changed("mask"); return; }
       if (!cell || !Paint.live) { cell = null; return; }
       const lv = Paint.live;
-      if (lv.pixels && cell.raster) {
+      if (lv.asObject) {
+        const o = strokeObject(box, lv);
+        if (o) { cell.objects.push(o); }
+      } else if (lv.pixels && cell.raster) {
         const g = cell.raster.getContext("2d");
         g.save(); g.globalAlpha = lv.alpha; g.globalCompositeOperation = erase ? "destination-out" : lv.blend || "source-over";
-        g.drawImage(Paint.buffer, 0, 0); g.restore();
+        drawBuffer(g); g.restore();
       }
       const ek = App.style.eraser.brush || "round";
       if (lv.vectors && trails && cell.objects.length && erase && App.style.eraser.vectorMode !== "cut" && !["round", "ink"].includes(ek)) {

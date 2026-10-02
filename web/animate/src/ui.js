@@ -386,6 +386,7 @@ UI.brushSettings = function (tgt, kind, erase) {
   const sl = (label, key, min, max, step, o = pct) => slider(label, min, max, step, () => tgt[key] ?? 0, (v) => { tgt[key] = v; redraw(); }, o);
   const B = App.PAINT_BRUSHES[kind], textured = ["chalk", "pencil", "crayon", "charcoal", "oil", "marker", "watercolor", "hatching"].includes(kind);
   const out = [sl("Size", "size", 1, 400, 1, { record: false })];
+  if (!erase && !B.direct) out.push(check("Each stroke is its own object (select, move, delete it)", () => tgt.asObject !== false, (v) => { tgt.asObject = v; }, { record: false }));
   if (["round", "ink", "marker", "glow"].includes(kind)) out.push(sl("Hardness", "hardness", 0, 1, 0.01));
   if (!B.direct) out.push(sl(erase ? "Strength" : "Opacity", "opacity", 0.05, 1, 0.01));
   out.push(sl(kind === "smudge" || kind === "blur" ? "Strength" : "Flow", "flow", 0.02, 1, 0.01));

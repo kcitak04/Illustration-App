@@ -333,11 +333,37 @@ Render.isCompound = (o) => o.type === "path" && o.nodes.some((n, i) => i > 0 && 
 Render.fillRule = (o) => (o.type === "rings" || Render.isCompound(o) || (o.type === "brush" && (o.style === "outline" || o.style === "chain")) ? "evenodd" : "nonzero");
 
 const hitCtx = document.createElement("canvas").getContext("2d");
+const alphaMaps = new WeakMap();
+/** A CPU-readable copy of a picture, for hit-testing its transparent areas (null while still loading). */
+function alphaMap(im) {
+  if (!im) return null;
+  const ready = im instanceof HTMLCanvasElement || (im.complete && im.naturalWidth);
+  if (!ready) return null;
+  let c = alphaMaps.get(im); if (c) return c;
+  const w = im.width || im.naturalWidth, h = im.height || im.naturalHeight, k = Math.min(1, 1024 / Math.max(w, h));
+  c = document.createElement("canvas"); c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+  c.getContext("2d", { willReadFrequently: true }).drawImage(im, 0, 0, c.width, c.height);
+  alphaMaps.set(im, c); return c;
+}
 Render.hit = function (o, x, y, tol) {
   const b = Render.docBounds(o);
   if (x < b.x - tol || y < b.y - tol || x > b.x + b.w + tol || y > b.y + b.h + tol) return false;
   const inv = M.inv(o.m); const [lx, ly] = M.apply(inv, x, y);
-  if (o.type === "text" || o.type === "image") { const lb = Render.localBounds(o); return lx >= lb.x && ly >= lb.y && lx <= lb.x + lb.w && ly <= lb.y + lb.h; }
+  if (o.type === "text") { const lb = Render.localBounds(o); return lx >= lb.x && ly >= lb.y && lx <= lb.x + lb.w && ly <= lb.y + lb.h; }
+  if (o.type === "image") {
+    const lb = Render.localBounds(o), s2 = M.scaleFactor(o.m), t = tol / s2;
+    if (lx < lb.x - t || ly < lb.y - t || lx > lb.x + lb.w + t || ly > lb.y + lb.h + t) return false;
+    // pictures (paint strokes, erased shapes) are only hit where they actually have paint
+    const im = imageFor(o.src), A = alphaMap(im);
+    if (!A) return true;
+    const kx = A.width / o.w, ky = A.height / o.h, g = A.getContext("2d", { willReadFrequently: true });
+    for (const [dx, dy] of [[0, 0], [t, 0], [-t, 0], [0, t], [0, -t], [t * 0.7, t * 0.7], [-t * 0.7, t * 0.7], [t * 0.7, -t * 0.7], [-t * 0.7, -t * 0.7]]) {
+      const px = Math.floor((lx + dx) * kx), py = Math.floor((ly + dy) * ky);
+      if (px < 0 || py < 0 || px >= A.width || py >= A.height) continue;
+      if (g.getImageData(px, py, 1, 1).data[3] > 12) return true;
+    }
+    return false;
+  }
   const p = Render.localPath(o);
   const s = M.scaleFactor(o.m);
   if (o.fill && hitCtx.isPointInPath(p, lx, ly, Render.fillRule(o))) return true;
@@ -414,20 +440,26 @@ function drawDrawLayer(ctx, L, f) {
  */
 // scratch canvases for layer groups (clipping masks) and masked layers
 const bufPool = [];
-function scratch(i) {
-  const d = App.doc; let c = bufPool[i];
+/** A scratch canvas matching ref's pixel grid (so a zoomed-in view stays sharp), with ref's transform. */
+function scratch(i, ref) {
+  let c = bufPool[i];
   if (!c) c = bufPool[i] = document.createElement("canvas");
-  if (c.width !== d.width || c.height !== d.height) { c.width = d.width; c.height = d.height; }
-  const g = c.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, c.width, c.height);
+  const W = ref.canvas.width, H = ref.canvas.height;
+  if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+  const g = c.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over"; g.clearRect(0, 0, W, H);
+  g.imageSmoothingQuality = "high"; g.setTransform(ref.getTransform());
   return g;
 }
+/** Draws a scratch canvas back onto ctx pixel for pixel. */
+function blit(ctx, g, alpha = 1, op = "source-over") { ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha *= alpha; ctx.globalCompositeOperation = op; ctx.drawImage(g.canvas, 0, 0); ctx.restore(); }
+function pixelOp(g, op, src) { g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = op; g.drawImage(src, 0, 0); g.restore(); }
 const hasMask = (L) => !!(L.mask && L.mask.canvas && L.mask.on !== false);
 /** Draws a layer's own content (no opacity / blend), with its layer mask applied. */
 function layerContent(g, L, i, f, opts) {
   if (opts.live && i === opts.liveIndex) opts.live(g);
   else if (L.kind === "draw") drawDrawLayer(g, L, f);
   else if (L.kind === "media") Media.draw(g, L, f);
-  if (hasMask(L)) { g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(L.mask.canvas, 0, 0); g.restore(); }
+  if (hasMask(L)) { g.save(); g.globalAlpha = 1; g.globalCompositeOperation = "destination-in"; g.drawImage(L.mask.canvas, 0, 0, App.doc.width, App.doc.height); g.restore(); }
 }
 Render.layerContent = layerContent;
 /** The layer a clipped layer is clipped to: the nearest unclipped layer below it. */
@@ -456,22 +488,22 @@ Render.frame = function (ctx, f, opts = {}) {
       if (shown(L, i)) {
         const simple = L.opacity >= 1 && (L.blend || "source-over") === "source-over" && !hasMask(L);
         if (simple) layerContent(ctx, L, i, f, opts);
-        else { const g = scratch(0); layerContent(g, L, i, f, opts); ctx.save(); ctx.globalAlpha = L.opacity; ctx.globalCompositeOperation = L.blend || "source-over"; ctx.drawImage(g.canvas, 0, 0); ctx.restore(); }
+        else { const g = scratch(0, ctx); layerContent(g, L, i, f, opts); blit(ctx, g, L.opacity, L.blend || "source-over"); }
       }
     } else if (base < 0) {
       // clipped layers with nothing underneath to clip to: draw them as normal layers
-      for (const k of members) { const M = Ls[k], g = scratch(0); layerContent(g, M, k, f, opts); ctx.save(); ctx.globalAlpha = M.opacity; ctx.globalCompositeOperation = M.blend || "source-over"; ctx.drawImage(g.canvas, 0, 0); ctx.restore(); }
+      for (const k of members) { const M = Ls[k], g = scratch(0, ctx); layerContent(g, M, k, f, opts); blit(ctx, g, M.opacity, M.blend || "source-over"); }
     } else if (baseShown) {
-      const A = scratch(0); layerContent(A, Ls[base], base, f, opts);            // the base's shape
-      const G = scratch(1);
+      const A = scratch(0, ctx); layerContent(A, Ls[base], base, f, opts);            // the base's shape
+      const G = scratch(1, ctx);
       const drawBase = base >= from && shown(Ls[base], base);
-      if (drawBase) { G.globalAlpha = Ls[base].opacity; G.drawImage(A.canvas, 0, 0); G.globalAlpha = 1; }
+      if (drawBase) blit(G, A, Ls[base].opacity);
       for (const k of members) {
-        const M = Ls[k], C = scratch(2); layerContent(C, M, k, f, opts);
-        C.globalCompositeOperation = "destination-in"; C.drawImage(A.canvas, 0, 0);
-        G.save(); G.globalAlpha = M.opacity; G.globalCompositeOperation = M.blend || "source-over"; G.drawImage(C.canvas, 0, 0); G.restore();
+        const M = Ls[k], C = scratch(2, ctx); layerContent(C, M, k, f, opts);
+        pixelOp(C, "destination-in", A.canvas);
+        blit(G, C, M.opacity, M.blend || "source-over");
       }
-      ctx.save(); ctx.globalCompositeOperation = drawBase ? Ls[base].blend || "source-over" : "source-over"; ctx.drawImage(G.canvas, 0, 0); ctx.restore();
+      blit(ctx, G, 1, drawBase ? Ls[base].blend || "source-over" : "source-over");
     }
     i = Math.max(j, i + 1);
   }
