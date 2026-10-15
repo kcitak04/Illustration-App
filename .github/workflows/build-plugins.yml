@@ -47,7 +47,7 @@ jobs:
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S plugins -B build -G "Visual Studio 17 2022" -A x64 -DDAT_BUILD_TESTS=OFF -DJUCE_WEBVIEW2_PACKAGE_LOCATION="${{ runner.temp }}/nuget"
+        run: cmake -S plugins -B build -A x64 -DDAT_BUILD_TESTS=OFF -DJUCE_WEBVIEW2_PACKAGE_LOCATION="${{ runner.temp }}/nuget"
 
       - name: Configure (macOS, universal)
         if: runner.os == 'macOS'
