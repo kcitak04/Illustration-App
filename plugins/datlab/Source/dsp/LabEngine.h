@@ -33,8 +33,8 @@ struct Job
 
 struct Result { Chans ch; double sr = 44100; std::string error; };
 
-// progress(0..1) may throw lab::Cancelled to abort
-Result run (const Job& job, const std::function<void (double)>& progress);
+// progress(0..1) may throw lab::Cancelled to abort; cancelled() is polled on every progress tick
+Result run (const Job& job, const std::function<void (double)>& progress, const std::function<bool()>& cancelled = {});
 
 // Pure shape helpers (also used by the tests)
 void applyPre (Chans& ch, double sr, const Shape& s);

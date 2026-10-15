@@ -67,9 +67,11 @@ struct Ctx
     double bpm = 120;             // tempo for synced processes (host tempo when available)
     Rng rng;
     std::function<void (double)> progressFn;
+    std::function<bool()> cancelled;   // checked on every progress tick, so a render stops promptly
     double lastProgress = -1;
     void prog (double f)
     {
+        if (cancelled && cancelled()) throw Cancelled();
         if (progressFn && std::abs (f - lastProgress) > 0.004) { lastProgress = f; progressFn (clampd (f, 0, 1)); }
     }
     double rand() { return rng(); }
@@ -134,16 +136,39 @@ inline void synth (Buf& out, long long pos, const DVec& w, DVec& re, DVec& im, d
     const size_t N = w.size(); const long long L = (long long) out.size();
     for (size_t i = 0; i < N; ++i) { long long j = pos + (long long) i; if (j >= 0 && j < L) out[(size_t) j] = (float) (out[(size_t) j] + re[i] * w[i] * g); }
 }
-inline Buf convolve (const Buf& x, const Buf& h)   // FFT convolution, output length x + h - 1
+// FFT convolution, output length x + h - 1. Short inputs use one FFT (identical to DATTRACK's worker);
+// long ones use overlap-add with blocks sized by the impulse, so memory stays bounded (a 10-minute
+// source would otherwise need a 2^26-point FFT and gigabytes of RAM).
+inline Buf convolve (const Buf& x, const Buf& h, Ctx* cx = nullptr, double p0 = 0, double p1 = 1)
 {
-    size_t n = x.size() + h.size() - 1, N = (size_t) 1 << (size_t) std::ceil (std::log2 ((double) n));
-    DVec ar (N), ai (N), br (N), bi (N);
-    for (size_t i = 0; i < x.size(); ++i) ar[i] = x[i];
-    for (size_t i = 0; i < h.size(); ++i) br[i] = h[i];
-    fft (ar, ai, false); fft (br, bi, false);
-    for (size_t i = 0; i < N; ++i) { double r = ar[i] * br[i] - ai[i] * bi[i]; ai[i] = ar[i] * bi[i] + ai[i] * br[i]; ar[i] = r; }
-    fft (ar, ai, true);
-    Buf o (n); for (size_t i = 0; i < n; ++i) o[i] = (float) ar[i];
+    const size_t n = x.size() + h.size() - 1, N = (size_t) 1 << (size_t) std::ceil (std::log2 ((double) n));
+    if (N <= ((size_t) 1 << 20))
+    {
+        DVec ar (N), ai (N), br (N), bi (N);
+        for (size_t i = 0; i < x.size(); ++i) ar[i] = x[i];
+        for (size_t i = 0; i < h.size(); ++i) br[i] = h[i];
+        fft (ar, ai, false); fft (br, bi, false);
+        for (size_t i = 0; i < N; ++i) { double r = ar[i] * br[i] - ai[i] * bi[i]; ai[i] = ar[i] * bi[i] + ai[i] * br[i]; ar[i] = r; }
+        fft (ar, ai, true);
+        Buf o (n); for (size_t i = 0; i < n; ++i) o[i] = (float) ar[i];
+        return o;
+    }
+    const size_t M = std::max ((size_t) 1 << 16, (size_t) 1 << (size_t) std::ceil (std::log2 (2.0 * (double) h.size()))), B = M - h.size() + 1;
+    DVec hr (M), hi (M), ar (M), ai (M);
+    for (size_t i = 0; i < h.size(); ++i) hr[i] = h[i];
+    fft (hr, hi, false);
+    DVec acc (n);
+    for (size_t a = 0; a < x.size(); a += B)
+    {
+        std::fill (ar.begin(), ar.end(), 0.0); std::fill (ai.begin(), ai.end(), 0.0);
+        for (size_t i = 0; i < B && a + i < x.size(); ++i) ar[i] = x[a + i];
+        fft (ar, ai, false);
+        for (size_t i = 0; i < M; ++i) { double r = ar[i] * hr[i] - ai[i] * hi[i]; ai[i] = ar[i] * hi[i] + ai[i] * hr[i]; ar[i] = r; }
+        fft (ar, ai, true);
+        for (size_t i = 0; i < M && a + i < n; ++i) acc[a + i] += ar[i];
+        if (cx) cx->prog (p0 + (p1 - p0) * (double) a / (double) x.size());
+    }
+    Buf o (n); for (size_t i = 0; i < n; ++i) o[i] = (float) acc[i];
     return o;
 }
 inline double peak (const Buf& a) { double p = 0; for (float v : a) p = std::max (p, (double) std::abs (v)); return p; }

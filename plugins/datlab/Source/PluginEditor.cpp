@@ -91,6 +91,7 @@ void WaveView::mouseMove (const juce::MouseEvent& e)
 
 void WaveView::mouseDown (const juce::MouseEvent& e)
 {
+    dragging = false;   // a previous OS drag may have swallowed the mouse-up
     if (! showRegion || ! sample) return;
     auto inner = getLocalBounds().toFloat().reduced (4);
     float xa = inner.getX() + (float) ra * inner.getWidth(), xb = inner.getX() + (float) rb * inner.getWidth();
@@ -105,7 +106,10 @@ void WaveView::mouseDrag (const juce::MouseEvent& e)
         if (dragging || ! dragFile || e.getDistanceFromDragStart() < 4) return;
         auto f = dragFile(); if (! f.existsAsFile()) return;
         dragging = true;
-        juce::DragAndDropContainer::performExternalDragDropOfFiles ({ f.getFullPathName() }, false, this);
+        // On Windows the OS drag runs on a background thread and this component may never get its mouse-up,
+        // so the completion callback re-arms the next drag.
+        juce::DragAndDropContainer::performExternalDragDropOfFiles ({ f.getFullPathName() }, false, this,
+            [sp = juce::Component::SafePointer<WaveView> (this)] { if (sp != nullptr) sp->dragging = false; });
         return;
     }
     if (! drag) return;
@@ -265,15 +269,15 @@ DatLabEditor::DatLabEditor (DatLabProcessor& p) : AudioProcessorEditor (p), proc
     for (auto& s : sdefs)
     {
         auto* v = s.v;
-        auto* c = shapeCtl.add (new ParamControl (s.d, *v, [v] (double x) { *v = x; }));
+        auto* c = shapeCtl.add (new ParamControl (s.d, *v, [this, v] (double x) { *v = x; proc.markDirty(); }));
         addAndMakeVisible (c);
     }
-    auto tog = [this] (juce::ToggleButton& b, bool* v, juce::String tip) { addAndMakeVisible (b); b.setToggleState (*v, juce::dontSendNotification); b.onClick = [&b, v] { *v = b.getToggleState(); }; b.setTooltip (tip); };
+    auto tog = [this] (juce::ToggleButton& b, bool* v, juce::String tip) { addAndMakeVisible (b); b.setToggleState (*v, juce::dontSendNotification); b.onClick = [this, &b, v] { *v = b.getToggleState(); proc.markDirty(); }; b.setTooltip (tip); };
     tog (revIn, &sh.revIn, "Reverse the source before processing"); tog (revOut, &sh.revOut, "Reverse the result");
     tog (trim, &sh.trim, "Cut silence at both ends of the result"); tog (norm, &sh.normalize, "Normalize the result to -0.2 dBFS");
 
     srcWave.showRegion = true; srcWave.setTooltip ("Source: drag the white handles to process only part of it");
-    srcWave.onRegion = [this] (double a, double b) { proc.shape.start = a; proc.shape.end = b; };
+    srcWave.onRegion = [this] (double a, double b) { proc.shape.start = a; proc.shape.end = b; proc.markDirty(); };
     addAndMakeVisible (srcWave);
     resWave.setTooltip ("Result: drag it straight onto an Ableton track");
     resWave.dragFile = [this] { return proc.result.file; };
@@ -306,8 +310,11 @@ DatLabEditor::DatLabEditor (DatLabProcessor& p) : AudioProcessorEditor (p), proc
     statusLabel.setFont (LookAndFeel::font (12)); statusLabel.setColour (juce::Label::textColourId, col::dim); addAndMakeVisible (statusLabel);
 
     setResizable (true, true);
-    setResizeLimits (980, 690, 2000, 1400);
-    setSize (1140, 760);
+    setResizeLimits (900, 620, 2400, 1600);
+    // fit small / scaled laptop screens (Ableton can't show a plugin window bigger than the display)
+    auto area = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay() != nullptr
+                    ? juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()->userArea : juce::Rectangle<int> (0, 0, 1400, 900);
+    setSize (juce::jlimit (900, 1140, area.getWidth() - 60), juce::jlimit (620, 760, area.getHeight() - 110));
     proc.addChangeListener (this);
     procList.selected = proc.procId;
     refresh();
@@ -319,6 +326,7 @@ DatLabEditor::~DatLabEditor() { proc.removeChangeListener (this); setLookAndFeel
 void DatLabEditor::selectProc (const juce::String& id)
 {
     proc.procId = id;
+    proc.markDirty();
     refresh();
 }
 
@@ -330,7 +338,7 @@ void DatLabEditor::buildParams()
     for (auto& pd : d.params)
     {
         auto key = pd.id;
-        auto* c = params.add (new ParamControl (pd, vals[key], [this, key] (double v) { proc.paramsFor (proc.procId).v[key] = v; }));
+        auto* c = params.add (new ParamControl (pd, vals[key], [this, key] (double v) { proc.paramsFor (proc.procId).v[key] = v; proc.markDirty(); }));
         paramArea.addAndMakeVisible (c);
     }
     builtFor = proc.procId;
@@ -386,6 +394,7 @@ void DatLabEditor::timerCallback()
     srcWave.setPlayhead (np == DatLabProcessor::Play::source ? proc.playPosition() : -1.0f);
     resWave.setPlayhead (np == DatLabProcessor::Play::result ? proc.playPosition() : -1.0f);
     if (proc.isCapturing()) statusLabel.setText (juce::String::formatted ("Capturing... %.1f s  (press STOP CAPTURE)", proc.captureSeconds()), juce::dontSendNotification);
+    if (captureBtn.getButtonText().startsWith ("STOP") != proc.isCapturing()) refresh();
     if (proc.bpmFromHost && proc.hostBpm.load() > 0 && std::abs (bpmSlider.getValue() - proc.hostBpm.load()) > 0.005) bpmSlider.setValue (proc.hostBpm.load(), juce::dontSendNotification);
 }
 
@@ -449,10 +458,11 @@ void DatLabEditor::resized()
     folderBtn.setBounds (buttons.removeFromRight (fw)); buttons.removeFromRight (4);
     saveBtn.setBounds (buttons.removeFromRight (fw));
     r.removeFromBottom (8);
-    auto waves = r.removeFromBottom (190);
+    const int waveH = getHeight() < 720 ? 64 : 91;   // shorter waveforms on small windows
+    auto waves = r.removeFromBottom (waveH * 2 + 8);
     auto tile = waves.removeFromRight (160); waves.removeFromRight (8);
-    srcWave.setBounds (waves.removeFromTop (91)); waves.removeFromTop (8); resWave.setBounds (waves);
-    dragTile.setBounds (tile.withTrimmedTop (99));
+    srcWave.setBounds (waves.removeFromTop (waveH)); waves.removeFromTop (8); resWave.setBounds (waves);
+    dragTile.setBounds (tile.withTrimmedTop (waveH + 8));
     r.removeFromBottom (8);
 
     // shape section
@@ -493,8 +503,12 @@ void DatLabEditor::filesDropped (const juce::StringArray& files, int x, int y)
 {
     dropHover = false;
     bool asAux = ! auxZone.isEmpty() && auxBtn.isVisible() && auxZone.contains (x, y);
+    const juce::File f (files[0]);
+    // the result dragged out and released over this window again: treat it as CHAIN (undoable),
+    // not as a fresh load that would wipe the source and its history
+    if (! asAux && f == proc.result.file && ! proc.result.empty()) { proc.chainResult(); refresh(); return; }
     juce::String err;
-    if (! proc.loadFile (juce::File (files[0]), asAux, err)) proc.status = err;
+    if (! proc.loadFile (f, asAux, err)) proc.status = err;
     refresh();
 }
 

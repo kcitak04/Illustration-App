@@ -550,27 +550,34 @@ Chans cloud (const Chans& ch, Ctx& cx, const Params& p)
     static const double BASE[8] = { 0.0297, 0.0371, 0.0411, 0.0437, 0.0533, 0.0617, 0.0713, 0.0797 };
     double dly[8]; std::vector<Ring> lines; OnePole damp[8];
     for (int k = 0; k < 8; ++k) { dly[k] = BASE[k] * sr * p["size"] * 2.2; lines.emplace_back ((size_t) (dly[k] + sr * 0.02 + 8)); }
-    Ring pre ((size_t) (p["predelay"] / 1000 * sr + 8)); Ring shim ((size_t) (sr * 0.2));
+    Ring pre ((size_t) (p["predelay"] / 1000 * sr + 8)); std::vector<Ring> shim; for (int k = 0; k < 8; ++k) shim.emplace_back ((size_t) (sr * 0.1));
     Chans src = stereoOf (ch); Chans out (2, Buf (outLen)); double shPh = 0; const double shWin = 0.08 * sr;
     for (size_t i = 0; i < outLen; ++i)
     {
         double inL = i < len ? src[0][i] : 0, inR = i < len ? src[1][i] : 0;
         pre.push ((inL + inR) * 0.5); double in = pre.read (std::max (1.0, p["predelay"] / 1000 * sr));
-        double v[8], sum = 0;
+        double v[8];
         for (int k = 0; k < 8; ++k)
         {
             double mod = std::sin (TAU * (0.11 + k * 0.07) * (double) i / sr + k) * p["mod"] * 0.004 * sr;
             v[k] = lines[(size_t) k].read (dly[k] + mod + 2);
             double g = std::pow (0.001, (dly[k] / sr) / std::max (0.1, p["decay"]));
-            v[k] = damp[k].lp (v[k], 18000 * std::pow (0.05, p["damp"]), sr) * g; sum += v[k];
+            v[k] = damp[k].lp (v[k], 18000 * std::pow (0.05, p["damp"]), sr) * g;
         }
-        // shimmer: octave-up copy of the network output fed back in
-        shim.push (sum * 0.25); shPh += (1 - 2.0) / shWin; shPh -= std::floor (shPh);
-        double s2 = shim.read (shPh * shWin + 1) * std::sin (PI * shPh) + shim.read (std::fmod (shPh + 0.5, 1.0) * shWin + 1) * std::sin (PI * std::fmod (shPh + 0.5, 1.0));
         // Hadamard mix
         double h[8]; for (int k = 0; k < 8; ++k) h[k] = v[k];
         for (int s = 1; s < 8; s <<= 1) for (int k = 0; k < 8; ++k) if (! (k & s)) { double a = h[k], b = h[k + s]; h[k] = a + b; h[k + s] = a - b; }
-        for (int k = 0; k < 8; ++k) lines[(size_t) k].push (h[k] / std::sqrt (8.0) + in * 0.35 + s2 * p["shimmer"] * 0.5);
+        // shimmer: every line's feedback is partly replaced (a) by an octave-up copy of itself. The shifter's two taps
+        // crossfade with sin^2 + cos^2 = 1, so the copy never exceeds the line and the loop gain stays <= the decay gain.
+        shPh += (1 - 2.0) / shWin; shPh -= std::floor (shPh);
+        const double ph2 = std::fmod (shPh + 0.5, 1.0), g1 = std::pow (std::sin (PI * shPh), 2), g2 = 1 - g1, a = p["shimmer"] * 0.6;
+        for (int k = 0; k < 8; ++k)
+        {
+            const double fbk = h[k] / std::sqrt (8.0);
+            shim[(size_t) k].push (fbk);
+            const double up = shim[(size_t) k].read (shPh * shWin + 1) * g1 + shim[(size_t) k].read (ph2 * shWin + 1) * g2;
+            lines[(size_t) k].push ((1 - a) * fbk + a * up + in * 0.35);
+        }
         double wl = (v[0] + v[2] + v[4] + v[6]) * 0.5, wr = (v[1] + v[3] + v[5] + v[7]) * 0.5;
         double mid = (wl + wr) * 0.5, side = (wl - wr) * 0.5 * p["width"];
         out[0][i] = (float) (inL * (1 - p["mix"]) + (mid + side) * p["mix"]);

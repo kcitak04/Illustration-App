@@ -63,7 +63,8 @@ private:
     struct Inst { juce::String token; std::shared_ptr<Handler> handler; };
     std::map<int, Inst> instances;
     int nextId = 1;
-    std::vector<std::thread> workers;
+    struct Worker { std::thread thread; std::shared_ptr<std::atomic<bool>> done; };
+    std::vector<Worker> workers;
     std::vector<juce::StreamingSocket*> open;
 };
 }

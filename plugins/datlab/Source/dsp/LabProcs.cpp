@@ -290,7 +290,7 @@ Chans revrev (const Chans& ch, Ctx& cx, const Params& p)
         const Buf& x = ch[c];
         Buf ir (n); double lp = 0;
         for (size_t i = 0; i < n; ++i) { double u = (double) i / (double) n, k = 1 - p["damp"] * 0.95 * u; lp += ((cx.rand() * 2 - 1) - lp) * k; ir[i] = (float) (lp * std::pow (0.001, u)); }
-        Buf xr (x.rbegin(), x.rend()); Buf wet = convolve (xr, ir); std::reverse (wet.begin(), wet.end());
+        Buf xr (x.rbegin(), x.rend()); Buf wet = convolve (xr, ir, &cx, (double) c / (double) ch.size(), (c + 1.0) / (double) ch.size()); std::reverse (wet.begin(), wet.end());
         Buf dry (wet.size()); std::copy (x.begin(), x.end(), dry.begin() + (long) (n - 1));
         double g = peak (x) / std::max (1e-9, peak (wet));
         for (size_t i = 0; i < wet.size(); ++i) wet[i] = (float) (wet[i] * g * p["mix"] + dry[i] * (1 - p["mix"] * 0.6));
@@ -334,7 +334,7 @@ Chans conv (const Chans& ch, Ctx& cx, const Params& p)
     for (size_t c = 0; c < ch.size(); ++c)
     {
         const Buf& x = ch[c];
-        Buf wet = convolve (x, h0[c % h0.size()]); double g = peak (x) / std::max (1e-9, peak (wet));
+        Buf wet = convolve (x, h0[c % h0.size()], &cx, (double) c / (double) ch.size(), (c + 1.0) / (double) ch.size()); double g = peak (x) / std::max (1e-9, peak (wet));
         for (size_t i = 0; i < wet.size(); ++i) wet[i] = (float) (wet[i] * g * p["mix"] + (i < x.size() ? x[i] : 0) * (1 - p["mix"]));
         cx.prog ((double) (c + 1) / (double) ch.size());
         res.push_back (std::move (wet));

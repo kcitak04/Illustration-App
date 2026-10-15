@@ -94,7 +94,7 @@ void applyPost (Chans& wet, const Chans& dry, double sr, const Shape& s)
     for (auto& x : wet) for (auto& v : x) if (! std::isfinite (v)) v = 0;
 }
 
-Result run (const Job& job, const std::function<void (double)>& progress)
+Result run (const Job& job, const std::function<void (double)>& progress, const std::function<bool()>& cancelled)
 {
     Result r; r.sr = job.sr;
     const ProcDef* def = findProc (job.procId);
@@ -102,21 +102,38 @@ Result run (const Job& job, const std::function<void (double)>& progress)
     if (job.src.empty() || job.src[0].size() < 16) { r.error = "No source sample"; return r; }
     try
     {
-        Chans src = job.src; applyPre (src, job.sr, job.shape);
-        Ctx cx; cx.sr = job.sr; cx.maxLen = (size_t) (std::max (1.0, job.shape.maxLen) * job.sr); cx.bpm = job.bpm;
+        // values from an old or damaged saved set must never reach the DSP as NaN / inf / out of range
+        Shape sh = job.shape;
+        auto fin = [] (double v, double def, double lo, double hi) { return std::isfinite (v) ? clampd (v, lo, hi) : def; };
+        sh.start = fin (sh.start, 0, 0, 1); sh.end = fin (sh.end, 1, 0, 1); if (sh.end <= sh.start) { sh.start = 0; sh.end = 1; }
+        sh.inGain = fin (sh.inGain, 0, -48, 48); sh.mix = fin (sh.mix, 1, 0, 1); sh.lowCut = fin (sh.lowCut, 20, 20, 20000);
+        sh.highCut = fin (sh.highCut, 20000, 20, 20000); sh.width = fin (sh.width, 1, 0, 2); sh.fadeIn = fin (sh.fadeIn, 0, 0, 60000);
+        sh.fadeOut = fin (sh.fadeOut, 5, 0, 60000); sh.loopXfade = fin (sh.loopXfade, 0, 0, 60000); sh.outGain = fin (sh.outGain, 0, -48, 24);
+        sh.maxLen = fin (sh.maxLen, 180, 1, 180);
+        const double bpm = std::isfinite (job.bpm) ? clampd (job.bpm, 20, 999) : 120;
+        if (! (job.sr >= 1000 && job.sr <= 768000)) { r.error = "Unsupported sample rate"; return r; }
+        Chans src = job.src; applyPre (src, job.sr, sh);
+        Ctx cx; cx.sr = job.sr; cx.maxLen = (size_t) (sh.maxLen * job.sr); cx.bpm = bpm;
         cx.aux = job.aux.empty() ? nullptr : &job.aux;
         cx.progressFn = [&] (double f) { if (progress) progress (f * 0.97); };
+        cx.cancelled = cancelled;
         Params p = defaults (*def);
         for (auto& [k, v] : job.params.v) p.v[k] = v;
-        for (auto& pd : def->params) { double v = clampd (p[pd.id], pd.min, pd.max); if (pd.isInt()) v = jsround (v); p.v[pd.id] = v; }
+        for (auto& pd : def->params)
+        {
+            double v = std::isfinite (p[pd.id]) ? clampd (p[pd.id], pd.min, pd.max) : pd.def;
+            if (pd.isInt()) v = jsround (v);
+            p.v[pd.id] = v;
+        }
+        for (auto& c : src) for (auto& v : c) if (! std::isfinite (v)) v = 0;   // a corrupt file must not poison the maths
         Chans out = def->fn (src, cx, p);
         for (auto& a : out) for (auto& v : a) if (! std::isfinite (v)) v = 0;
-        applyPost (out, src, job.sr, job.shape);
+        applyPost (out, src, job.sr, sh);
         if (out.empty() || out[0].empty()) { r.error = "The result is empty: try other settings"; return r; }
         double pk = peakAll (out);
         if (pk < 1e-6) { r.error = "The result is silent: try other settings"; return r; }
-        if (job.shape.normalize || pk > 1) { double g = 0.98 / pk; for (auto& a : out) for (auto& v : a) v = (float) (v * g); }
-        double og = std::pow (10.0, job.shape.outGain / 20);
+        if (sh.normalize || pk > 1) { double g = 0.98 / pk; for (auto& a : out) for (auto& v : a) v = (float) (v * g); }
+        double og = std::pow (10.0, sh.outGain / 20);
         if (og != 1) for (auto& a : out) for (auto& v : a) v = (float) clampd (v * og, -1, 1);
         if (progress) progress (1);
         r.ch = std::move (out);

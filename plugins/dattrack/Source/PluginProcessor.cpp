@@ -43,8 +43,9 @@ void DatTrackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
     float* L = buffer.getWritePointer (0);
     float* R = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : L;
-    core.process (L, R, buffer.getNumSamples(), getSampleRate() > 0 ? getSampleRate() : 48000.0, t, &midi);
+    core.process (L, R, buffer.getNumSamples(), getSampleRate() > 0 ? getSampleRate() : 48000.0, t, &midi, isNonRealtime());
     midi.clear();
+    audioRunning = true;
 }
 
 void DatTrackProcessor::createBrowser()
@@ -63,14 +64,27 @@ void DatTrackProcessor::createBrowser()
     keepAlive->addAndMakeVisible (*web);
     keepAlive->addToDesktop (juce::ComponentPeer::windowIsTemporary | juce::ComponentPeer::windowIgnoresKeyPresses);
     keepAlive->setVisible (false);
-    reloadPage();
+    pageSr = hostSr.load() > 0 ? hostSr.load() : 48000.0;
+    navigate();
 }
 
 void DatTrackProcessor::reloadPage()
 {
     if (! web) return;
     pageSr = hostSr.load() > 0 ? hostSr.load() : 48000.0;
-    web->goToURL (core.pageUrl (pageSr));
+    if (core.pageConnected.load() && juce::Time::currentTimeMillis() - core.lastPacketMs.load() < 1000)
+    {   // a running page saves its song first (the timer navigates once it has, or after 1 s)
+        ++core.flushRequest;
+        reloadAt = juce::Time::getMillisecondCounter() + 1000;
+        return;
+    }
+    navigate();
+}
+
+void DatTrackProcessor::navigate()
+{
+    reloadAt = 0;
+    if (web) web->goToURL (core.pageUrl (pageSr));
 }
 
 juce::WebBrowserComponent* DatTrackProcessor::attachBrowser (juce::Component& editor)
@@ -85,6 +99,11 @@ void DatTrackProcessor::detachBrowser()
     if (web && keepAlive) keepAlive->addAndMakeVisible (*web), web->setBounds (keepAlive->getLocalBounds());
 }
 
+void DatTrackProcessor::markDirty()
+{
+    updateHostDisplay (ChangeDetails().withNonParameterStateChanged (true));
+}
+
 void DatTrackProcessor::setLatency (double seconds)
 {
     core.latencySec = seconds;
@@ -93,9 +112,15 @@ void DatTrackProcessor::setLatency (double seconds)
 
 void DatTrackProcessor::timerCallback()
 {
-    if (! web) createBrowser();
+    // Start the web view only once the host really runs audio through us (or the window opens), not while
+    // Ableton's plugin scanner briefly instantiates the plugin - that would launch browser processes on every rescan.
+    if (! web && audioRunning.load()) createBrowser();
+    if (reloadAt != 0 && (core.flushAck.load() == core.flushRequest.load() || juce::Time::getMillisecondCounter() > reloadAt)) navigate();
+    // edits made in DATTRACK (or sync settings) mark the Ableton set as changed, so closing Live asks to save
+    const int edits = core.songEditsFromPage.load();
+    if (edits != editsSeen) { editsSeen = edits; markDirty(); }
     // a new host sample rate: restart the page so the AudioContext runs at it (the song survives through the plugin state)
-    if (hostSr.load() > 0 && std::abs (hostSr.load() - pageSr) > 1 && core.pageConnected.load()) reloadPage();
+    if (reloadAt == 0 && hostSr.load() > 0 && std::abs (hostSr.load() - pageSr) > 1 && core.pageConnected.load()) reloadPage();
     core.updateLink();
 }
 

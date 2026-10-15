@@ -29,13 +29,28 @@ DatLabProcessor::DatLabProcessor()
       juce::Thread ("DATLAB render")
 {
     formats.registerBasicFormats();
+    startTimerHz (10);
 }
 
 DatLabProcessor::~DatLabProcessor()
 {
     *alive = false;
-    cancelProcessing();
-    stopThread (4000);
+    stopTimer();
+    // The render polls threadShouldExit() on every progress tick, so it ends quickly. Never let JUCE force-kill
+    // the thread (TerminateThread on Windows can leave the heap locked and take Ableton down with it).
+    signalThreadShouldExit();
+    waitForThreadToExit (-1);
+}
+
+void DatLabProcessor::markDirty()
+{
+    updateHostDisplay (ChangeDetails().withNonParameterStateChanged (true));
+}
+
+void DatLabProcessor::timerCallback()
+{
+    // a take that stopped by itself (2 minute limit) still becomes the source
+    if (capPending && ! capturing.load()) stopCapture();
 }
 
 bool DatLabProcessor::isBusesLayoutSupported (const BusesLayout& l) const
@@ -57,6 +72,7 @@ void DatLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             if (auto bpm = pos->getBpm()) hostBpm = *bpm;
 
     // capture the incoming audio
+    capWriting = true;   // stopCapture() waits for this block before reading the take
     if (capturing.load() && nIn > 0)
     {
         int p = capPos.load(), m = juce::jmin (n, capBuf.getNumSamples() - p);
@@ -64,12 +80,19 @@ void DatLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         capPos = p + m;
         if (p + m >= capBuf.getNumSamples()) capturing = false;
     }
-    if (! thru.load()) buffer.clear();
-    for (int c = nIn; c < nOut; ++c) buffer.clear (c, 0, n);
+    capWriting = false;
+    // THRU passes the input; a mono input feeds both sides; everything else starts silent
+    int passed = thru.load() ? juce::jmin (nIn, nOut) : 0;
+    if (passed == 1 && nOut > 1) { buffer.copyFrom (1, 0, buffer, 0, 0, n); passed = 2; }
+    for (int c = passed; c < nOut; ++c) buffer.clear (c, 0, n);
 
     // preview
-    auto pb = std::atomic_load (&playBuf);
-    if (playing.load() != Play::none && pb && ! pb->ch.empty())
+    const juce::SpinLock::ScopedTryLockType tl (playLock);
+    if (! tl.isLocked()) return;   // the message thread is swapping the buffer right now: skip one block
+    const int req = playRequest.load();
+    if (req != playSeen) { playSeen = req; playPos = 0; }
+    auto* pb = playBuf.get();
+    if (playing.load() != Play::none && pb != nullptr && ! pb->ch.empty())
     {
         const double step = pb->sr / hostSr.load(); const size_t len = pb->ch[0].size();
         for (int i = 0; i < n; ++i)
@@ -121,6 +144,7 @@ bool DatLabProcessor::loadFile (const juce::File& file, bool asAux, juce::String
     LabSample s; s.ch = toChans (b, len); s.sr = r->sampleRate; s.name = file.getFileNameWithoutExtension(); s.file = file;
     if (asAux) { aux = std::move (s); status = "Second sample: " + aux.name; }
     else { setSource (std::move (s), false); history.clear(); }
+    markDirty();
     sendChangeMessage();
     return true;
 }
@@ -166,7 +190,7 @@ void DatLabProcessor::startProcessing()
         if (aux.empty()) { status = "This process needs a second sample (" + juce::String (d.aux) + "): drop one on the row under the knobs"; sendChangeMessage(); return; }
         job.aux = resampleTo (aux.ch, aux.sr, source.sr);
     }
-    stopThread (2000);
+    waitForThreadToExit (-1);   // the previous render already finished (busy was cleared after it returned)
     pendingJob = std::move (job); pendingName = source.name; pendingTag = d.id == "robot" && pendingJob.params.i ("mode") == 1 ? "WHSP" : juce::String (d.tag);
     busy = true; progress = 0;
     status = "Processing " + juce::String::fromUTF8 (d.name.c_str()) + "...";
@@ -179,7 +203,7 @@ void DatLabProcessor::cancelProcessing() { if (busy.load()) signalThreadShouldEx
 void DatLabProcessor::run()
 {
     const auto t0 = juce::Time::getMillisecondCounterHiRes();
-    auto r = lab::run (pendingJob, [this] (double f) { progress = (float) f; if (threadShouldExit()) throw lab::Cancelled(); });
+    auto r = lab::run (pendingJob, [this] (double f) { progress = (float) f; }, [this] { return threadShouldExit(); });
     LabSample res;
     juce::String msg;
     if (! r.error.empty()) msg = r.error == "Cancelled" ? juce::String ("Cancelled") : "Failed: " + juce::String (r.error);
@@ -196,7 +220,7 @@ void DatLabProcessor::run()
     juce::MessageManager::callAsync ([this, aliveFlag = alive, rendered = std::move (res), msg]() mutable
     {
         if (! aliveFlag->load()) return;
-        if (! rendered.empty()) { result = std::move (rendered); if (playing.load() == Play::result) stopPlay(); }
+        if (! rendered.empty()) { result = std::move (rendered); if (playing.load() == Play::result) stopPlay(); markDirty(); }
         status = msg; busy = false; sendChangeMessage();
     });
 }
@@ -234,19 +258,23 @@ void DatLabProcessor::play (Play what)
 {
     const LabSample& s = what == Play::result ? result : source;
     if (s.empty()) return;
-    auto pb = std::make_shared<PlayBuf>();
+    auto pb = std::make_unique<PlayBuf>();
     if (what == Play::source)
     {   // only the selected region
-        size_t len = s.ch[0].size(), a = (size_t) (shape.start * (double) len), b = juce::jlimit (a + 2, len, (size_t) (shape.end * (double) len));
+        size_t len = s.ch[0].size(), a = juce::jmin (len - 1, (size_t) (shape.start * (double) len)), b = juce::jlimit (a + 2, len, (size_t) (shape.end * (double) len));
+        if (b <= a + 1) return;
         for (auto& c : s.ch) pb->ch.emplace_back (c.begin() + (long) a, c.begin() + (long) b);
     }
     else pb->ch = s.ch;
     for (auto& c : pb->ch) c.push_back (0.0f);
     pb->sr = s.sr;
-    playing = Play::none;
-    std::atomic_store (&playBuf, pb);
-    playPos = 0; playFrac = 0;
-    playing = what;
+    {
+        const juce::SpinLock::ScopedLockType l (playLock);
+        std::swap (playBuf, pb);   // the old buffer is freed below, on this (message) thread
+        playFrac = 0;
+        ++playRequest;
+        playing = what;
+    }
 }
 void DatLabProcessor::stopPlay() { playing = Play::none; }
 float DatLabProcessor::playPosition() const { return playFrac.load(); }
@@ -256,7 +284,7 @@ void DatLabProcessor::startCapture()
     capSr = hostSr.load();
     if (capBuf.getNumSamples() != (int) (capSr * 120)) capBuf.setSize (2, (int) (capSr * 120));
     capBuf.clear();
-    capPos = 0; capturing = true;
+    capPos = 0; capturing = true; capPending = true;
     status = "Capturing the track input... press CAPTURE again to stop (max 2 min)";
     sendChangeMessage();
 }
@@ -264,12 +292,15 @@ void DatLabProcessor::startCapture()
 void DatLabProcessor::stopCapture()
 {
     capturing = false;
+    capPending = false;
+    while (capWriting.load()) juce::Thread::yield();   // the audio thread may still be finishing a block
     const int len = capPos.load();
     if (len < 64) { status = "Nothing captured: is audio playing into this track?"; sendChangeMessage(); return; }
     LabSample s; s.ch = toChans (capBuf, len); s.sr = capSr; s.name = "CAPTURE " + juce::Time::getCurrentTime().formatted ("%H%M%S");
     auto folder = renderFolder().getChildFile ("Captures"); folder.createDirectory();
     s.file = writeWav (s, folder.getNonexistentChildFile (s.name, ".wav", true));
     setSource (std::move (s), true);
+    markDirty();
 }
 
 // ---- state (saved in the Ableton set) ----

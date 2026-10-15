@@ -37,17 +37,21 @@ public:
     void detachBrowser();
     void reloadPage();
     void setLatency (double seconds);
+    void markDirty();   // tells the host the plugin state changed (Ableton then offers to save the set)
 
 private:
     void timerCallback() override;
     void createBrowser();
+    void navigate();
+    juce::uint32 reloadAt = 0;   // pending reload (waiting for the page to save its song)
 
     struct KeepAlive : juce::Component { void resized() override { for (auto* c : getChildren()) c->setBounds (getLocalBounds()); } };
     std::unique_ptr<KeepAlive> keepAlive;
     std::unique_ptr<juce::WebBrowserComponent> web;
     std::atomic<double> hostSr { 0 };
+    std::atomic<bool> audioRunning { false };
+    int editsSeen = 0;
     double pageSr = 0;
-    juce::String pendingSong;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DatTrackProcessor)
 };

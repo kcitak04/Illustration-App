@@ -74,6 +74,13 @@ LocalServer::LocalServer()
     // a fixed port keeps the page's origin (and its local storage) stable between sessions
     for (int p = 47811; p < 47851; ++p)
     {
+        // JUCE listeners use SO_REUSEADDR, and on Windows that lets a second process bind a port that is already
+        // listening (connections would then be split between the two). So first check nobody answers on it -
+        // e.g. Ableton's plugin scanner or another DAW with its own DATTRACK.
+        {
+            juce::StreamingSocket probe;
+            if (probe.connect ("127.0.0.1", p, 150)) continue;
+        }
         auto s = std::make_unique<juce::StreamingSocket>();
         if (s->createListener (p, "127.0.0.1")) { listener = std::move (s); port = p; break; }
     }
@@ -85,13 +92,13 @@ LocalServer::~LocalServer()
     stopping = true;
     if (listener) listener->close();
     if (acceptThread.joinable()) acceptThread.join();
-    std::vector<std::thread> ws;
+    std::vector<Worker> ws;
     {
         std::lock_guard<std::mutex> l (lock);
         for (auto* s : open) s->close();
         ws.swap (workers);
     }
-    for (auto& t : ws) if (t.joinable()) t.join();
+    for (auto& w : ws) if (w.thread.joinable()) w.thread.join();
 }
 
 int LocalServer::registerInstance (const juce::String& token, Handler h)
@@ -123,8 +130,12 @@ void LocalServer::acceptLoop()
         std::unique_ptr<juce::StreamingSocket> c (listener->waitForNextConnection());
         if (! c) { if (stopping.load()) break; juce::Thread::sleep (20); continue; }
         std::lock_guard<std::mutex> l (lock);
+        // join connections that have finished (a long session opens many)
+        for (auto it = workers.begin(); it != workers.end();)
+            if (it->done->load()) { it->thread.join(); it = workers.erase (it); } else ++it;
         open.push_back (c.get());
-        workers.emplace_back ([this, s = c.release()] { serve (std::unique_ptr<juce::StreamingSocket> (s)); });
+        auto done = std::make_shared<std::atomic<bool>> (false);
+        workers.push_back ({ std::thread ([this, done, s = c.release()] { serve (std::unique_ptr<juce::StreamingSocket> (s)); *done = true; }), done });
     }
 }
 

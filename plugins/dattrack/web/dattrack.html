@@ -2688,7 +2688,8 @@ function unb64(str, T) { const bin = atob(str), u8 = new Uint8Array(bin.length);
 function songToObj(raw) {
   const enc = raw ? (a => a) : b64, s = song;
   return {
-    format: 'mobtrack', version: 3,   // internal format tag (kept from the app's first name so all old projects still open) title: s.title, bpm: s.bpm, speed: s.speed, order: s.order.slice(),
+    // internal format tag (kept from the app's first name so all old projects still open)
+    format: 'mobtrack', version: 3, title: s.title, bpm: s.bpm, speed: s.speed, order: s.order.slice(),
     patterns: s.patterns.map(p => ({ rows: p.rows, data: enc(p.data) })),
     instruments: s.instruments.slice(1).map(i => ({ type: i.type, name: i.name, preset: i.preset || '', sampleId: i.sampleId, slices: i.slices.slice(), p: Object.assign({}, i.p) })),
     samples: [...s.samples.values()].filter(x => s.instruments.some(i => i && i.sampleId === x.id)).map(x => ({ id: x.id, sr: x.sr, name: x.name, ch: x.ch.map(enc) })),

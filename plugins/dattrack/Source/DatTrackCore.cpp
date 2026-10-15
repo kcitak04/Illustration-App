@@ -72,10 +72,17 @@ HttpResponse DatTrackCore::handle (const HttpRequest& r)
     if (route == "a" && r.method == "POST") return onAudio (r);
     if (route == "state")
     {
-        if (r.method == "POST") { std::lock_guard<std::mutex> l (songLock); songJson = juce::String::fromUTF8 ((const char*) r.body.getData(), (int) r.body.getSize()); return HttpResponse::empty(); }
+        if (r.method == "POST")
+        {
+            if (r.body.getSize() < 2) return HttpResponse::empty (400);
+            { std::lock_guard<std::mutex> l (songLock); songJson = juce::String::fromUTF8 ((const char*) r.body.getData(), (int) r.body.getSize()); }
+            ++songEditsFromPage;
+            return HttpResponse::empty();
+        }
         std::lock_guard<std::mutex> l (songLock);
         return songJson.isEmpty() ? HttpResponse::empty() : HttpResponse::text (songJson);
     }
+    if (route == "flushed") { flushAck = flushRequest.load(); return HttpResponse::empty(); }
     if (route == "save" && r.method == "POST")
     {
         auto name = juce::File::createLegalFileName (r.q ("name", "export.wav"));
@@ -116,15 +123,20 @@ HttpResponse DatTrackCore::onAudio (const HttpRequest& r)
     juce::String out;
     out << "{\"mode\":" << mode.load() << ",\"playing\":" << (a.playing ? "true" : "false") << ",\"bpm\":" << json (a.bpm)
         << ",\"r\":" << json (a.rate) << ",\"f\":" << json (a.f) << ",\"ppq\":" << json (a.ppq) << ",\"jump\":" << a.jump << ",\"song\":" << seq
-        << ",\"midi\":[" << midi << "],\"stop\":" << pendingStop.exchange (0) << "}";
+        << ",\"midi\":[" << midi << "],\"stop\":" << pendingStop.exchange (0) << ",\"flush\":" << flushRequest.load() << "}";
     return HttpResponse::text (out);
 }
 
 // ---------------- audio thread ----------------
-void DatTrackCore::process (float* L, float* R, int n, double hostSr, const HostTransport& t, const juce::MidiBuffer* midi)
+void DatTrackCore::process (float* L, float* R, int n, double hostSr, const HostTransport& t, const juce::MidiBuffer* midi, bool offline)
 {
     // the buffer gets the latency minus 100 ms; that 100 ms is the page's head start for cueing rows on time
     bridge.setTargetFill (juce::jmax (0.05, latencySec.load() - 0.1));
+    if (offline && juce::Time::currentTimeMillis() - lastPacketMs.load() < 2000)
+    {   // the export runs at the page's (real-time) pace instead of skipping audio; give up after 3 s if the page stalls
+        const auto t0 = juce::Time::getMillisecondCounter();
+        while (! bridge.hasAhead (n, hostSr) && juce::Time::getMillisecondCounter() - t0 < 3000) juce::Thread::sleep (1);
+    }
     auto st = bridge.pull (L, R, n, hostSr);
     audioRunning = st.running; fillSec = st.fillSec; underruns = bridge.underruns;
     hostBpm = t.valid ? t.bpm : 0.0;

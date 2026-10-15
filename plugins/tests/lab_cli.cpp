@@ -32,6 +32,48 @@ int main (int argc, char** argv)
         std::cout << "}\n";
         return 0;
     }
+    if (argc >= 2 && std::string (argv[1]) == "--fuzz")
+    {   // robustness: every process with odd inputs (tiny, mono, silent, DC, full-scale noise) and random / extreme parameters
+        const int rounds = argc > 2 ? std::atoi (argv[2]) : 20;
+        uint32_t s = 7; auto rnd = [&] { s = s * 1664525u + 1013904223u; return (double) s / 4294967296.0; };
+        int runs = 0, errors = 0;
+        for (int r = 0; r < rounds; ++r)
+        {
+            const double sr = r % 3 == 0 ? 22050 : r % 3 == 1 ? 44100 : 96000;
+            const size_t lens[] = { 16, 17, 64, 100, 513, 1000, 4096, 22050, 60000 };
+            const size_t len = lens[(size_t) (rnd() * 9)];
+            const int nch = rnd() < 0.5 ? 1 : 2, kind = (int) (rnd() * 6);
+            lab::Chans src ((size_t) nch, lab::Buf (len));
+            for (auto& c : src) for (size_t i = 0; i < len; ++i)
+                c[i] = (float) (kind == 0 ? 0.0 : kind == 1 ? 0.5 : kind == 2 ? (rnd() * 2 - 1) : kind == 3 ? std::sin ((double) i * 0.05) : kind == 4 ? (i == len / 2 ? 1.0 : 0.0) : (i % 7 == 0 ? NAN : i % 11 == 0 ? INFINITY : 0.3));
+            for (auto& d : lab::procs())
+            {
+                lab::Params p = lab::defaults (d);
+                for (auto& pd : d.params)
+                {
+                    double u = rnd(); double v = u < 0.2 ? pd.min : u < 0.4 ? pd.max : pd.min + (pd.max - pd.min) * rnd();
+                    p.v[pd.id] = pd.isInt() ? std::round (v) : v;
+                    if (rnd() < 0.03) p.v[pd.id] = rnd() < 0.5 ? NAN : (rnd() < 0.5 ? INFINITY : -1e300);   // damaged saved set
+                }
+                lab::Job job; job.src = src; job.sr = sr; job.procId = d.id; job.params = p; job.bpm = 40 + rnd() * 200;
+                job.shape.maxLen = 20;   // keep fuzzing fast
+                job.shape.mix = rnd(); job.shape.revIn = rnd() < 0.3; job.shape.revOut = rnd() < 0.3; job.shape.trim = rnd() < 0.3;
+                job.shape.loopXfade = rnd() < 0.3 ? rnd() * 2000 : 0; job.shape.lowCut = rnd() < 0.3 ? 20 + rnd() * 1000 : 20; job.shape.highCut = rnd() < 0.3 ? 500 + rnd() * 10000 : 20000;
+                job.shape.width = rnd() * 2; job.shape.start = rnd() < 0.3 ? rnd() * 0.5 : 0; job.shape.end = rnd() < 0.3 ? 0.5 + rnd() * 0.5 : 1;
+                if (rnd() < 0.15) { job.shape.start = 0.5; job.shape.end = 0.5 + rnd() * 0.02; }   // tiny region (a few samples)
+                if (rnd() < 0.05) { job.shape.maxLen = NAN; job.shape.width = INFINITY; job.shape.fadeOut = NAN; job.shape.start = NAN; }
+                if (rnd() < 0.05) job.bpm = NAN;
+                if (! d.aux.empty()) { size_t al = lens[(size_t) (rnd() * 9)]; job.aux = lab::Chans ((size_t) (rnd() < 0.5 ? 1 : 2), lab::Buf (al, 0.25f)); }
+                auto res = lab::run (job, nullptr);
+                ++runs;
+                if (! res.error.empty() && res.error.find ("silent") == std::string::npos && res.error.find ("empty") == std::string::npos) { ++errors; std::printf ("error %s len %zu ch %d kind %d: %s\n", d.id.c_str(), len, nch, kind, res.error.c_str()); }
+                for (auto& c : res.ch) for (float v : c) if (! std::isfinite (v) || std::abs (v) > 1.0001f) { std::printf ("BAD SAMPLE %s len %zu\n", d.id.c_str(), len); ++errors; break; }
+            }
+            std::printf ("round %d done (sr %.0f len %zu ch %d kind %d)\n", r, sr, len, nch, kind); std::fflush (stdout);
+        }
+        std::printf ("%d runs, %d problems\n", runs, errors);
+        return errors ? 1 : 0;
+    }
     if (argc == 2 && std::string (argv[1]) == "--smoke")
     {   // every process x every MODE option through the full engine, on a 2 s stereo test signal
         const double sr = 44100; const size_t n = (size_t) (sr * 2);

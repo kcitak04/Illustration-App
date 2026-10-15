@@ -1,6 +1,6 @@
 // Ring buffer between the web view's AudioContext (producer, arbitrary clock) and the host's audio callback (consumer).
 // Frames are addressed by their AudioContext frame number, so sync code can say "context frame F plays at host sample S".
-// A slow proportional controller resamples by a few hundred ppm to keep the fill level at the target despite clock drift.
+// A PI controller resamples slightly (the web view's clock can be off by up to a few percent) to keep the fill level at the target.
 #pragma once
 #include <juce_core/juce_core.h>
 #include <vector>
@@ -51,8 +51,15 @@ public:
             st.ratio = r0; return st;
         }
         double fill = (double) writeFrame - readFrame;
-        if (fill > target * 3.0 || fill < -0.03 * ctxSr)
-        {   // far too much buffered, or the page fell behind the read head: re-centre (the sync code re-cues)
+        if (fill < -target)
+        {   // the page stopped sending (reload, paused web view...): go silent and re-buffer once audio flows again.
+            // (Re-centring here would replay the last buffer over and over: a machine-gun stutter.)
+            running = false; primed = false; firstFrame = writeFrame; stalls++;
+            juce::FloatVectorOperations::clear (L, n); juce::FloatVectorOperations::clear (R, n);
+            st.ratio = r0; return st;
+        }
+        if (fill > target * 3.0)
+        {   // far too much buffered (a burst after a hiccup): skip ahead to the target (the sync code re-cues)
             readFrame = (double) writeFrame - target; fill = target; skips++; st.readFrame = readFrame;
         }
         // PI controller on the smoothed fill level: the integral learns the page clock's drift
@@ -64,7 +71,8 @@ public:
         // The read head never stops: frames that have not arrived yet play as silence, so the mapping
         // context frame <-> host sample stays continuous and the sync survives a dropout.
         const bool shortNow = fill < (double) n * ratio + 2;
-        if (shortNow) underruns++;
+        if (shortNow && ! wasShort) underruns++;   // count dropouts, not blocks
+        wasShort = shortNow;
         for (int i = 0; i < n; ++i)
         {
             const double fl = std::floor (readFrame); const auto i0 = (juce::int64) fl; const float f = (float) (readFrame - fl);
@@ -78,9 +86,20 @@ public:
         return st;
     }
 
+    // Offline rendering (DAW export): true once the page has rendered enough to fill the next n host samples
+    // while keeping the buffer at its target, so the export consumes audio no faster than the page makes it.
+    bool hasAhead (int n, double hostSr)
+    {
+        const juce::SpinLock::ScopedLockType l (lock);
+        if (writeFrame < 0) return false;
+        const double target = targetSec * ctxSr;
+        if (! running) return (double) (writeFrame - firstFrame) >= target;
+        return (double) writeFrame - readFrame >= target + (double) n * ctxSr / hostSr + 2;
+    }
+
     double contextRate() const { return ctxSr; }
     juce::int64 framesWritten() const { return writeFrame; }
-    int underruns = 0, skips = 0, resets = 0;
+    int underruns = 0, skips = 0, resets = 0, stalls = 0;
 
 private:
     static constexpr juce::int64 CAP = 1 << 18;   // ~5 s at 48 kHz
@@ -88,6 +107,6 @@ private:
     juce::SpinLock lock;
     juce::int64 writeFrame = -1, firstFrame = 0;
     double readFrame = 0, ctxSr = 48000, targetSec = 0.15, errSm = 0, integ = 0;
-    bool running = false, primed = false;
+    bool running = false, primed = false, wasShort = false;
 };
 }

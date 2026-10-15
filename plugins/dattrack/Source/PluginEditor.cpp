@@ -10,7 +10,7 @@ DatTrackEditor::DatTrackEditor (DatTrackProcessor& p) : AudioProcessorEditor (p)
         addAndMakeVisible (b);
         b.setClickingTogglesState (false);
         b.setTooltip (tip);
-        b.onClick = [this, m] { proc.core.mode = (int) m; proc.core.updateLink(); refresh(); };
+        b.onClick = [this, m] { proc.core.mode = (int) m; proc.core.updateLink(); proc.markDirty(); refresh(); };
     };
     modeBtn (offBtn, SyncMode::off, "DATTRACK plays on its own clock and tempo");
     modeBtn (slaveBtn, SyncMode::slave, "Ableton is the master: DATTRACK follows its tempo, play/stop and position (1 beat = 4 rows)");
@@ -18,12 +18,12 @@ DatTrackEditor::DatTrackEditor (DatTrackProcessor& p) : AudioProcessorEditor (p)
                                           "In Live: Preferences > Link, Tempo & MIDI > Link ON and Start Stop Sync ON, then switch on LINK in the control bar.");
     addAndMakeVisible (midiBtn);
     midiBtn.setTooltip ("Play the selected DATTRACK instrument from the MIDI notes of this track");
-    midiBtn.onClick = [this] { proc.core.midiToTracker = ! proc.core.midiToTracker.load(); refresh(); };
+    midiBtn.onClick = [this] { proc.core.midiToTracker = ! proc.core.midiToTracker.load(); proc.markDirty(); refresh(); };
 
     addAndMakeVisible (latency);
     latency.setTooltip ("Audio buffer between DATTRACK and Ableton. Ableton compensates it automatically; raise it if you hear dropouts.");
     latency.addItem ("150 ms", 1); latency.addItem ("250 ms", 2); latency.addItem ("400 ms", 3); latency.addItem ("700 ms", 4);
-    latency.onChange = [this] { const double v[] = { 0.15, 0.25, 0.4, 0.7 }; proc.setLatency (v[juce::jlimit (0, 3, latency.getSelectedId() - 1)]); };
+    latency.onChange = [this] { const double v[] = { 0.15, 0.25, 0.4, 0.7 }; proc.setLatency (v[juce::jlimit (0, 3, latency.getSelectedId() - 1)]); proc.markDirty(); };
 
     addAndMakeVisible (offset);
     offset.setSliderStyle (juce::Slider::LinearHorizontal);
@@ -32,7 +32,7 @@ DatTrackEditor::DatTrackEditor (DatTrackProcessor& p) : AudioProcessorEditor (p)
     offset.setTextValueSuffix (" ms");
     offset.setDoubleClickReturnValue (true, 0);
     offset.setTooltip ("Fine-tune the sync: positive = DATTRACK earlier");
-    offset.onValueChange = [this] { proc.core.offsetMs = offset.getValue(); };
+    offset.onValueChange = [this] { proc.core.offsetMs = offset.getValue(); proc.markDirty(); };
     offsetLabel.setText ("NUDGE", juce::dontSendNotification); offsetLabel.setFont (LookAndFeel::font (10.5f, true));
     offsetLabel.setColour (juce::Label::textColourId, col::dim); addAndMakeVisible (offsetLabel);
 
@@ -53,7 +53,10 @@ DatTrackEditor::DatTrackEditor (DatTrackProcessor& p) : AudioProcessorEditor (p)
 
     setResizable (true, true);
     setResizeLimits (900, 560, 2400, 1600);
-    setSize (1200, 800);
+    // fit small / scaled laptop screens (Ableton can't show a plugin window bigger than the display)
+    auto area = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay() != nullptr
+                    ? juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()->userArea : juce::Rectangle<int> (0, 0, 1400, 900);
+    setSize (juce::jlimit (900, 1200, area.getWidth() - 60), juce::jlimit (560, 800, area.getHeight() - 110));
     refresh();
     startTimerHz (4);
 }

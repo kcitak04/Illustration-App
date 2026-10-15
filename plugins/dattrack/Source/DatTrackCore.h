@@ -33,8 +33,9 @@ public:
     juce::String pageUrl (double hostSr) const;
     bool serverOk() const;
 
-    // audio thread: renders the page's audio and runs the sync logic
-    void process (float* L, float* R, int n, double hostSr, const HostTransport&, const juce::MidiBuffer* midi);
+    // audio thread: renders the page's audio and runs the sync logic. offline = the DAW renders faster than
+    // real time (export / freeze): then each block waits until the page has made its audio, so nothing is lost.
+    void process (float* L, float* R, int n, double hostSr, const HostTransport&, const juce::MidiBuffer* midi, bool offline = false);
     int latencySamples (double hostSr) const { return (int) std::round (latencySec.load() * hostSr); }
 
     // settings (message thread)
@@ -46,6 +47,9 @@ public:
     // song (JSON .mtk project) - saved in the Ableton set
     juce::String getSongJson() const { std::lock_guard<std::mutex> l (songLock); return songJson; }
     void setSongFromHost (const juce::String& json);
+    std::atomic<int> songEditsFromPage { 0 };   // bumped when the page saves an edited song (the set needs saving)
+    // before a page reload: ask the page to save its song; flushAck catches up with flushRequest when it has
+    std::atomic<int> flushRequest { 0 }, flushAck { 0 };
 
     // status for the GUI
     std::atomic<bool> pageConnected { false }, dtPlaying { false }, audioRunning { false };

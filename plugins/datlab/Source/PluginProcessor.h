@@ -12,7 +12,7 @@ struct LabSample
     double seconds() const { return empty() ? 0 : (double) ch[0].size() / sr; }
 };
 
-class DatLabProcessor : public juce::AudioProcessor, public juce::ChangeBroadcaster, private juce::Thread
+class DatLabProcessor : public juce::AudioProcessor, public juce::ChangeBroadcaster, private juce::Thread, private juce::Timer
 {
 public:
     DatLabProcessor();
@@ -82,14 +82,23 @@ public:
 
     juce::AudioFormatManager formats;
 
+    // tells the host the plugin state changed, so Ableton offers to save the set
+    void markDirty();
+
 private:
     void run() override;   // background render
+    void timerCallback() override;
     static juce::File writeWav (const LabSample&, const juce::File&);
 
+    // Preview buffer: swapped by the message thread under a lock the audio thread only try-locks,
+    // so the audio thread never blocks and never frees a (possibly huge) buffer.
     struct PlayBuf { lab::Chans ch; double sr = 44100; };
-    std::shared_ptr<PlayBuf> playBuf;               // accessed with std::atomic_load / store
+    std::unique_ptr<PlayBuf> playBuf;
+    juce::SpinLock playLock;
     std::atomic<Play> playing { Play::none };
-    double playPos = 0; std::atomic<float> playFrac { 0 };
+    std::atomic<int> playRequest { 0 };             // bumped by play(); the audio thread then rewinds
+    int playSeen = 0; double playPos = 0;           // audio thread only
+    std::atomic<float> playFrac { 0 };
     std::atomic<double> hostSr { 44100 };
 
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
@@ -97,6 +106,8 @@ private:
     lab::Job pendingJob; juce::String pendingName, pendingTag;
 
     juce::AudioBuffer<float> capBuf; std::atomic<int> capPos { 0 }; std::atomic<bool> capturing { false }; double capSr = 0;
+    bool capPending = false;                        // a take is recording or waiting to become the source
+    std::atomic<bool> capWriting { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DatLabProcessor)
 };

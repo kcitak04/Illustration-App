@@ -23,6 +23,8 @@ int main (int argc, char** argv)
     const int block = 256;
 
     dat::DatTrackCore core;
+    // a song saved in the "Ableton set" (as setStateInformation would hand it over before the page loads)
+    if (auto songFile = arg ("--song-file", ""); songFile.isNotEmpty()) core.setSongFromHost (juce::File (songFile).loadFileAsString());
     core.mode = modeS == "master" ? 2 : modeS == "off" ? 0 : 1;
     core.latencySec = arg ("--latency", "0.25").getDoubleValue();
     core.updateLink();
@@ -41,8 +43,10 @@ int main (int argc, char** argv)
     // a second Link peer standing in for Ableton Live (Link + Start Stop Sync on)
     std::unique_ptr<ableton::Link> peer;
     if (args.contains ("--link-peer")) { peer = std::make_unique<ableton::Link> (100.0); peer->enableStartStopSync (true); peer->enable (true); }
-    double ppq = 0; juce::int64 samples = 0; const auto start = juce::Time::getMillisecondCounterHiRes();
-    bool jumped = false;
+    const bool offline = args.contains ("--offline");     // like Ableton's export: no real-time pacing
+    double ppq = arg ("--start-ppq", "0").getDoubleValue(); juce::int64 samples = 0; const auto start = juce::Time::getMillisecondCounterHiRes();
+    bool jumped = false, flushed = false;
+    const double flushAt = arg ("--flush-at", "1e9").getDoubleValue();   // like RELOAD: ask the page to save before reloading
     juce::String transportLog;
     const double clock = 1.0 + drift * 1e-6;   // host audio clock vs. wall clock
     while ((double) samples / sr < dur)
@@ -51,11 +55,13 @@ int main (int argc, char** argv)
         dat::HostTransport tr; tr.valid = true; tr.bpm = bpm; tr.playing = t >= playAt && t < stopAt;
         if (tr.playing && ! jumped && t >= jumpAt) { jumped = true; ppq = jumpTo; transportLog << "jump " << t << "\n"; }
         tr.ppq = ppq;
-        core.process (L.data(), R.data(), block, sr, tr, nullptr);
+        if (! flushed && t >= flushAt) { flushed = true; ++core.flushRequest; std::cout << "FLUSH requested at " << t << std::endl; }
+        core.process (L.data(), R.data(), block, sr, tr, nullptr, offline);
         if (tr.playing) ppq += block / sr * bpm / 60.0;
         for (int i = 0; i < block; ++i) { out.push_back (L[(size_t) i]); out.push_back (R[(size_t) i]); }
         samples += block;
-        if (followProducer)
+        if (offline) {}
+        else if (followProducer)
         {   // the host clock follows the page's clock (ideal clock domains): wait until the page has rendered ahead
             const auto t1 = juce::Time::getMillisecondCounterHiRes();
             while (core.debugFramesWritten() - firstWritten < samples + (juce::int64) ((core.latencySec.load() - 0.1) * sr) + block
@@ -77,6 +83,8 @@ int main (int argc, char** argv)
     }
     std::ofstream o (arg ("--out", "out.f32").toStdString(), std::ios::binary);
     o.write ((const char*) out.data(), (std::streamsize) (out.size() * sizeof (float)));
-    std::cout << "DONE underruns " << core.underruns.load() << " song " << core.getSongJson().length() << " export " << core.getLastExport().getFullPathName() << std::endl;
+    std::cout << "DONE underruns " << core.underruns.load() << " song " << core.getSongJson().length() << " export " << core.getLastExport().getFullPathName()
+              << " edits " << core.songEditsFromPage.load() << " flush " << core.flushRequest.load() << "/" << core.flushAck.load() << " wall " << (juce::Time::getMillisecondCounterHiRes() - start) / 1000.0 << std::endl;
+    if (auto out2 = arg ("--song-out", ""); out2.isNotEmpty()) juce::File (out2).replaceWithText (core.getSongJson());
     return 0;
 }

@@ -8,7 +8,8 @@
   'use strict';
   const Q = new URLSearchParams(location.search), INST = Q.get('i') || '0', TOKEN = Q.get('t') || '', SR = +Q.get('sr') || 0;
   const url = (route, extra) => location.origin + '/' + route + '/' + INST + '?t=' + TOKEN + (extra || '');
-  const DT = window.DTVST = { inst: INST, ctx: null, host: null, songSeq: -1, jumpSeen: -1, mixBpm: 0, lastSpeed: 0, slaving: false, lockBpm: 0, lastDirty: -1, lastPush: 0, started: false, log: [] };
+  const DT = window.DTVST = { inst: INST, ctx: null, host: null, songSeq: -1, jumpSeen: -1, mixBpm: 0, lastSpeed: 0, slaving: false, lockBpm: 0,
+    hostSongApplied: false, lastDirty: -1, dirtySeen: -1, dirtyAt: 0, started: false, log: [] };
   const say = m => { try { if (typeof toast === 'function') toast(m, 4000); } catch (e) { } };
 
   // ---------------------------------------------------------------- exports -> plugin (Music/DATTRACK)
@@ -143,7 +144,8 @@
   const hostTime = (beat, j) => j.f / engine.ctx.sampleRate + (beat - j.ppq) * 60 / j.cb;
   function startAtHost(j) {
     const total = songRows(), rowSec = 60 / j.cb / 4, ctx = engine.ctx;
-    let r = Math.ceil(j.ppq * 4 - 1e-6), t = hostTime(r / 4, j);
+    // count-in / pre-roll: Ableton reports a negative position; the song starts at row 0 on the downbeat
+    let r = Math.max(0, Math.ceil(j.ppq * 4 - 1e-6)), t = hostTime(r / 4, j);
     while (t < ctx.currentTime + 0.04) { r++; t += rowSec; }
     const p = rowToPos(((r % total) + total) % total);
     startAt(p.order, p.row, t);
@@ -166,6 +168,7 @@
   function onHost(j) {
     DT.host = j;
     if (j.song !== DT.songSeq) { const first = DT.songSeq < 0; DT.songSeq = j.song; if (!first) loadHostSong(); }
+    if (j.flush && j.flush !== DT.flushSeen) { DT.flushSeen = j.flush; flushForReload(); }
     if (!ready()) return;
     if (j.midi && j.midi.length) for (const [st, note, vel] of j.midi) {
       const n = note - 12;   // MIDI 60 (C4) = DATTRACK C-4 (48)
@@ -198,19 +201,34 @@
     if (sched.playing && q.length) { const e = q[q.length - 1]; s += '&ab=' + (posToRow(e.order, e.row) / 4).toFixed(4) + '&at=' + e.t.toFixed(6); }
     fwd.postMessage({ type: 'info', q: s });
   }
-  // mirror the song into the plugin (saved with the Ableton set), at most every 2 s after a change
-  function pushState() {
+  // Mirror the song into the plugin (it is saved with the Ableton set). Never before the song saved in the set has
+  // been applied - the default song must not overwrite it - and only once the edits have paused for a moment
+  // (serialising a song with samples is not free). force: the page is going away, send now.
+  function pushState(force) {
+    if (!DT.hostSongApplied || !ready()) return;
     const now = Date.now();
-    if (dirty === DT.lastDirty || now - DT.lastPush < 2000) return;
-    DT.lastDirty = dirty; DT.lastPush = now;
-    try { fetch(url('state'), { method: 'POST', body: JSON.stringify(songToObj(false)) }); } catch (e) { }
+    if (dirty !== DT.dirtySeen) { DT.dirtySeen = dirty; DT.dirtyAt = now; }
+    if (dirty === DT.lastDirty || (!force && now - DT.dirtyAt < 1000)) return;
+    let body;
+    try { body = JSON.stringify(songToObj(false)); } catch (e) { return; }
+    DT.lastDirty = dirty;
+    // unloading: a beacon survives the page (but only up to ~64 KB); otherwise a normal POST
+    if (force && body.length < 60000 && navigator.sendBeacon && navigator.sendBeacon(url('state'), new Blob([body], { type: 'application/json' }))) return;
+    return fetch(url('state'), { method: 'POST', body, keepalive: body.length < 60000 }).catch(() => { DT.lastDirty = -1; });
   }
+  // the plugin is about to reload the page (RELOAD, new sample rate): save now, then acknowledge
+  async function flushForReload() {
+    try { await pushState(true); } catch (e) { }
+    fetch(url('flushed')).catch(() => { });
+  }
+  setInterval(() => pushState(false), 1000);   // independent of the audio stream (it may be paused)
+  window.addEventListener('pagehide', () => pushState(true));
   async function loadHostSong() {
     try {
       const r = await fetch(url('state'));
       if (r.status !== 200) return false;
       setSong(songFromObj(await r.json()));
-      DT.lastDirty = dirty; DT.lastPush = Date.now();
+      DT.lastDirty = DT.dirtySeen = dirty;
       return true;
     } catch (e) { say('Could not load the song from the plugin: ' + e.message); return false; }
   }
@@ -223,6 +241,8 @@
     for (let i = 0; i < 200 && !ready(); i++) await new Promise(r => setTimeout(r, 50));
     if (!ready()) return;
     await loadHostSong();
+    DT.lastDirty = DT.dirtySeen = dirty;   // the song as loaded (or the fresh default) is not an edit
+    DT.hostSongApplied = true;
     DT.started = true;
     // the browser may still hold the context until the first click (macOS autoplay policy)
     const resume = () => { if (engine.ctx && engine.ctx.state !== 'running') engine.ctx.resume(); };
