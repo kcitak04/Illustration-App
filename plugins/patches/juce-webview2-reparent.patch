@@ -1,0 +1,17 @@
+diff --git a/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp b/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
+index ddd7343..016bd40 100644
+--- a/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
++++ b/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
+@@ -606,6 +606,12 @@ public:
+ 
+     void componentPeerChanged() override
+     {
++        // DATTRACK patch: a WebView2 that moves to another window (plugin editor <-> hidden host window)
++        // must be re-parented, otherwise it keeps drawing into the old HWND.
++        if (webViewController != nullptr)
++            if (auto* peer = getPeer())
++                webViewController->put_ParentWindow ((HWND) peer->getNativeHandle());
++
+         componentMovedOrResized (true, true);
+     }
+ 

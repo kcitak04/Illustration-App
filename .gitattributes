@@ -1,0 +1,2 @@
+plugins/patches/*.patch -text
+plugins/dattrack/web/dattrack.html -text

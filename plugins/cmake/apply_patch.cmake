@@ -1,0 +1,10 @@
+# Applies a patch to a FetchContent checkout once (re-configures are no-ops).
+execute_process(COMMAND git apply --reverse --check --ignore-whitespace "${PATCH}" WORKING_DIRECTORY "${DIR}" RESULT_VARIABLE already OUTPUT_QUIET ERROR_QUIET)
+if(already EQUAL 0)
+    message(STATUS "Patch already applied: ${PATCH}")
+    return()
+endif()
+execute_process(COMMAND git apply --ignore-whitespace "${PATCH}" WORKING_DIRECTORY "${DIR}" RESULT_VARIABLE res)
+if(NOT res EQUAL 0)
+    message(FATAL_ERROR "Could not apply ${PATCH}")
+endif()
