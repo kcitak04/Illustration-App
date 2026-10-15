@@ -157,8 +157,8 @@ template <typename V> inline double lerpAt (const V& x, double p)
 }
 inline void fades (Buf& a, double fi, double fo)
 {
-    for (size_t i = 0; (double) i < fi && i < a.size(); ++i) a[i] = (float) (a[i] * (i / fi));
-    for (size_t i = 0; (double) i < fo && i < a.size(); ++i) a[a.size() - 1 - i] = (float) (a[a.size() - 1 - i] * (i / fo));
+    for (size_t i = 0; (double) i < fi && i < a.size(); ++i) a[i] = (float) (a[i] * ((double) i / fi));
+    for (size_t i = 0; (double) i < fo && i < a.size(); ++i) a[a.size() - 1 - i] = (float) (a[a.size() - 1 - i] * ((double) i / fo));
 }
 
 // Per-channel state handed to an STFT frame callback

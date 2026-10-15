@@ -1,5 +1,9 @@
 # Cover Studio
 
+> **Also in this repository:** [`plugins/`](plugins/README.md) has two **Ableton Live plugins** (VST3, plus AU on macOS):
+> - **DATLAB**, DATTRACK's Sample Lab with 51 processes and drag-and-drop of the result into Ableton.
+> - **DATTRACK**, the tracker itself, with master/slave sync.
+
 An Android app for designing album covers with a stylus. It has two studios that share one square artboard:
 
 - **Vector Studio** works like Adobe Illustrator. You draw editable vector artwork with pressure-sensitive strokes, Bézier paths, shapes and type.

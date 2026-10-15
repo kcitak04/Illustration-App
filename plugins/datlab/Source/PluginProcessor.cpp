@@ -193,10 +193,10 @@ void DatLabProcessor::run()
         else msg = juce::String::formatted ("Done in %.1f s  -  %.2f s result  -  ", (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0, res.seconds())
                    + juce::String (juce::CharPointer_UTF8 ("drag it to Ableton, PLAY RESULT to listen, CHAIN to stack another process"));
     }
-    juce::MessageManager::callAsync ([this, alive = alive, res = std::move (res), msg]() mutable
+    juce::MessageManager::callAsync ([this, aliveFlag = alive, rendered = std::move (res), msg]() mutable
     {
-        if (! alive->load()) return;
-        if (! res.empty()) { result = std::move (res); if (playing.load() == Play::result) stopPlay(); }
+        if (! aliveFlag->load()) return;
+        if (! rendered.empty()) { result = std::move (rendered); if (playing.load() == Play::result) stopPlay(); }
         status = msg; busy = false; sendChangeMessage();
     });
 }

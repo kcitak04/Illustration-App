@@ -1,0 +1,96 @@
+name: Build plugins
+
+on:
+  push:
+    paths: ['plugins/**', '.github/workflows/build-plugins.yml']
+  pull_request:
+    paths: ['plugins/**', '.github/workflows/build-plugins.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: DSP tests (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the DSP command-line runner
+        run: g++ -O2 -std=c++17 -o lab_cli plugins/tests/lab_cli.cpp plugins/datlab/Source/dsp/*.cpp
+      - name: Parity with DATTRACK's Sample Lab (JS vs C++)
+        run: node plugins/tests/parity.mjs ./lab_cli "$RUNNER_TEMP"
+      - name: Every process and mode renders
+        run: ./lab_cli --smoke
+
+  build:
+    name: ${{ matrix.name }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            artifact: DATTRACK-Plugins-Windows
+          - name: macOS
+            os: macos-latest
+            artifact: DATTRACK-Plugins-macOS
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: WebView2 SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: nuget install Microsoft.Web.WebView2 -Version 1.0.1901.177 -OutputDirectory "${{ runner.temp }}\nuget"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -S plugins -B build -G "Visual Studio 17 2022" -A x64 -DDAT_BUILD_TESTS=OFF -DJUCE_WEBVIEW2_PACKAGE_LOCATION="${{ runner.temp }}/nuget"
+
+      - name: Configure (macOS, universal)
+        if: runner.os == 'macOS'
+        run: cmake -S plugins -B build -G Xcode -DDAT_BUILD_TESTS=OFF -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4 --target DATLAB_All DATTRACK_All
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p out
+          find build -type d -name '*.vst3' -path '*Release/VST3/*' -prune -exec cp -R {} out/ \;
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            find build -type d -name '*.component' -path '*Release/AU/*' -prune -exec cp -R {} out/ \;
+            # ad-hoc signature so Apple Silicon loads the plugins (remove the download quarantine, see the README)
+            for p in out/*.vst3 out/*.component; do codesign --force --deep -s - "$p"; done
+          fi
+          cp plugins/README.md out/README.md
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/
+
+      - name: Zip for the release
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        shell: bash
+        run: |
+          cd out
+          if [ "$RUNNER_OS" = "Windows" ]; then 7z a ../${{ matrix.artifact }}.zip . ; else zip -qry ../${{ matrix.artifact }}.zip . ; fi
+
+      # Every push to main refreshes the "plugins-latest" release
+      - name: Publish "plugins-latest" release
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: plugins-latest
+          name: DATTRACK plugins (latest build)
+          prerelease: true
+          make_latest: false
+          files: ${{ matrix.artifact }}.zip
+          body: |
+            DATLAB (Sample Lab) and DATTRACK (tracker with sync) as VST3 for Windows, and VST3 + AU for macOS.
+            Built from ${{ github.sha }}. Install instructions: plugins/README.md.
