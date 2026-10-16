@@ -1,39 +1,20 @@
 // Process registry: names, descriptions and parameter ranges.
 // The first 31 entries mirror DATTRACK's LAB_PROCS exactly (same ids, ranges and defaults).
-#include "LabCore.h"
+#include "LabDefsUtil.h"
+#include "LabCdp.h"
 #include <cstdio>
 
 namespace lab
 {
 namespace
 {
-using O = std::vector<std::string>;
-ParamDef P (std::string id, std::string label, double mn, double mx, double def, int flags = 0, std::string unit = {}, Fmt fmt = Fmt::num, O options = {})
-{
-    ParamDef d; d.id = std::move (id); d.label = std::move (label); d.min = mn; d.max = mx; d.def = def; d.flags = flags; d.unit = std::move (unit); d.fmt = fmt; d.options = std::move (options);
-    if (! d.unit.empty() && d.fmt == Fmt::num) d.fmt = Fmt::unit;
-    return d;
-}
-ParamDef Opt (std::string id, std::string label, O options, int def = 0)
-{
-    const double mx = (double) options.size() - 1;
-    return P (std::move (id), std::move (label), 0, mx, def, PInt, {}, Fmt::num, std::move (options));
-}
-ParamDef Pct (std::string id, std::string label, double def) { return P (std::move (id), std::move (label), 0, 1, def, PPct, {}, Fmt::pct); }
-ParamDef Seed() { return P ("seed", "SEED", 1, 99, 1, PInt); }
-ParamDef Win (double mn, double mx, double def) { return P ("win", "WINDOW", mn, mx, def, PExp, {}, Fmt::time); }
-const O DIVS { "1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "1/4T", "1/8T", "1/16T", "1/8D", "1/16D" };
-const O SYNC_FREE = [] { O o { "FREE" }; o.insert (o.end(), DIVS.begin(), DIVS.end()); return o; }();
-
 std::vector<ProcDef> build()
 {
     using namespace procs_orig;
+    using namespace defs;
     std::vector<ProcDef> v;
     auto add = [&] (std::string cat, std::string id, std::string name, std::string tag, std::string desc, std::vector<ParamDef> ps, ProcFn fn, std::string aux = {}, bool isNew = false)
-    {
-        ProcDef d; d.category = std::move (cat); d.id = std::move (id); d.name = std::move (name); d.tag = std::move (tag); d.desc = std::move (desc);
-        d.params = std::move (ps); d.fn = fn; d.aux = std::move (aux); d.isNew = isNew; v.push_back (std::move (d));
-    };
+    { defs::add (v, std::move (cat), std::move (id), std::move (name), std::move (tag), std::move (desc), std::move (ps), fn, std::move (aux), isNew); };
     const std::string SPEC = "SPECTRAL", WAVE = "WAVESET", GRAN = "GRANULAR \xc2\xb7 TIME", TEXT = "TEXTURE", FORM = "FORMANT \xc2\xb7 PITCH \xc2\xb7 SPACE";
     const std::string NSPEC = "NEW \xc2\xb7 SPECTRAL", NDRV = "NEW \xc2\xb7 DRIVE \xc2\xb7 DIGITAL", NRHY = "NEW \xc2\xb7 RHYTHM \xc2\xb7 TIME", NSPC = "NEW \xc2\xb7 SPACE \xc2\xb7 FILTER";
 
@@ -171,6 +152,9 @@ std::vector<ProcDef> build()
     add (NSPC, "crystal", "CRYSTALLIZE", "CRYS", "Granular reverse echoes: grains are pitched (PITCH), often played backwards (REVERSE) and fed back into themselves, so tails sparkle and climb in octaves.",
          { P ("size", "GRAIN", 30, 800, 180, PExp, "ms"), P ("delay", "DELAY", 20, 2000, 250, PExp, "ms"), P ("pitch", "PITCH", -24, 24, 12, PInt, "st"), Pct ("reverse", "REVERSE", 0.7),
            P ("feedback", "FEEDBACK", 0, 0.95, 0.55, PPct, {}, Fmt::pct), Pct ("spread", "SPREAD", 0.7), Pct ("mix", "MIX", 0.6), P ("tail", "TAIL", 0, 20, 5, 0, "s"), Seed() }, crystal, {}, true);
+
+    // ---- the Composers Desktop Project (CDP) collection ----
+    addCdp (v);
     return v;
 }
 } // namespace

@@ -30,11 +30,8 @@ if(APPLE)
 endif()
 
 # ---------------- DATLAB ----------------
-add_library(datlab_dsp STATIC
-    datlab/Source/dsp/LabProcs.cpp
-    datlab/Source/dsp/LabProcsNew.cpp
-    datlab/Source/dsp/LabDefs.cpp
-    datlab/Source/dsp/LabEngine.cpp)
+file(GLOB DATLAB_DSP_SOURCES CONFIGURE_DEPENDS datlab/Source/dsp/*.cpp)
+add_library(datlab_dsp STATIC ${DATLAB_DSP_SOURCES})
 target_include_directories(datlab_dsp PUBLIC datlab/Source/dsp)
 set_target_properties(datlab_dsp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(MSVC)

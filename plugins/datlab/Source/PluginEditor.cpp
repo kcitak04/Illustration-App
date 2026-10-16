@@ -166,33 +166,75 @@ void ParamControl::paint (juce::Graphics& g)
 }
 
 // ======================= ProcList =======================
-std::vector<ProcList::Row> ProcList::rows() const
+ProcList::ProcList()
 {
-    std::vector<Row> v;
+    // start with every category folded except the first: hundreds of processes, the search box finds the rest
+    bool first = true;
+    for (auto& [cat, ids] : lab::categories()) { if (! first) collapsed.insert (U (cat)); first = false; }
+    rebuild();
+}
+void ProcList::setFilter (const juce::String& text)
+{
+    filterWords = juce::StringArray::fromTokens (text.toLowerCase(), " ", "");
+    filterWords.removeEmptyStrings();
+    rebuild();
+}
+void ProcList::reveal (const juce::String& id)
+{
+    if (auto* d = lab::findProc (id.toStdString())) if (collapsed.erase (U (d->category)) > 0) rebuild();
+}
+void ProcList::rebuild()
+{
+    rowCache.clear();
     for (auto& [cat, ids] : lab::categories())
     {
-        v.push_back ({ true, U (cat), {}, false });
-        for (auto& id : ids) { auto* d = lab::findProc (id); v.push_back ({ false, U (d->name), U (d->id), d->isNew }); }
+        const auto catS = U (cat);
+        std::vector<Row> items;
+        for (auto& id : ids)
+        {
+            auto* d = lab::findProc (id);
+            if (! filterWords.isEmpty())
+            {
+                const auto hay = (U (d->name) + " " + U (d->tag) + " " + U (d->cdp) + " " + catS + " " + U (d->desc)).toLowerCase();
+                bool all = true; for (auto& w : filterWords) if (! hay.contains (w)) { all = false; break; }
+                if (! all) continue;
+            }
+            items.push_back ({ false, U (d->name), U (d->id), catS, d->isNew, 0 });
+        }
+        if (items.empty()) continue;
+        rowCache.push_back ({ true, catS, {}, catS, false, (int) items.size() });
+        if (filterWords.isEmpty() && collapsed.count (catS)) continue;
+        rowCache.insert (rowCache.end(), items.begin(), items.end());
     }
-    return v;
+    hover = -1;
+    if (onLayoutChange) onLayoutChange();
+    repaint();
 }
-int ProcList::idealHeight() const { int h = 6; for (auto& r : rows()) h += r.header ? headH : rowH; return h; }
+int ProcList::idealHeight() const { int h = 6; for (auto& r : rowCache) h += r.header ? headH : rowH; return h; }
+int ProcList::rowTop (const juce::String& id) const
+{
+    int t = 4; for (auto& r : rowCache) { if (! r.header && r.id == id) return t; t += r.header ? headH : rowH; }
+    return -1;
+}
 int ProcList::rowAt (int y) const
 {
     int t = 4, i = 0;
-    for (auto& r : rows()) { int h = r.header ? headH : rowH; if (y >= t && y < t + h) return r.header ? -1 : i; t += h; ++i; }
+    for (auto& r : rowCache) { int h = r.header ? headH : rowH; if (y >= t && y < t + h) return i; t += h; ++i; }
     return -1;
 }
 void ProcList::paint (juce::Graphics& g)
 {
     g.fillAll (col::panel);
     int y = 4, i = 0;
-    for (auto& r : rows())
+    for (auto& r : rowCache)
     {
         if (r.header)
         {
-            g.setColour (r.text.startsWith ("NEW") ? col::accent : col::dim); g.setFont (LookAndFeel::font (10.5f, true));
-            g.drawText (r.text, 10, y + 8, getWidth() - 14, headH - 8, juce::Justification::centredLeft);
+            const bool open = ! filterWords.isEmpty() || ! collapsed.count (r.text);
+            if (i == hover) { g.setColour (col::panel2); g.fillRoundedRectangle (juce::Rectangle<int> (5, y + 4, getWidth() - 10, headH - 4).toFloat(), 3); }
+            g.setColour (r.text.startsWith ("NEW") ? col::accent : r.text.startsWith ("CDP") ? col::lab : col::dim); g.setFont (LookAndFeel::font (10.5f, true));
+            g.drawText (U (open ? "\xe2\x96\xbe " : "\xe2\x96\xb8 ") + r.text, 10, y + 8, getWidth() - 44, headH - 8, juce::Justification::centredLeft);
+            g.setColour (col::dim); g.drawText (juce::String (r.count), getWidth() - 40, y + 8, 30, headH - 8, juce::Justification::centredRight);
             y += headH;
         }
         else
@@ -207,12 +249,20 @@ void ProcList::paint (juce::Graphics& g)
         }
         ++i;
     }
+    if (rowCache.empty()) { g.setColour (col::dim); g.setFont (LookAndFeel::font (12)); g.drawText ("no match", getLocalBounds().removeFromTop (40), juce::Justification::centred); }
 }
 void ProcList::mouseMove (const juce::MouseEvent& e) { int h = rowAt (e.y); if (h != hover) { hover = h; repaint(); } }
 void ProcList::mouseDown (const juce::MouseEvent& e)
 {
     int i = rowAt (e.y); if (i < 0) return;
-    auto r = rows()[(size_t) i];
+    auto r = rowCache[(size_t) i];
+    if (r.header)
+    {
+        if (! filterWords.isEmpty()) return;
+        if (! collapsed.erase (r.text)) collapsed.insert (r.text);
+        rebuild();
+        return;
+    }
     selected = r.id; repaint();
     if (onSelect) onSelect (r.id);
 }
@@ -241,13 +291,25 @@ DatLabEditor::DatLabEditor (DatLabProcessor& p) : AudioProcessorEditor (p), proc
     addAndMakeVisible (bpmSlider);
 
     procList.onSelect = [this] (const juce::String& id) { selectProc (id); };
+    procList.onLayoutChange = [this] { procList.setSize (juce::jmax (10, procView.getWidth() - 10), procList.idealHeight()); };
     procView.setViewedComponent (&procList, false); procView.setScrollBarsShown (true, false); procView.setScrollBarThickness (8);
     addAndMakeVisible (procView);
+    search.setTextToShowWhenEmpty (U ("SEARCH ") + juce::String ((int) lab::procs().size()) + " PROCESSES...", col::dim);
+    search.setFont (LookAndFeel::font (12.5f)); search.setIndents (8, 5);
+    search.setColour (juce::TextEditor::backgroundColourId, col::panel); search.setColour (juce::TextEditor::textColourId, col::text);
+    search.setColour (juce::TextEditor::outlineColourId, col::panel2); search.setColour (juce::TextEditor::focusedOutlineColourId, col::lab);
+    search.setTooltip ("Find a process by name, CDP program (e.g. \"distort\"), category or what it does");
+    search.onTextChange = [this] { procList.setFilter (search.getText()); procView.setViewPosition (0, 0); };
+    search.onEscapeKey = [this] { search.clear(); procList.setFilter ({}); };
+    addAndMakeVisible (search);
 
     procName.setFont (LookAndFeel::font (19, true)); procName.setColour (juce::Label::textColourId, col::lab); addAndMakeVisible (procName);
     procDesc.setFont (LookAndFeel::font (12.5f)); procDesc.setColour (juce::Label::textColourId, col::dim); procDesc.setJustificationType (juce::Justification::topLeft);
     procDesc.setMinimumHorizontalScale (1.0f); addAndMakeVisible (procDesc);
-    addAndMakeVisible (paramArea);
+    paramView.setViewedComponent (&paramArea, false); paramView.setScrollBarsShown (true, false); paramView.setScrollBarThickness (8);
+    addAndMakeVisible (paramView);
+    cdpLabel.setFont (LookAndFeel::font (11, true)); cdpLabel.setColour (juce::Label::textColourId, col::dim); cdpLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (cdpLabel);
     btn (auxBtn, [this] { loadDialog (true); }, "The second sample this process needs (or drop a file on this row)");
     btn (auxFromResult, [this] { if (! proc.result.empty()) { proc.aux = proc.result; proc.status = "The result is now the second sample"; refresh(); } }, "Use the current result as the second sample");
     auxLabel.setFont (LookAndFeel::font (12)); auxLabel.setColour (juce::Label::textColourId, col::text); addAndMakeVisible (auxLabel);
@@ -317,7 +379,9 @@ DatLabEditor::DatLabEditor (DatLabProcessor& p) : AudioProcessorEditor (p), proc
     setSize (juce::jlimit (900, 1140, area.getWidth() - 60), juce::jlimit (620, 760, area.getHeight() - 110));
     proc.addChangeListener (this);
     procList.selected = proc.procId;
+    procList.reveal (proc.procId);
     refresh();
+    if (auto t = procList.rowTop (proc.procId); t > procView.getHeight() - 30) procView.setViewPosition (0, t - 60);
     startTimerHz (30);
 }
 
@@ -351,6 +415,7 @@ void DatLabEditor::refresh()
     procList.selected = proc.procId; procList.repaint();
     procName.setText (U (d.name) + (d.isNew ? U ("   \xc2\xb7 NEW") : juce::String()), juce::dontSendNotification);
     procDesc.setText (U (d.desc), juce::dontSendNotification);
+    cdpLabel.setText (d.cdp.empty() ? juce::String() : "CDP: " + U (d.cdp), juce::dontSendNotification);
     if (builtFor != proc.procId) buildParams();
     else { auto& vals = proc.paramsFor (proc.procId); for (size_t i = 0; i < d.params.size() && i < (size_t) params.size(); ++i) params[(int) i]->setValue (vals[d.params[i].id]); }
 
@@ -400,7 +465,11 @@ void DatLabEditor::timerCallback()
 
 void DatLabEditor::layoutParams()
 {
-    const int perRow = juce::jmax (1, paramArea.getWidth() / knobW);
+    // the knobs wrap into rows; when they don't fit (small window, many parameters) the area scrolls
+    const int w = paramView.getWidth() - 10;
+    const int perRow = juce::jmax (1, w / knobW);
+    const int rowsN = (params.size() + perRow - 1) / perRow;
+    paramArea.setSize (juce::jmax (10, w), juce::jmax (paramView.getHeight(), rowsN * knobH));
     for (int i = 0; i < params.size(); ++i) params[i]->setBounds ((i % perRow) * knobW, (i / perRow) * knobH, knobW - 4, knobH);
 }
 
@@ -441,6 +510,7 @@ void DatLabEditor::resized()
 
     r.reduce (10, 8);
     auto left = r.removeFromLeft (232); r.removeFromLeft (12);
+    search.setBounds (left.removeFromTop (28)); left.removeFromTop (6);
     procView.setBounds (left);
     procList.setSize (left.getWidth() - 10, procList.idealHeight());
 
@@ -476,7 +546,11 @@ void DatLabEditor::resized()
     r.removeFromBottom (8);
 
     // process header + params
-    procName.setBounds (r.removeFromTop (28));
+    {
+        auto nameRow = r.removeFromTop (28);
+        cdpLabel.setBounds (nameRow.removeFromRight (juce::jmin (260, nameRow.getWidth() / 3)));
+        procName.setBounds (nameRow);
+    }
     procDesc.setBounds (r.removeFromTop (40));
     r.removeFromTop (4);
     if (auxBtn.isVisible())
@@ -489,7 +563,7 @@ void DatLabEditor::resized()
         r.removeFromBottom (6);
     }
     else auxZone = {};
-    paramArea.setBounds (r);
+    paramView.setBounds (r);
     layoutParams();
 }
 

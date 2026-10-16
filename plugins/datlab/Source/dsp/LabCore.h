@@ -305,6 +305,7 @@ struct ProcDef
     std::vector<ParamDef> params;
     ProcFn fn = nullptr;
     bool isNew = false;   // added by DATLAB (not in DATTRACK's Sample Lab)
+    std::string cdp;      // the CDP program it follows, e.g. "distort repeat" (empty for DATLAB's own processes)
 };
 
 const std::vector<ProcDef>& procs();

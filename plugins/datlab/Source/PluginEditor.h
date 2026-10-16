@@ -1,4 +1,5 @@
 #pragma once
+#include <set>
 #include "PluginProcessor.h"
 #include "../../common/DatLookAndFeel.h"
 #include "../../common/DragFileTile.h"
@@ -45,16 +46,24 @@ private:
 class ProcList : public juce::Component
 {
 public:
+    ProcList();
     std::function<void (const juce::String&)> onSelect;
+    std::function<void()> onLayoutChange;   // rows were added / removed (the list's height changed)
     juce::String selected;
+    void setFilter (const juce::String& text);
+    void reveal (const juce::String& id);   // expands the category of id
     int idealHeight() const;
+    int rowTop (const juce::String& id) const;
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override { hover = -1; repaint(); }
 private:
-    struct Row { bool header; juce::String text, id; bool isNew; };
-    std::vector<Row> rows() const;
+    struct Row { bool header; juce::String text, id, cat; bool isNew; int count; };
+    std::vector<Row> rowCache;
+    juce::StringArray filterWords;
+    std::set<juce::String> collapsed;
+    void rebuild();
     int hover = -1;
     static constexpr int rowH = 21, headH = 26;
     int rowAt (int y) const;
@@ -87,10 +96,11 @@ private:
 
     juce::TextButton loadBtn { "LOAD" }, captureBtn { "CAPTURE" }, bpmBtn { "HOST" }, thruBtn { "THRU" };
     juce::Slider bpmSlider;
-    ProcList procList; juce::Viewport procView;
+    juce::TextEditor search; ProcList procList; juce::Viewport procView;
     juce::Label procName, procDesc;
     juce::OwnedArray<ParamControl> params;
-    juce::Component paramArea;
+    juce::Component paramArea; juce::Viewport paramView;
+    juce::Label cdpLabel;
     juce::TextButton auxBtn { "LOAD 2ND SAMPLE..." }, auxFromResult { "USE RESULT" };
     juce::Label auxLabel;
 
