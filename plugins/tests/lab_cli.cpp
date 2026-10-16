@@ -33,6 +33,11 @@ int main (int argc, char** argv)
         std::cout << "}\n";
         return 0;
     }
+    if (argc == 2 && std::string (argv[1]) == "--list")
+    {   // category | id | name | cdp command, one process per line
+        for (auto& d : lab::procs()) std::cout << d.category << "|" << d.id << "|" << d.name << "|" << d.cdp << "\n";
+        return 0;
+    }
     if (argc >= 2 && std::string (argv[1]) == "--fuzz")
     {   // robustness: every process with odd inputs (tiny, mono, silent, DC, full-scale noise) and random / extreme parameters
         const int rounds = argc > 2 ? std::atoi (argv[2]) : 20;
