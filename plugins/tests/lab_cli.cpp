@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <map>
 
 static lab::Chans readF32 (const char* path, int nch)
 {
@@ -87,6 +88,19 @@ int main (int argc, char** argv)
             src[1][i] = (float) (0.4 * std::sin (6.2831853 * 165 * t) * env);
         }
         int bad = 0;
+        {   // registry sanity: unique ids, parameter ids usable as XML attribute names, defaults inside their ranges
+            std::map<std::string, int> seen;
+            for (auto& d : lab::procs())
+            {
+                if (seen[d.id]++) { std::printf ("FAIL duplicate id %s\n", d.id.c_str()); bad++; }
+                for (auto& pd : d.params)
+                {
+                    bool okId = ! pd.id.empty() && pd.id != "proc" && std::isalpha ((unsigned char) pd.id[0]);
+                    for (char c : pd.id) okId = okId && (std::isalnum ((unsigned char) c) || c == '_');
+                    if (! okId || pd.def < pd.min || pd.def > pd.max || pd.min > pd.max) { std::printf ("FAIL param %s.%s\n", d.id.c_str(), pd.id.c_str()); bad++; }
+                }
+            }
+        }
         const std::string only = argc > 2 ? argv[2] : "";   // optional: only processes whose id starts with this
         for (auto& d : lab::procs())
         {
