@@ -35,6 +35,7 @@ int main (int argc, char** argv)
     if (argc >= 2 && std::string (argv[1]) == "--fuzz")
     {   // robustness: every process with odd inputs (tiny, mono, silent, DC, full-scale noise) and random / extreme parameters
         const int rounds = argc > 2 ? std::atoi (argv[2]) : 20;
+        const std::string only = argc > 3 ? argv[3] : "";   // optional: only processes whose id starts with this
         uint32_t s = 7; auto rnd = [&] { s = s * 1664525u + 1013904223u; return (double) s / 4294967296.0; };
         int runs = 0, errors = 0;
         for (int r = 0; r < rounds; ++r)
@@ -48,6 +49,7 @@ int main (int argc, char** argv)
                 c[i] = (float) (kind == 0 ? 0.0 : kind == 1 ? 0.5 : kind == 2 ? (rnd() * 2 - 1) : kind == 3 ? std::sin ((double) i * 0.05) : kind == 4 ? (i == len / 2 ? 1.0 : 0.0) : (i % 7 == 0 ? NAN : i % 11 == 0 ? INFINITY : 0.3));
             for (auto& d : lab::procs())
             {
+                if (! only.empty() && d.id.rfind (only, 0) != 0) continue;
                 lab::Params p = lab::defaults (d);
                 for (auto& pd : d.params)
                 {
@@ -74,7 +76,7 @@ int main (int argc, char** argv)
         std::printf ("%d runs, %d problems\n", runs, errors);
         return errors ? 1 : 0;
     }
-    if (argc == 2 && std::string (argv[1]) == "--smoke")
+    if (argc >= 2 && std::string (argv[1]) == "--smoke")
     {   // every process x every MODE option through the full engine, on a 2 s stereo test signal
         const double sr = 44100; const size_t n = (size_t) (sr * 2);
         lab::Chans src (2, lab::Buf (n)); uint32_t s = 1;
@@ -85,8 +87,10 @@ int main (int argc, char** argv)
             src[1][i] = (float) (0.4 * std::sin (6.2831853 * 165 * t) * env);
         }
         int bad = 0;
+        const std::string only = argc > 2 ? argv[2] : "";   // optional: only processes whose id starts with this
         for (auto& d : lab::procs())
         {
+            if (! only.empty() && d.id.rfind (only, 0) != 0) continue;
             std::vector<lab::Params> variants { lab::defaults (d) };
             for (auto& pd : d.params)
                 if (pd.isOptions() && (pd.id == "mode" || pd.id == "op" || pd.id == "pattern" || pd.id == "type" || pd.id == "shape" || pd.id == "chord" || pd.id == "motion" || pd.id == "wave" || pd.id == "sync"))

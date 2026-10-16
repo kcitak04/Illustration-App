@@ -69,4 +69,47 @@ inline Buf grainEngine (const Buf& x, size_t outLen, double sr, double grainSec,
     }
     return out;
 }
+// ---- pitch tracking (YIN, de Cheveigne & Kawahara 2002) ----
+// f0 per hop (Hz, 0 = unvoiced / silent), frame i centred at i * hop samples.
+struct PitchTrack { std::vector<double> f0; size_t hop = 512; double at (double sample) const   // f0 at a sample position (nearest frame, 0 if unvoiced)
+    { if (f0.empty()) return 0; long long i = jr (sample / (double) hop); return f0[(size_t) clamp (i, 0LL, (long long) f0.size() - 1)]; } };
+inline PitchTrack trackPitch (const Buf& x, double sr, double minHz = 50, double maxHz = 1500, double thresh = 0.15, Ctx* cx = nullptr)
+{
+    PitchTrack pt; pt.hop = (size_t) std::max (64.0, std::round (sr * 0.01));
+    const size_t tauMax = (size_t) std::max (4.0, std::ceil (sr / std::max (20.0, minHz))), tauMin = (size_t) std::max (2.0, std::floor (sr / std::max (minHz * 1.01, maxHz)));
+    const size_t W = tauMax;   // integration window
+    const size_t n = x.size(), frames = n / pt.hop + 1;
+    pt.f0.assign (frames, 0.0);
+    std::vector<double> d (tauMax + 1), cm (tauMax + 1);
+    for (size_t fi = 0; fi < frames; ++fi)
+    {
+        if (cx && ! (fi & 63)) cx->prog ((double) fi / (double) frames * 0.5);
+        const long long c = (long long) (fi * pt.hop), a = c - (long long) W;   // frame spans [a, a + 2W + tauMax)
+        auto s = [&] (long long i) { return i >= 0 && i < (long long) n ? (double) x[(size_t) i] : 0.0; };
+        double energy = 0; for (size_t j = 0; j < W; ++j) energy += s (a + (long long) j) * s (a + (long long) j);
+        if (energy / (double) W < 1e-7) continue;
+        for (size_t tau = 1; tau <= tauMax; ++tau)
+        {
+            double acc = 0;
+            for (size_t j = 0; j < W; j += 2) { double dd = s (a + (long long) j) - s (a + (long long) (j + tau)); acc += dd * dd; }
+            d[tau] = acc;
+        }
+        double run = 0; cm[0] = 1;
+        for (size_t tau = 1; tau <= tauMax; ++tau) { run += d[tau]; cm[tau] = run > 0 ? d[tau] * (double) tau / run : 1; }
+        size_t best = 0;
+        for (size_t tau = tauMin; tau < tauMax; ++tau)
+            if (cm[tau] < thresh) { while (tau + 1 < tauMax && cm[tau + 1] < cm[tau]) ++tau; best = tau; break; }
+        if (! best) continue;
+        double t = (double) best;   // parabolic interpolation
+        if (best > 1 && best < tauMax) { double y0 = cm[best - 1], y1 = cm[best], y2 = cm[best + 1], den = y0 - 2 * y1 + y2; if (std::abs (den) > 1e-12) t += 0.5 * (y0 - y2) / den; }
+        pt.f0[fi] = sr / t;
+    }
+    // remove single-frame octave glitches / dropouts
+    for (size_t i = 1; i + 1 < frames; ++i)
+    {
+        double p = pt.f0[i - 1], q = pt.f0[i + 1], v = pt.f0[i];
+        if (p > 0 && q > 0 && std::abs (std::log2 (p / q)) < 0.1 && (v == 0 || std::abs (std::log2 (v / p)) > 0.4)) pt.f0[i] = 0.5 * (p + q);
+    }
+    return pt;
+}
 } // namespace lab::dsp
