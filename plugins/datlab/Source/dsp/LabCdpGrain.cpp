@@ -974,7 +974,7 @@ Chans packet (const Chans& ch, Ctx& cx, const Params& p)
                 }
                 return i * EW + EW / 2;
             };
-            a = clamp (minFrom (t - D / 2, -1), 0LL, n - 1); b = clamp (minFrom (t + D / 2, 1), a + 8, n);
+            a = clamp (minFrom (t - D / 2, -1), 0LL, std::max (0LL, n - 8)); b = clamp (minFrom (t + D / 2, 1), std::min (a + 8, n), n);
         }
         const long long len = b - a; if (len < 8) continue;
         // per-half-cycle peaks for FORCE
