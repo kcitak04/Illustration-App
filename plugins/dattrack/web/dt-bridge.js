@@ -9,7 +9,8 @@
   const Q = new URLSearchParams(location.search), INST = Q.get('i') || '0', TOKEN = Q.get('t') || '', SR = +Q.get('sr') || 0;
   const url = (route, extra) => location.origin + '/' + route + '/' + INST + '?t=' + TOKEN + (extra || '');
   const DT = window.DTVST = { inst: INST, ctx: null, host: null, songSeq: -1, jumpSeen: -1, mixBpm: 0, lastSpeed: 0, slaving: false, lockBpm: 0,
-    hostSongApplied: false, lastDirty: -1, dirtySeen: -1, dirtyAt: 0, started: false, log: [] };
+    hostSongApplied: false, lastDirty: -1, dirtySeen: -1, dirtyAt: 0, started: false, log: [],
+    loop: null, hostRow: 0 };   // loop: the host's loop in rows {s, e}; hostRow: the host row DATTRACK is playing
   const say = m => { try { if (typeof toast === 'function') toast(m, 4000); } catch (e) { } };
 
   // ---------------------------------------------------------------- exports -> plugin (Music/DATTRACK)
@@ -128,6 +129,57 @@
     if (song.bpm !== sb) { song.bpm = sb; try { refreshAll(); } catch (e) { } }
     engine.mixer.setTempo(C * spd / 6, spd);   // delays and WARP samples follow too
   }
+  // The host's loop (Ableton's loop brace), in rows. Only a loop on the row grid can be followed row-exactly.
+  function loopOf(j) {
+    if (!j.loop) return null;
+    const s = j.loop[0] * 4, e = j.loop[1] * 4, S = Math.round(s), E = Math.round(e);
+    if (Math.abs(s - S) > 0.01 || Math.abs(e - E) > 0.01 || E - S < 1) return null;
+    if (DT.loopDistrust === S + ':' + E) return null;   // reported but not looping (e.g. Session view): just follow
+    return { s: S, e: E };
+  }
+  // DATTRACK looped on its own: the host must jump at the same moment (its report may come before or after
+  // DATTRACK's own jump), or this loop is not really on
+  function checkLoopWrap(j) {
+    const w = DT.wrapPending; if (!w) return;
+    if (DT.hostJumpT != null && Math.abs(DT.hostJumpT - w.t) < 0.15) DT.wrapPending = null;
+    else if (j.f / engine.ctx.sampleRate > w.t + 0.08) {
+      DT.wrapPending = null;
+      if (DT.loop) DT.loopDistrust = DT.loop.s + ':' + DT.loop.e;
+      DT.loop = null; DT.log.push('host did not loop');
+    }
+  }
+  // a host row past the loop end is the loop start again (if the host was before the loop end, it loops there)
+  function wrapRow(hr, from) {
+    const L = DT.loop;
+    if (L && from < L.e - 1e-6 && hr >= L.e) hr = L.s + (hr - L.e) % (L.e - L.s);
+    return hr;
+  }
+  // DATTRACK jumps back to the loop start on the same row as the host, ahead of time (the host reports its jump only
+  // after it happened, a round trip too late to cue the first row of the next pass)
+  function followHostLoop() {
+    if (player.__dtLoop) return;
+    const next = player.nextRow, step = player.step;
+    player.step = function (time, evs) {   // every scheduled row remembers the host row it stands for
+      DT.stepTime = time;
+      const info = step.call(this, time, evs);
+      if (info) info.hr = DT.hostRow;
+      return info;
+    };
+    player.nextRow = function () {
+      next.call(this);
+      if (!DT.slaving) return;
+      DT.hostRow++;
+      const L = DT.loop;
+      if (L && DT.hostRow === L.e) {
+        DT.hostRow = L.s;
+        DT.wrapPending = { t: DT.stepTime + this.tickDur };
+        const total = songRows(), p = rowToPos(((L.s % total) + total) % total);
+        if (this.mode === 'song') this.setOrder(p.order);
+        this.row = p.row;
+      }
+    };
+    player.__dtLoop = true;
+  }
   // start the song at (order, row) with its first row exactly at context time t
   function startAt(order, row, t) {
     sched.halt();
@@ -145,23 +197,39 @@
   function startAtHost(j) {
     const total = songRows(), rowSec = 60 / j.cb / 4, ctx = engine.ctx;
     // count-in / pre-roll: Ableton reports a negative position; the song starts at row 0 on the downbeat
-    let r = Math.max(0, Math.ceil(j.ppq * 4 - 1e-6)), t = hostTime(r / 4, j);
-    while (t < ctx.currentTime + 0.04) { r++; t += rowSec; }
+    // from where the host started or jumped to (the latest report may already be a little past it)
+    const from = j.jump === DT.jumpCued ? j.ppq : Math.min(j.ppq, j.jp != null ? j.jp : j.ppq);
+    let r = Math.max(0, Math.ceil(from * 4 - 1e-6)), t = hostTime(r / 4, j);
+    while (t < ctx.currentTime + 0.015) { r++; t += rowSec; }
+    r = wrapRow(r, j.ppq * 4);
+    DT.jumpCued = j.jump;
+    DT.wrapPending = null;
     const p = rowToPos(((r % total) + total) % total);
     startAt(p.order, p.row, t);
+    DT.hostRow = r;
     DT.log.push('cue r' + r + ' t' + t.toFixed(3) + ' now' + ctx.currentTime.toFixed(3) + ' j' + j.jump);
     if (DT.log.length > 200) DT.log.shift();
     DT.jumpSeen = j.jump; DT.slaving = true;
   }
-  // keep the scheduled rows on the host's grid
-  function correct(j) {
+  // keep the scheduled rows on the host's grid. jumped: the host just looped or relocated - re-cue unless DATTRACK
+  // is already there (it follows the host's loop by itself)
+  function correct(j, jumped) {
     const q = sched.rowQueue; if (!q.length) return;
-    const e = q[q.length - 1], total = songRows(), R = posToRow(e.order, e.row);
-    let d = (j.ppq + (e.t - j.f / engine.ctx.sampleRate) * j.cb / 60) * 4 - R;   // host row at that time - DATTRACK row
+    const e = q[q.length - 1], total = songRows();
+    // DATTRACK's position at the moment the report describes (later than its last scheduled row), following the
+    // host loop the way DATTRACK does, against the host's reported row there
+    const ahead = (j.f / engine.ctx.sampleRate - e.t) * j.cb / 15;
+    let R = posToRow(e.order, e.row) + ahead;
+    if (e.hr != null) R -= (e.hr + ahead) - wrapRow(e.hr + ahead, e.hr);
+    let d = j.ppq * 4 - R;                                                       // host row - DATTRACK row
     d = ((d % total) + total) % total; if (d > total / 2) d -= total;
     const err = d * 60 / j.cb / 4;                                               // seconds DATTRACK is behind
-    if (Math.abs(d) > 1) { DT.log.push('recue d' + d.toFixed(2)); return startAtHost(j); }                                   // relocated / pattern jump: re-cue
-    if (Math.abs(err) > 0.0015) sched.next -= Math.max(-0.01, Math.min(0.01, err));
+    if (Math.abs(d) > (jumped ? 0.25 : 1)) { DT.log.push('recue d' + d.toFixed(2)); return startAtHost(j); }                 // relocated / pattern jump: re-cue
+    // a nudge moves only the rows scheduled after it; until the next row is queued, the error measured on the last one
+    // still includes the nudges already made - count them, or every report would correct the same error again
+    if (DT.corrRow !== e) { DT.corrRow = e; DT.corrSum = 0; }
+    const rest = err - DT.corrSum;
+    if (Math.abs(rest) > 0.0015) { const s = Math.max(-0.01, Math.min(0.01, rest)); sched.next -= s; DT.corrSum += s; }
   }
 
   // ---------------------------------------------------------------- messages from the plugin (every audio post)
@@ -176,11 +244,15 @@
     }
     if (j.stop && sched.playing) stop();
     if (j.mode === 1) {
-      lockPlayerTempo();
+      lockPlayerTempo(); followHostLoop();
       j.cb = j.bpm / (j.r > 0.5 && j.r < 1.5 ? j.r : 1);
+      DT.loop = loopOf(j);
+      if (j.jump !== DT.hostJumpN) { DT.hostJumpN = j.jump; DT.hostJumpT = j.f / engine.ctx.sampleRate; }   // when the host jumped (as heard)
+      if (j.playing && sched.playing && DT.slaving) checkLoopWrap(j);
       if (j.bpm > 0 && j.playing) setHostTempo(j.bpm, j.cb);
       if (j.playing) {
-        if (!sched.playing || !DT.slaving || j.jump !== DT.jumpSeen) startAtHost(j);
+        if (!sched.playing || !DT.slaving) startAtHost(j);
+        else if (j.jump !== DT.jumpSeen) { DT.jumpSeen = j.jump; correct(j, true); }
         else correct(j);
       } else {
         if (DT.slaving && sched.playing) stop();

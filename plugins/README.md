@@ -596,7 +596,7 @@ Put DATTRACK on a **MIDI track**. The app starts by itself.
 
 | Mode | Who leads | What happens |
 |---|---|---|
-| **SLAVE** (default) | Ableton | DATTRACK follows Ableton's **tempo, play / stop and position**. One beat is 4 rows, and the arrangement position maps onto the song, so looping a region in Ableton loops DATTRACK too. Fxx tempo commands are ignored while slaved; speed (ticks per row) changes keep the beat. |
+| **SLAVE** (default) | Ableton | DATTRACK follows Ableton's **tempo, play / stop and position**. One beat is 4 rows, and the arrangement position maps onto the song. **Ableton's loop brace is followed exactly**: DATTRACK jumps back to the loop start on the same row as Live, so the first beat of every pass is on time (the loop must start and end on a 16th note). Fxx tempo commands are ignored while slaved; speed (ticks per row) changes keep the beat. |
 | **MASTER** | DATTRACK | DATTRACK's **tempo and play / stop drive Ableton through Ableton Link**. In Live, open **Settings → Link, Tempo & MIDI**, turn on **Show Link Toggle** and **Start Stop Sync**, then click **LINK** in Live's control bar. Pressing play in DATTRACK now starts Live on the same beat, and changing DATTRACK's BPM changes Live's tempo. Stopping Live stops DATTRACK. The bar shows how many Link peers are connected. |
 | **FREE** | nobody | DATTRACK runs on its own clock. |
 
@@ -613,11 +613,12 @@ The plugin contains the DATTRACK web app (`dattrack/web/dattrack.html`, pinned f
 - The plugin resamples by a few hundred ppm to follow any clock difference.
 - Each audio packet's reply carries Ableton's transport. The bridge schedules DATTRACK's rows onto that grid.
 
-The automated test, which uses a fake host with the real page in headless Chromium, lands every metronome click within 1 ms of the host's beat, including after a loop jump.
+The automated tests use a fake host with the real page in headless Chromium, with the two clocks running independently as in a real DAW (and up to 1 % apart). Every metronome click lands within 2 ms of the host's beat: at play, after relocating, and across loop wraps.
 
 - **"DATTRACK audio is paused"**: on macOS the web view may need one click into the DATTRACK window before audio starts.
 - **Port conflicts:** the bar says so if ports 47811–47850 are all taken.
-- **RELOAD** restarts the page; the song is kept.
+- **RELOAD** restarts the page; the song is kept. If the page never started, RELOAD creates a fresh web view.
+- **Blank window on Windows:** DATTRACK needs the **Microsoft Edge WebView2 Runtime** (part of Windows 10 / 11; if it was removed, install it from Microsoft). The bar says "DATTRACK did not start" when the web view could not be created.
 
 ## Build from source
 

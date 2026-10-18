@@ -4,10 +4,6 @@
 DatTrackProcessor::DatTrackProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
-   #if JUCE_WINDOWS
-    // WebView2: Web Audio may start without a click, and the hidden page is not throttled
-    _putenv_s ("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows");
-   #endif
     startTimerHz (10);   // creates the web view on the message thread, keeps Link in step with the sync mode
 }
 
@@ -40,6 +36,8 @@ void DatTrackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             t.bpm = pos->getBpm().orFallback (120.0);
             t.playing = pos->getIsPlaying();
             t.ppq = pos->getPpqPosition().orFallback (0.0);
+            if (auto lp = pos->getLoopPoints(); pos->getIsLooping() && lp.hasValue() && lp->ppqEnd > lp->ppqStart + 0.01)
+                t.looping = true, t.loopStart = lp->ppqStart, t.loopEnd = lp->ppqEnd;
         }
     float* L = buffer.getWritePointer (0);
     float* R = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : L;
@@ -65,12 +63,24 @@ void DatTrackProcessor::createBrowser()
     keepAlive->addToDesktop (juce::ComponentPeer::windowIsTemporary | juce::ComponentPeer::windowIgnoresKeyPresses);
     keepAlive->setVisible (false);
     pageSr = hostSr.load() > 0 ? hostSr.load() : 48000.0;
+    core.browserStartedMs = juce::Time::currentTimeMillis();
     navigate();
+}
+
+void DatTrackProcessor::recreateBrowser()
+{
+    // the page never came up (WebView2 failed to start, or drew into a window that is gone): start a fresh web view
+    auto* editor = attachedTo.getComponent();
+    web.reset();
+    keepAlive.reset();
+    createBrowser();
+    if (editor != nullptr) { editor->addAndMakeVisible (*web); editor->resized(); }
 }
 
 void DatTrackProcessor::reloadPage()
 {
     if (! web) return;
+    if (! core.pageConnected.load()) { recreateBrowser(); return; }
     pageSr = hostSr.load() > 0 ? hostSr.load() : 48000.0;
     if (core.pageConnected.load() && juce::Time::currentTimeMillis() - core.lastPacketMs.load() < 1000)
     {   // a running page saves its song first (the timer navigates once it has, or after 1 s)
@@ -90,12 +100,14 @@ void DatTrackProcessor::navigate()
 juce::WebBrowserComponent* DatTrackProcessor::attachBrowser (juce::Component& editor)
 {
     if (! web) createBrowser();
+    attachedTo = &editor;
     editor.addAndMakeVisible (*web);
     return web.get();
 }
 
 void DatTrackProcessor::detachBrowser()
 {
+    attachedTo = nullptr;
     if (web && keepAlive) keepAlive->addAndMakeVisible (*web), web->setBounds (keepAlive->getLocalBounds());
 }
 

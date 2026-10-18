@@ -21,6 +21,7 @@ struct HostTransport
 {
     bool valid = false, playing = false;
     double bpm = 0, ppq = 0;
+    bool looping = false; double loopStart = 0, loopEnd = 0;   // the host's loop (cycle) in beats, when it is on
 };
 
 class DatTrackCore : public juce::ChangeBroadcaster
@@ -55,11 +56,12 @@ public:
     std::atomic<bool> pageConnected { false }, dtPlaying { false }, audioRunning { false };
     std::atomic<double> dtBpm { 0 }, fillSec { 0 }, hostBpm { 0 };
     std::atomic<int> linkPeers { 0 }, underruns { 0 };
-    std::atomic<juce::int64> lastPacketMs { 0 };
+    std::atomic<juce::int64> lastPacketMs { 0 }, browserStartedMs { 0 };
     juce::File getLastExport() const { std::lock_guard<std::mutex> l (songLock); return lastExport; }
     juce::String getSyncText() const;
     static juce::File exportFolder();
     juce::int64 debugFramesWritten() const { return bridge.framesWritten(); }
+    juce::String debugBridgeStats() const { return "skips " + juce::String (bridge.skips) + " stalls " + juce::String (bridge.stalls) + " resets " + juce::String (bridge.resets); }
 
 private:
     HttpResponse handle (const HttpRequest&);
@@ -71,9 +73,9 @@ private:
     AudioBridge bridge;
 
     // audio thread -> page: where the host's musical time sits on the context timeline
-    struct Anchor { double f = 0, ppq = 0, bpm = 120, rate = 1; bool playing = false; int jump = 0; };
+    struct Anchor { double f = 0, ppq = 0, bpm = 120, rate = 1; bool playing = false; int jump = 0; double jumpPpq = 0; bool looping = false; double ls = 0, le = 0; };
     juce::SpinLock anchorLock; Anchor anchor;
-    double lastPpq = 0, lastPpqStep = 0; bool lastPlaying = false; int jumps = 0;
+    double lastPpq = 0, lastPpqStep = 0, jumpPpq = 0; bool lastPlaying = false; int jumps = 0;
 
     // page -> audio thread: what DATTRACK is doing (for MASTER)
     struct PageState { bool playing = false; double bpm = 0, beat = 0, at = 0; juce::int64 seq = 0; };

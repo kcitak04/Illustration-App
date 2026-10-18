@@ -19,6 +19,9 @@ int main (int argc, char** argv)
     const double playAt = arg ("--play-at", "4").getDoubleValue(), stopAt = arg ("--stop-at", "1e9").getDoubleValue(), dur = arg ("--duration", "14").getDoubleValue();
     const double jumpAt = arg ("--jump-at", "1e9").getDoubleValue(), jumpTo = arg ("--jump-to", "0").getDoubleValue();
     const double drift = arg ("--drift-ppm", "0").getDoubleValue();
+    const double loopStart = arg ("--loop-start", "0").getDoubleValue(), loopEnd = arg ("--loop-end", "0").getDoubleValue();   // host loop (beats)
+    const bool looping = loopEnd > loopStart;
+    const bool loopReportOnly = args.contains ("--loop-report-only");   // reports a loop but never wraps (Live's Session view?)
     const auto modeS = arg ("--mode", "slave");
     const int block = 256;
 
@@ -55,9 +58,11 @@ int main (int argc, char** argv)
         dat::HostTransport tr; tr.valid = true; tr.bpm = bpm; tr.playing = t >= playAt && t < stopAt;
         if (tr.playing && ! jumped && t >= jumpAt) { jumped = true; ppq = jumpTo; transportLog << "jump " << t << "\n"; }
         tr.ppq = ppq;
+        if (looping) { tr.looping = true; tr.loopStart = loopStart; tr.loopEnd = loopEnd; }
         if (! flushed && t >= flushAt) { flushed = true; ++core.flushRequest; std::cout << "FLUSH requested at " << t << std::endl; }
         core.process (L.data(), R.data(), block, sr, tr, nullptr, offline);
         if (tr.playing) ppq += block / sr * bpm / 60.0;
+        if (tr.playing && looping && ! loopReportOnly && ppq >= loopEnd && ppq - block / sr * bpm / 60.0 < loopEnd) ppq = loopStart + (ppq - loopEnd);   // wraps inside the block, like a DAW
         for (int i = 0; i < block; ++i) { out.push_back (L[(size_t) i]); out.push_back (R[(size_t) i]); }
         samples += block;
         if (offline) {}
@@ -84,7 +89,7 @@ int main (int argc, char** argv)
     std::ofstream o (arg ("--out", "out.f32").toStdString(), std::ios::binary);
     o.write ((const char*) out.data(), (std::streamsize) (out.size() * sizeof (float)));
     std::cout << "DONE underruns " << core.underruns.load() << " song " << core.getSongJson().length() << " export " << core.getLastExport().getFullPathName()
-              << " edits " << core.songEditsFromPage.load() << " flush " << core.flushRequest.load() << "/" << core.flushAck.load() << " wall " << (juce::Time::getMillisecondCounterHiRes() - start) / 1000.0 << std::endl;
+              << " edits " << core.songEditsFromPage.load() << " flush " << core.flushRequest.load() << "/" << core.flushAck.load() << " wall " << (juce::Time::getMillisecondCounterHiRes() - start) / 1000.0 << " " << core.debugBridgeStats() << std::endl;
     if (auto out2 = arg ("--song-out", ""); out2.isNotEmpty()) juce::File (out2).replaceWithText (core.getSongJson());
     return 0;
 }

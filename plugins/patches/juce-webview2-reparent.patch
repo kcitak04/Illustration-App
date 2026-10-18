@@ -1,17 +1,53 @@
 diff --git a/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp b/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
-index ddd7343..016bd40 100644
+index ddd7343..e1339d0 100644
 --- a/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
 +++ b/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
-@@ -606,6 +606,12 @@ public:
+@@ -600,10 +600,29 @@ public:
  
-     void componentPeerChanged() override
+     void componentMovedOrResized (bool, bool) override
      {
-+        // DATTRACK patch: a WebView2 that moves to another window (plugin editor <-> hidden host window)
-+        // must be re-parented, otherwise it keeps drawing into the old HWND.
-+        if (webViewController != nullptr)
-+            if (auto* peer = getPeer())
-+                webViewController->put_ParentWindow ((HWND) peer->getNativeHandle());
-+
-         componentMovedOrResized (true, true);
++        syncParentWindow();
+         if (auto* peer = owner.getTopLevelComponent()->getPeer())
+             setControlBounds (peer->getAreaCoveredBy (owner));
      }
  
++    // DATTRACK patch: the browser component can move between windows (plugin editor <-> a hidden window that keeps
++    // the page alive), and the WebView2 controller is created asynchronously - possibly for the window the component
++    // has already left. Without re-parenting, WebView2 keeps drawing into that old (hidden) window: a blank editor.
++    void syncParentWindow()
++    {
++        if (webViewController == nullptr)
++            return;
++
++        if (auto* peer = owner.getPeer())
++        {
++            const auto wanted = (HWND) peer->getNativeHandle();
++            HWND current = nullptr;
++
++            if (FAILED (webViewController->get_ParentWindow (&current)) || current != wanted)
++                webViewController->put_ParentWindow (wanted);
++        }
++    }
++
+     void componentPeerChanged() override
+     {
+         componentMovedOrResized (true, true);
+@@ -662,6 +681,10 @@ public:
+             return {};
+ 
+         auto webViewOptions = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
++       #ifdef JUCE_WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
++        // DATTRACK patch: extra Chromium switches for the browser process
++        webViewOptions->put_AdditionalBrowserArguments (String (JUCE_WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS).toWideCharPointer());
++       #endif
+ 
+         const auto userDataFolder = options.getWinWebView2BackendOptions().getUserDataFolder().getFullPathName();
+ 
+@@ -1121,6 +1144,7 @@ private:
+                                     weakThis->addEventHandlers();
+                                     weakThis->setWebViewPreferences();
+                                     weakThis->componentMovedOrResized (true, true);
++                                    weakThis->setControlVisible (weakThis->owner.isShowing());
+ 
+                                     if (weakThis->urlRequest.url.isNotEmpty())
+                                         weakThis->webView->Navigate (weakThis->urlRequest.url.toWideCharPointer());

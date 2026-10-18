@@ -35,6 +35,7 @@ public:
     // the web view moves between the editor and a hidden keep-alive window
     juce::WebBrowserComponent* attachBrowser (juce::Component& editor);
     void detachBrowser();
+    juce::WebBrowserComponent* getBrowser() const { return web.get(); }
     void reloadPage();
     void setLatency (double seconds);
     void markDirty();   // tells the host the plugin state changed (Ableton then offers to save the set)
@@ -42,6 +43,8 @@ public:
 private:
     void timerCallback() override;
     void createBrowser();
+    void recreateBrowser();
+    juce::Component::SafePointer<juce::Component> attachedTo;   // the editor showing the web view
     void navigate();
     juce::uint32 reloadAt = 0;   // pending reload (waiting for the page to save its song)
 

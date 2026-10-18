@@ -35,6 +35,16 @@ await page.waitForFunction(() => window.DTVST && window.DTVST.started, null, { t
 // empty song, metronome on
 await page.evaluate(() => { setSong(new Song()); state.metro = true; });
 if (process.env.NO_UI) await page.evaluate(() => { window.requestAnimationFrame = () => 0; });   // like a closed plugin window
+if (process.env.DBG) await page.evaluate(() => {   // scheduler diagnostics: late pumps and context clock jumps
+  const pump = sched.pump.bind(sched); let lastNow = 0, lastWall = 0; DTVST.dbg = [];
+  sched.pump = function () {
+    const now = engine.ctx.currentTime, wall = performance.now() / 1000;
+    if (this.playing && this.next < now) DTVST.dbg.push('behind ' + ((now - this.next) * 1000).toFixed(1) + 'ms at ' + now.toFixed(3));
+    if (lastNow && now - lastNow > 0.06) DTVST.dbg.push('ctx +' + ((now - lastNow) * 1000).toFixed(0) + 'ms in ' + ((wall - lastWall) * 1000).toFixed(0) + 'ms wall at ' + now.toFixed(3));
+    lastNow = now; lastWall = wall;
+    return pump();
+  };
+});
 const info = await page.evaluate(() => ({ sr: DTVST.ctx.sampleRate, sink: String(DTVST.ctx.sinkId && DTVST.ctx.sinkId.type || DTVST.ctx.sinkId), state: DTVST.ctx.state }));
 console.log('page context:', JSON.stringify(info));
 if (mode === 'master') {   // DATTRACK starts itself and reports its beat grid for Link
@@ -47,7 +57,7 @@ await page.waitForTimeout(6000);
 const c1 = await page.evaluate(() => [DTVST.ctx.currentTime, performance.now()]);
 console.log('context clock rate vs wall clock:', ((c1[0] - c0[0]) / ((c1[1] - c0[1]) / 1000)).toFixed(4));
 const code = await done;
-const tail = await page.evaluate(() => ({ log: DTVST.log.slice(-40), host: DTVST.host, playing: sched.playing, bpm: song.bpm }));
+const tail = await page.evaluate(() => ({ log: DTVST.log.slice(-40).concat(DTVST.dbg || []), host: DTVST.host, playing: sched.playing, bpm: song.bpm }));
 await page.screenshot({ path: path.join(work, 'dattrack_page.png') });
 await browser.close();
 console.log(log);

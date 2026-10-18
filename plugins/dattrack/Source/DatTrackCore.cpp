@@ -122,16 +122,19 @@ HttpResponse DatTrackCore::onAudio (const HttpRequest& r)
     int seq; { std::lock_guard<std::mutex> l (songLock); seq = songSeq; }
     juce::String out;
     out << "{\"mode\":" << mode.load() << ",\"playing\":" << (a.playing ? "true" : "false") << ",\"bpm\":" << json (a.bpm)
-        << ",\"r\":" << json (a.rate) << ",\"f\":" << json (a.f) << ",\"ppq\":" << json (a.ppq) << ",\"jump\":" << a.jump << ",\"song\":" << seq
-        << ",\"midi\":[" << midi << "],\"stop\":" << pendingStop.exchange (0) << ",\"flush\":" << flushRequest.load() << "}";
+        << ",\"r\":" << json (a.rate) << ",\"f\":" << json (a.f) << ",\"ppq\":" << json (a.ppq) << ",\"jump\":" << a.jump << ",\"jp\":" << json (a.jumpPpq) << ",\"song\":" << seq
+        << ",\"midi\":[" << midi << "],\"stop\":" << pendingStop.exchange (0) << ",\"flush\":" << flushRequest.load();
+    if (a.looping) out << ",\"loop\":[" << json (a.ls) << "," << json (a.le) << "]";
+    out << "}";
     return HttpResponse::text (out);
 }
 
 // ---------------- audio thread ----------------
 void DatTrackCore::process (float* L, float* R, int n, double hostSr, const HostTransport& t, const juce::MidiBuffer* midi, bool offline)
 {
-    // the buffer gets the latency minus 100 ms; that 100 ms is the page's head start for cueing rows on time
-    bridge.setTargetFill (juce::jmax (0.05, latencySec.load() - 0.1));
+    // the buffer gets the latency minus 150 ms; those 150 ms are the page's head start for cueing rows on time
+    // (pressing play in the host: the page hears about it one round trip later and must still catch the first row)
+    bridge.setTargetFill (juce::jmax (0.05, latencySec.load() - 0.15));
     if (offline && juce::Time::currentTimeMillis() - lastPacketMs.load() < 2000)
     {   // the export runs at the page's (real-time) pace instead of skipping audio; give up after 3 s if the page stalls
         const auto t0 = juce::Time::getMillisecondCounter();
@@ -159,13 +162,15 @@ void DatTrackCore::process (float* L, float* R, int n, double hostSr, const Host
         if (t.playing)
         {
             const double expected = lastPpq + lastPpqStep;
-            if (! lastPlaying || std::abs (t.ppq - expected) > 0.02) ++jumps;   // started, looped or relocated
+            if (! lastPlaying || std::abs (t.ppq - expected) > 0.02) { ++jumps; jumpPpq = t.ppq; }   // started, looped or relocated (and where to)
             lastPpqStep = (double) n / hostSr * t.bpm / 60.0;
         }
         lastPpq = t.ppq; lastPlaying = t.playing;
         const juce::SpinLock::ScopedLockType l (anchorLock);
-        anchor.f = st.readFrame + latHost * st.ratio; anchor.ppq = t.ppq; anchor.bpm = t.bpm; anchor.playing = t.playing; anchor.jump = jumps;
-        anchor.rate = st.running ? st.rate : 1.0;
+        anchor.f = st.readFrame + latHost * st.ratio; anchor.ppq = t.ppq; anchor.bpm = t.bpm; anchor.playing = t.playing; anchor.jump = jumps; anchor.jumpPpq = jumpPpq;
+        // context seconds per host second at the read head right now (the resampling ratio, drift correction included)
+        anchor.rate = st.running ? st.ratio * hostSr / bridge.contextRate() : 1.0;
+        anchor.looping = t.looping; anchor.ls = t.loopStart; anchor.le = t.loopEnd;
     }
 
     if (mode.load() == (int) SyncMode::master) runLink (hostSr, st, n);
@@ -230,7 +235,13 @@ juce::String DatTrackCore::getSyncText() const
 {
     auto m = (SyncMode) mode.load();
     if (! serverOk()) return "Local server could not start (ports 47811-47850 busy)";
-    if (! pageConnected.load()) return "Starting DATTRACK...";
+    if (! pageConnected.load())
+    {
+        const auto started = browserStartedMs.load();
+        if (started > 0 && juce::Time::currentTimeMillis() - started > 12000)
+            return "DATTRACK did not start: press RELOAD. If the window stays blank, install the Microsoft Edge WebView2 Runtime";
+        return "Starting DATTRACK...";
+    }
     if (juce::Time::currentTimeMillis() - lastPacketMs.load() > 1500) return "DATTRACK audio is paused - open the window and click once to start it";
     juce::String s;
     if (m == SyncMode::off) s = "FREE: DATTRACK runs on its own clock";

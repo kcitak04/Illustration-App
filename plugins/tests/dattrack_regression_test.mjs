@@ -5,6 +5,9 @@
 //   count-in   a negative host position (count-in / pre-roll) starts the song at row 0 on the downbeat
 //   flush      before the plugin reloads the page, an edit made a moment ago is saved first
 //   offline    an offline export (faster than real time) must not lose audio: clicks stay evenly spaced
+//   loop       the host loops a region: every beat of every pass is on time, none dropped at the wrap, and
+//              DATTRACK really jumps back to the loop start (bar accents follow the looped positions)
+//   loop-off   the host reports a loop but plays straight through it: DATTRACK must notice and keep following
 // usage: node dattrack_regression_test.mjs <dattrack_host binary> <workdir> [scenario ...]
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -132,6 +135,58 @@ if (want('offline')) {
   const wall = +/wall ([\d.]+)/.exec(r.log)[1];
   check('offline: clicks stay evenly spaced (no lost audio)', gaps.length >= 8 && worst < 0.01, `${ons.length} clicks, interval ${mean.toFixed(4)} s, worst deviation ${(worst * 1000).toFixed(1)} ms`);
   check('offline: the export waits for the page instead of racing ahead', wall > 6, `8 s of audio took ${wall.toFixed(1)} s`);
+}
+
+// ---------------------------------------------------------------- host loop
+if (want('loop')) {
+  const file = path.join(work, 'loop.f32'), bpm = 128, playAt = 3, startPpq = 2, ls = 4, le = 10, dur = 14;
+  const r = await session(['--mode', 'slave', '--bpm', String(bpm), '--play-at', String(playAt), '--start-ppq', String(startPpq),
+                           '--loop-start', String(ls), '--loop-end', String(le), '--duration', String(dur), ...(process.env.REALTIME ? [] : ['--follow-page']), '--out', file], async page => {
+    await page.evaluate(() => { setSong(new Song()); state.metro = true; });
+    if (process.env.DBG) { await page.waitForTimeout((dur - 1.5) * 1000); console.log(await page.evaluate(() => DTVST.log.join('\n'))); }
+  });
+  const latency = +/LATENCY (\d+)/.exec(r.log)[1];
+  const f = readOut(file), ons = onsets(f);
+  const beat = 60 / bpm * sr, first = playAt * sr + latency;
+  const expected = [];
+  for (let k = 0; first + k * beat < f.length / 2 - sr * 0.2; k++) {
+    let u = startPpq + k; if (u >= le) u = ls + (u - le) % (le - ls);
+    expected.push({ at: first + k * beat, pos: u });
+  }
+  let worst = 0, missing = 0;
+  const peaks = [];
+  for (const e of expected) {
+    const o = ons.find(x => Math.abs(x - e.at) < sr * 0.03);
+    if (o === undefined) { missing++; if (process.env.DBG) console.log("  missing beat", expected.indexOf(e), "pos", e.pos, "nearest", ((ons.reduce((b, x) => Math.abs(x - e.at) < Math.abs(b - e.at) ? x : b, 0) - e.at) / sr * 1000).toFixed(1), "ms"); continue; }
+    worst = Math.max(worst, Math.abs(o - e.at) / sr); if (process.env.DBG) console.log("  beat", expected.indexOf(e), "pos", e.pos, ((o - e.at) / sr * 1000).toFixed(2), "ms");
+    let pk = 0; for (let i = o; i < o + sr * 0.02 && i < f.length / 2; i++) pk = Math.max(pk, Math.abs(f[2 * i]));
+    peaks.push({ pk, pos: e.pos });
+  }
+  const extra = ons.filter(o => !expected.some(e => Math.abs(o - e.at) < sr * 0.03)).length;
+  const wraps = expected.filter((e, i) => i > 0 && e.pos < expected[i - 1].pos).length;
+  check('loop: every beat of every pass is on time', missing === 0 && extra === 0 && worst < 0.005,
+        `${expected.length} beats over ${wraps} loop wraps, ${missing} missing, ${extra} extra, worst ${(worst * 1000).toFixed(2)} ms`);
+  const mx = Math.max(...peaks.map(p => p.pk)), mn = Math.min(...peaks.map(p => p.pk)), thr = (mx + mn) / 2;
+  const wrong = peaks.filter(p => (p.pk > thr) !== (p.pos % 4 === 0)).length;
+  check('loop: DATTRACK jumps back to the loop start with the host', wraps >= 2 && mx > mn * 1.3 && wrong === 0,
+        `${wrong} of ${peaks.length} beats at the wrong song position (accent check)`);
+}
+
+// ---------------------------------------------------------------- host reports a loop but does not wrap
+if (want('loop-off')) {
+  const file = path.join(work, 'loopoff.f32'), bpm = 128, playAt = 3, startPpq = 2, ls = 4, le = 10, dur = 12;
+  const r = await session(['--mode', 'slave', '--bpm', String(bpm), '--play-at', String(playAt), '--start-ppq', String(startPpq),
+                           '--loop-start', String(ls), '--loop-end', String(le), '--loop-report-only', '--duration', String(dur), '--follow-page', '--out', file], async page => {
+    await page.evaluate(() => { setSong(new Song()); state.metro = true; });
+  });
+  const latency = +/LATENCY (\d+)/.exec(r.log)[1];
+  const f = readOut(file), ons = onsets(f);
+  const beat = 60 / bpm * sr, first = playAt * sr + latency;
+  // beats from one beat after the (unreal) loop end on must be back on the plain host grid
+  const settle = first + (le - startPpq + 1) * beat, expected = [];
+  for (let k = 0; first + k * beat < f.length / 2 - sr * 0.2; k++) if (first + k * beat >= settle) expected.push(first + k * beat);
+  const hits = expected.filter(at => ons.some(o => Math.abs(o - at) < sr * 0.005)).length;
+  check('loop-off: a loop the host does not play is not followed', expected.length >= 6 && hits === expected.length, `${hits}/${expected.length} beats on the host grid after the loop end`);
 }
 
 const failed = results.filter(r => !r.ok).length;

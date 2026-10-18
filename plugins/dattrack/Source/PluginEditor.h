@@ -24,7 +24,6 @@ private:
     juce::Slider offset;
     juce::Label status, offsetLabel;
     dat::DragFileTile exportTile;
-    juce::WebBrowserComponent* web = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DatTrackEditor)
 };

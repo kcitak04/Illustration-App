@@ -46,7 +46,9 @@ target_sources(DATTRACK PRIVATE ${DATTRACK_CORE_SOURCES} Source/PluginProcessor.
 target_include_directories(DATTRACK PRIVATE Source)
 target_compile_definitions(DATTRACK PUBLIC
     JUCE_WEB_BROWSER=1 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_DISPLAY_SPLASH_SCREEN=0
-    JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1 DAT_WITH_LINK=1)
+    JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1 DAT_WITH_LINK=1
+    # WebView2 (patched JUCE): Web Audio starts without a click, and a hidden page is never throttled
+    "JUCE_WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=\"--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows\"")
 target_link_libraries(DATTRACK
     PRIVATE dattrack_web Ableton::Link juce::juce_audio_utils juce::juce_gui_extra
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)

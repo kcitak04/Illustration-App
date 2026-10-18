@@ -48,7 +48,7 @@ DatTrackEditor::DatTrackEditor (DatTrackProcessor& p) : AudioProcessorEditor (p)
     exportTile.setTooltip ("Your last DATTRACK export (PREF > EXPORT, or SAVE). Drag it onto an Ableton track. Double-click: show in folder.");
     addAndMakeVisible (exportTile);
 
-    web = proc.attachBrowser (*this);
+    proc.attachBrowser (*this);
     proc.core.addChangeListener (this);
 
     setResizable (true, true);
@@ -114,5 +114,5 @@ void DatTrackEditor::resized()
     offsetLabel.setBounds (off.removeFromLeft (42)); offset.setBounds (off);
     bar.removeFromRight (6); bar.removeFromLeft (10);
     status.setBounds (bar);
-    if (web != nullptr) web->setBounds (r);
+    if (auto* w = proc.getBrowser()) w->setBounds (r);
 }
