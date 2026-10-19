@@ -16,7 +16,11 @@ using namespace lab::dsp;
 // ---------------------------------------------------------------------------------------------
 // analysis / resynthesis framework
 // ---------------------------------------------------------------------------------------------
-inline size_t fftN (double win, double sr) { return pow2 (clampd (win, 0.004, 1.0) * sr); }
+// The window is sized as at 44.1 kHz and scaled by the power of two nearest to sr / 44100, so a WINDOW setting gives
+// the same time and frequency resolution at every sample rate (pow2 (win * sr) alone rounds 48 kHz up to twice the
+// window of 44.1 kHz).
+inline size_t srScaled (size_t n44, double sr) { return (size_t) clampd ((double) n44 * std::exp2 (std::round (std::log2 (std::max (1000.0, sr) / 44100))), 256, 65536); }
+inline size_t fftN (double win, double sr) { return srScaled (pow2 (clampd (win, 0.004, 1.0) * 44100), sr); }
 
 // random-access analysis of one channel; frame f is centred at sample f * H. A small cache keeps memory bounded,
 // so even long sources or time-reordering processes never hold the whole analysis.
@@ -276,7 +280,7 @@ Chans specClean (const Chans& ch, Ctx& cx, const Params& p)
     const int mode = p.i ("mode"), where = p.i ("print");
     const size_t N = fftN (p["win"], cx.sr), H = N >> 2, half = N >> 1;
     const double sr = cx.sr, bin = sr / (double) N, gain = p["gain"];
-    const long long F = framesOf (ch[0].size(), H), pf = std::max (1LL, std::min (F, jr (p["plen"] * sr / (double) H)));
+    const long long F = framesOf (ch[0].size(), H), pf = std::max (1LL, std::min (F / 2, jr (p["plen"] * sr / (double) H)));   // a print as long as the sound would delete all of it
     long long p0 = 0;
     if (where == 1) p0 = std::max (0LL, F - pf);
     else if (where == 0)
@@ -435,7 +439,7 @@ Chans blurDrunk (const Chans& ch, Ctx& cx, const Params& p)
         else
         {
             long long step = 0;
-            for (int tries = 0; tries < 64; ++tries) { step = (long long) (cx.rand() * (double) (2 * range)) - range; if (! noZero || step) break; }
+            for (int tries = 0; tries < 64; ++tries) { step = (long long) (cx.rand() * (double) (2 * range + 1)) - range; if (! noZero || step) break; }
             if (noZero && ! step) step = 1;
             pos += step;
             if (F > 1) { while (pos < 0 || pos > F - 1) pos = pos < 0 ? -pos : 2 * (F - 1) - pos; } else pos = 0;
@@ -506,7 +510,10 @@ Chans blurScatter (const Chans& ch, Ctx& cx, const Params& p)
     std::vector<uint8_t> keep;
     return specMap (ch, cx, p["win"], [&] (DVec& a, DVec&, Fr& in)
     {
-        const size_t bs = (size_t) std::max (1LL, jr (p["block"] / in.R.bin)), nb = (a.size() + bs - 1) / bs;
+        // blocks are drawn from the spectrum up to 22.05 kHz only, so a high sample rate does not spend most of KEEP
+        // on empty ultrasonic blocks (everything above is dropped)
+        const size_t bs = (size_t) std::max (1LL, jr (p["block"] / in.R.bin));
+        const size_t top = std::min (a.size(), (size_t) std::ceil (22050.0 / in.R.bin) + 1), nb = (top + bs - 1) / bs;
         long long k = std::min<long long> (p.i ("keep"), (long long) nb - 1);
         if (k < 1) k = 1;
         if (rnd) k = std::min (k, (long long) (cx.rand() * (double) k) + 1);
@@ -517,7 +524,7 @@ Chans blurScatter (const Chans& ch, Ctx& cx, const Params& p)
             size_t b = std::min (nb - 1, (size_t) (cx.rand() * (double) nb));
             if (! keep[b]) { keep[b] = 1; ++n; }
         }
-        for (size_t i = 0; i < a.size(); ++i) if (! keep[i / bs]) a[i] = 0;
+        for (size_t i = 0; i < a.size(); ++i) if (i >= top || ! keep[i / bs]) a[i] = 0;
         if (norm) normTo (a, pre);
     }, p["seed"]);
 }
@@ -971,7 +978,7 @@ Chans pvocExtract (const Chans& ch, Ctx& cx, const Params& p)
 {
     const int mode = p.i ("mode"); const double lo = std::min (p["lo"], p["hi"]), hi = std::max (p["lo"], p["hi"]);
     const size_t len = ch[0].size();
-    return stftRun (ch, cx, p["win"], std::min (len, cx.maxLen), [&] (DVec& mag, DVec&, St& st, long long, long long)
+    return stftRun (ch, cx, ((double) fftN (p["win"], cx.sr) - 0.5) / cx.sr, std::min (len, cx.maxLen), [&] (DVec& mag, DVec&, St& st, long long, long long)
     {
         const double bin = cx.sr / (double) st.N;
         for (size_t k = 0; k <= st.half; ++k)

@@ -75,7 +75,13 @@ inline Buf pvSynth (const Spec& s, Ctx& cx, size_t outLen, double p0, double p1)
     return out;
 }
 
-inline size_t winN (Ctx& cx, double win) { return std::min ((size_t) 16384, pow2 (clampd (win, 0.002, 1.0) * cx.sr)); }
+// sized as at 44.1 kHz, then scaled by the power of two nearest to sr / 44100: the same time / frequency resolution
+// at every sample rate (pow2 (win * sr) would round 48 kHz up to twice the window of 44.1 kHz)
+inline size_t winN (Ctx& cx, double win)
+{
+    const double n = (double) pow2 (clampd (win, 0.002, 1.0) * 44100) * std::exp2 (std::round (std::log2 (std::max (1000.0, cx.sr) / 44100)));
+    return (size_t) clampd (n, 256, 16384);
+}
 
 // runs fn (spec, channel) on every channel's analysis and resynthesises. If fn changes the frame count,
 // the output length follows it (capped at maxLen).
@@ -232,7 +238,7 @@ Chans hiliteFilter (const Chans& ch, Ctx& cx, const Params& p)
     const double Q = std::max (1.0, p["q"]);
     return specFx (ch, cx, p["win"], [&] (Spec& s, int)
     {
-        const double fl = mode == 0 || mode == 1 ? f1 : f1, nyq = s.nyq;
+        const double fl = p["frq1"], nyq = s.nyq;   // high / low pass: FREQ 1 alone (as CDP's frq1), whatever FREQ 2 is
         for (size_t f = 0; f < s.frames; ++f)
         {
             float* a = s.A (f); const float* fr = s.F (f); const double pre = totAmp (a, s.C());
@@ -348,11 +354,11 @@ Chans hiliteBand (const Chans& ch, Ctx& cx, const Params& p)
     const bool additive = mode == 2 || mode == 3, addTo = mode == 1 || mode == 3;
     return specFx (ch, cx, p["win"], [&] (Spec& s, int)
     {
-        std::vector<float> na, nf;
+        std::vector<float> na, nf; std::vector<uint8_t> moved;
         for (size_t f = 0; f < s.frames; ++f)
         {
             float* a = s.A (f); float* fr = s.F (f);
-            na.assign (a, a + s.C()); nf.assign (fr, fr + s.C());
+            na.assign (a, a + s.C()); nf.assign (fr, fr + s.C()); moved.assign (s.C(), 0);
             for (size_t k = 0; k <= s.half; ++k)
             {
                 double x = std::abs ((double) fr[k]);
@@ -366,13 +372,20 @@ Chans hiliteBand (const Chans& ch, Ctx& cx, const Params& p)
                 size_t k = up ? s.half - i : i;
                 double x = std::abs ((double) fr[k]); if (x < s1 || x >= s2) continue;
                 double amp = a[k] * gm, nfq = additive ? x + shift : x * ratio;
+                if (addTo)
+                {
+                    if (nfq > 0 && nfq < s.nyq) { size_t j = (size_t) s.chan (nfq); if (j != k && amp > na[j]) { na[j] = (float) amp; nf[j] = (float) nfq; } }
+                    na[k] = (float) amp;
+                    continue;
+                }
+                // replacing: moved data overwrites what was there, the loudest of the moved data wins a channel
+                // (data that stays in its own channel, e.g. SHIFT near 0, is moved data too, not a vacated channel)
                 if (nfq > 0 && nfq < s.nyq)
                 {
                     size_t j = (size_t) s.chan (nfq);
-                    if (j != k && (! addTo || amp > na[j])) { na[j] = (float) amp; nf[j] = (float) nfq; }
+                    if (! moved[j] || amp > na[j]) { na[j] = (float) amp; nf[j] = (float) nfq; moved[j] = 1; }
                 }
-                if (addTo) { na[k] = (float) amp; }
-                else na[k] = (float) (0.5 * (a[k > 0 ? k - 1 : 0] + a[std::min (k + 1, s.half)]) * gm * 0.25);   // vacated channel: interpolated, faint
+                if (! moved[k]) na[k] = (float) (0.5 * (a[k > 0 ? k - 1 : 0] + a[std::min (k + 1, s.half)]) * gm * 0.25);   // vacated channel: interpolated, faint
             }
             std::copy (na.begin(), na.end(), a); std::copy (nf.begin(), nf.end(), fr);
         }
@@ -544,7 +557,7 @@ Chans hiliteBltr (const Chans& ch, Ctx& cx, const Params& p)
 // start sample of the noise print: the quietest stretch of LEN seconds, or the start / end of the sound
 inline size_t noiseRegion (const Chans& ch, double sr, int where, double lenSec, size_t& nlen)
 {
-    const size_t n = ch[0].size(); nlen = std::min (n, (size_t) std::max (1.0, lenSec * sr));
+    const size_t n = ch[0].size(); nlen = std::min (std::max ((size_t) 1, n / 2), (size_t) std::max (1.0, lenSec * sr));   // never the whole sound
     if (where == 1) return 0;
     if (where == 2) return n - nlen;
     Buf m = monoOf (ch); const size_t hop = std::max ((size_t) 1, nlen / 8);
@@ -1569,15 +1582,22 @@ Chans spectuneFx (const Chans& ch, Ctx& cx, const Params& p)
     const int mode = p.i ("mode"); const bool keepF = p.i ("formant") == 0;
     auto pt = trackPitch (monoOf (ch), cx.sr, mtof (std::min (p["lop"], p["hip"] - 1)), mtof (std::max (p["hip"], p["lop"] + 1)), 0.15, &cx);
     // loudness-weighted histogram of quarter-tones: the most prominent pitch
-    Buf m = monoOf (ch); std::map<int, double> hist;
+    Buf m = monoOf (ch); std::map<int, double> hist; std::vector<std::pair<double, double>> got;   // (midi, weight) per pitched frame
     for (size_t i = 0; i < pt.f0.size(); ++i)
     {
         if (pt.f0[i] <= 0) continue;
         double e = 0; size_t a = i * pt.hop, b = std::min (m.size(), a + pt.hop); for (size_t j = a; j < b; ++j) e += (double) m[j] * m[j];
-        hist[(int) jr (ftom (pt.f0[i]) * 4)] += p.i ("weight") == 0 ? std::sqrt (e) + 1e-9 : 1.0;
+        const double w = p.i ("weight") == 0 ? std::sqrt (e) + 1e-9 : 1.0;
+        got.push_back ({ ftom (pt.f0[i]), w }); hist[(int) jr (got.back().first * 4)] += w;
     }
-    double found = 0, bestW = 0;
-    for (auto& [q, w] : hist) { double ww = w + 0.5 * (hist.count (q - 1) ? hist[q - 1] : 0) + 0.5 * (hist.count (q + 1) ? hist[q + 1] : 0); if (ww > bestW) { bestW = ww; found = q / 4.0; } }
+    double found = 0, bestW = 0; int bestQ = 0;
+    for (auto& [q, w] : hist) { double ww = w + 0.5 * (hist.count (q - 1) ? hist[q - 1] : 0) + 0.5 * (hist.count (q + 1) ? hist[q + 1] : 0); if (ww > bestW) { bestW = ww; bestQ = q; } }
+    if (bestW > 0)
+    {   // the pitch itself, not the centre of its quarter-tone bin (that is up to 1/8 tone off and decides which note is nearest)
+        double sw = 0, sm = 0;
+        for (auto& [mi, w] : got) if (std::abs (mi * 4 - bestQ) <= 1.5) { sw += w; sm += w * mi; }
+        found = sw > 0 ? sm / sw : bestQ / 4.0;
+    }
     double ratio = 1;
     if (found > 0)
     {
@@ -1654,7 +1674,7 @@ void addCdpSpectralB (std::vector<ProcDef>& v)
          { Opt ("mode", "MODE", { "ON", "BOOST", "BELOW>BOOST", "ABOVE>BOOST", "BELOW", "ABOVE", "ONCE BELOW", "ONCE ABOVE" }), Opt ("wave", "WAVE", { "DOWNRAMP", "SINE", "SAW", "UPRAMP" }, 1),
            P ("rate", "RATE", 0.05, 30, 2, PExp, "Hz"), Pct ("phase", "PHASE", 0), P ("lo", "LOW", 0, 5000, 100, 0, {}, Fmt::hz), P ("hi", "HIGH", 200, 20000, 6000, PExp, {}, Fmt::hz),
            P ("bw", "WIDTH", 10, 2000, 150, PExp, {}, Fmt::hz), P ("amp", "AMP", 1, 30, 10, PExp, "x"), P ("sust", "SUSTAIN", 1, 64, 6, PInt), P ("nonlin", "CURVE", 0.1, 10, 1, PExp),
-           Opt ("hold", "PITCH", { "HOLD START", "TRACK" }), Opt ("retrig", "RETRIGGER", { "EARLY", "AFTER DECAY" }) }, hiliteArpeg, {}, false, "hilite arpeg 1-8");
+           Opt ("hold", "PITCH", { "HOLD START", "TRACK" }), Opt ("retrig", "RETRIGGER", { "EARLY", "AFTER DECAY" }), W() }, hiliteArpeg, {}, false, "hilite arpeg 1-8");
     add (v, CAT, "cdp_hilite_pluck", "SPECTRAL PLUCK", "HPLK", "Every partial that newly appears (rises above THRESH below the window peak) gets a GAIN boost, so changing spectra sparkle with pluck-like attacks. Great after an arpeggio or trace.",
          { P ("gain", "GAIN", 1, 30, 6, PExp, "x"), P ("thresh", "THRESH", -80, -6, -30, 0, {}, Fmt::db), W() }, hilitePluck, {}, false, "hilite pluck");
     add (v, CAT, "cdp_hilite_trace", "SPECTRAL TRACE", "HTRC", "Keeps only the N loudest partials of each window: from the whole spectrum, ABOVE LOW, BELOW HIGH or BETWEEN them. RETAIN tops up with loud partials from outside the band when the band has too few.",
