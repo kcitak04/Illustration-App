@@ -84,7 +84,8 @@ Chans renderHits (const Chans& ch, std::vector<Hit>& hits, size_t outLen, bool s
     auto outN = [&] (const Hit& h) { double len = h.len < 0 ? L - h.src0 : std::min (h.len, L - h.src0); return std::max (0.0, len / clampd (h.ratio, 1e-3, 1e3)); };
     double work = 0;
     for (auto& h : hits) work += outN (h) * (double) nch;
-    const double shrink = work > BUDGET ? BUDGET / work : 1;   // very dense settings: every copy is shortened alike
+    const double budget = BUDGET * std::max (1.0, sr / 44100);   // per second of audio, so the result does not depend on the rate
+    const double shrink = work > budget ? budget / work : 1;   // very dense settings: every copy is shortened alike
     if (outLen == 0)
     {
         double e = 1;
@@ -930,7 +931,19 @@ double lineAt (const double* v, int n, double f, bool glide)
 Chans iterfof (const Chans& ch, Ctx& cx, const Params& p)
 {
     const double sr = cx.sr, L = (double) ch[0].size(), goal = std::min ((double) cx.maxLen, p["dur"] * sr);
-    const double a = clampd (p["pos"], 0, 1) * (L - 1), g = std::max (8.0, std::min (L - a, (double) ms2s (p["size"], sr)));
+    double a = clampd (p["pos"], 0, 1) * (L - 1);
+    {   // a grain in a gap (between drum hits, in a lead-in) would only iterate silence: move on to where the sound is
+        const double pk = peakAll (ch), want = (double) ms2s (p["size"], sr);
+        auto loud = [&] (size_t i) { for (auto& x : ch) if (std::abs (x[i]) > 0.03 * pk) return true; return false; };
+        bool any = false; for (size_t i = (size_t) a; i < std::min ((size_t) L, (size_t) (a + want)) && ! any; ++i) any = loud (i);
+        if (! any && pk > 0)
+        {
+            size_t i = (size_t) a; while (i < (size_t) L && ! loud (i)) ++i;
+            if (i >= (size_t) L) { i = 0; while (i < (size_t) L && ! loud (i)) ++i; }
+            if (i < (size_t) L) a = std::min ((double) i, std::max (0.0, L - 8));
+        }
+    }
+    const double g = std::max (8.0, std::min (L - a, (double) ms2s (p["size"], sr)));
     const double step = divSec (p.i ("div"), cx.bpm) * sr; const bool glide = p.i ("mode") == 0;
     const double notes[4] = { p["n1"], p["n2"], p["n3"], p["n4"] };
     cx.seed (p["seed"]);
@@ -946,7 +959,12 @@ Chans iterfof (const Chans& ch, Ctx& cx, const Params& p)
         Hit e { t }; e.src0 = a; e.len = g; e.gain = 1 - cx.rand() * p["ampcut"]; e.fade = std::min (0.002, g / sr / 4); h.push_back (e);
         t += per; ph += TAU * vr * per / sr;
     }
-    return renderHits (ch, h, capLen (cx, goal + g), false, cx, 0.001);
+    Chans out = renderHits (ch, h, capLen (cx, goal + g), false, cx, 0.001);
+    // overlapping grains of a one-sided wave (a kick's first half cycle) add up to a DC offset: block it (5 Hz, far below the
+    // lowest NOTE)
+    const double R = std::exp (-TAU * 5 / sr);
+    for (auto& x : out) { double x1 = 0, y1 = 0; for (auto& v : x) { double y = v - x1 + R * y1; x1 = v; y1 = y; v = (float) y; } }
+    return out;
 }
 
 // ITERATE ON A LINE: the sound iterated every DELAY (RANDOM varies it), its transposition following a line through TRANSP 1-4
@@ -1130,7 +1148,7 @@ Chans cascade (const Chans& ch, Ctx& cx, const Params& p)
     const size_t outLen = capLen (cx, total + 1), nch = mode == 0 ? src.size() : 2;
     Chans out (nch, Buf (outLen));
     double work = 0; for (size_t i = 0; i + 1 < cuts.size(); ++i) work += (cuts[i + 1] - cuts[i] + spl) * (emax + 1) * (double) nch;
-    const double budgetCut = work > BUDGET ? BUDGET / work : 1;
+    const double budget = BUDGET * std::max (1.0, sr / 44100), budgetCut = work > budget ? budget / work : 1;
     std::vector<Buf> clip (src.size());
     int panDir = 1;
     for (size_t i = 0; i + 1 < cuts.size(); ++i)

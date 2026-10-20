@@ -93,6 +93,17 @@ std::vector<Ev> gateEvents (const Chans& ch, double gateDb, double minSil, doubl
         else ++hole;
     }
     if (in) ev.back().e = std::min (n, lastLoud + 1);
+    {   // a sound fading in (or out) flickers around the gate: blips shorter than a splice are part of the next sound, not grains
+        const long long minLen = std::max (mh, jr (0.015 * sr));
+        std::vector<Ev> m;
+        for (size_t k = 0; k < ev.size(); ++k)
+        {
+            if (! m.empty() && m.back().e - m.back().s < minLen) { m.back().e = ev[k].e; continue; }
+            m.push_back (ev[k]);
+        }
+        if (m.size() > 1 && m.back().e - m.back().s < minLen) { m[m.size() - 2].e = m.back().e; m.pop_back(); }
+        ev.swap (m);
+    }
     // dense or noisy material rarely falls below the gate: a strong attack (5 ms envelope jumping above twice its
     // 50 ms average, and above half the gate) also starts a new event, so the detector works on loops too
     if (attacks)
@@ -195,7 +206,8 @@ inline double st2r (double st) { return std::pow (2.0, st / 12.0); }
 const double SPL = 0.0075;   // CDP grain half-splice (15 ms splices)
 const double BUDGET = 1e7;   // max samples written by the event generators (keeps extreme settings fast)
 // longest event allowed when about `events` events are generated
-inline long long evCap (double events) { return std::max (64LL, (long long) (BUDGET / std::max (1.0, events))); }
+// (scaled with the sample rate, so a 96 kHz render keeps the same event lengths as a 44.1 kHz one)
+inline long long evCap (double events, double sr) { return std::max (64LL, (long long) (BUDGET * std::max (1.0, sr / 44100) / std::max (1.0, events))); }
 
 // copies the lead-in before the first grain unchanged; returns the output cursor
 long long leadIn (Out& o, const Chans& ch, const Grains& g)
@@ -394,7 +406,7 @@ Chans grainRExtend (const Chans& ch, Ctx& cx, const Params& p)
     cx.seed (p["seed"]);
     const double fd = 0.001 * cx.sr, need = (double) (re - rs) * p["stretch"];
     Out o (ch.size(), cx.maxLen); long long cur = 0;
-    putSeg (o, ch, 0, (double) rs, 0, rs, 1, 1, 1); cur = rs; o.touch (cur);
+    putSeg (o, ch, 0, (double) rs, 0, rs, 1, fd, 1); cur = rs; o.touch (cur);   // spliced (not cut dead) into the re-used units
     double done = 0; int last = -1, run = 0;
     std::vector<int> order; size_t oi = 0;
     while (done < need && cur < (long long) cx.maxLen)
@@ -415,7 +427,7 @@ Chans grainRExtend (const Chans& ch, Ctx& cx, const Params& p)
         cur += std::max (dur, jr (step)); done += (double) len; o.touch (cur);
         cx.prog (done / std::max (1.0, need));
     }
-    putSeg (o, ch, (double) re, (double) (n - re), cur, n - re, 1, 1, 1); o.touch (cur + n - re);
+    putSeg (o, ch, (double) re, (double) (n - re), cur, n - re, 1, fd, 1); o.touch (cur + n - re);
     return o.take();
 }
 
@@ -454,7 +466,7 @@ Chans grainNoiseExt (const Chans& ch, Ctx& cx, const Params& p)
     cx.seed (p["seed"]);
     const bool keepAll = p.i ("keep") == 0; const long long D = jr (p["dur"] * cx.sr), fd = std::max (1LL, jr (0.0005 * cx.sr));
     Out o (ch.size(), cx.maxLen); long long cur = 0;
-    if (keepAll) { putSeg (o, ch, 0, (double) ns, 0, ns, 1, 1, 1); cur = ns; }
+    if (keepAll) { putSeg (o, ch, 0, (double) ns, 0, ns, 1, (double) fd, 1); cur = ns; }   // spliced into the noise reads
     const long long end = cur + D; const long long maxSeg = std::max (64LL, jr (0.05 * cx.sr));
     while (cur < end && cur < (long long) cx.maxLen)
     {
@@ -466,7 +478,7 @@ Chans grainNoiseExt (const Chans& ch, Ctx& cx, const Params& p)
         cx.prog (1 - (double) (end - cur) / (double) std::max (1LL, D));
     }
     o.touch (cur);
-    if (keepAll) { putSeg (o, ch, (double) ne, (double) (n - ne), cur, n - ne, 1, 1, 1); o.touch (cur + n - ne); }
+    if (keepAll) { putSeg (o, ch, (double) ne, (double) (n - ne), cur, n - ne, 1, (double) fd, 1); o.touch (cur + n - ne); }
     return o.take();
 }
 
@@ -483,7 +495,7 @@ Chans grainexExtend (const Chans& ch, Ctx& cx, const Params& p)
     const long long a0 = c.front(), a1 = c.back(); const int U = (int) c.size() - 1;
     cx.seed (p["seed"]);
     Out o (ch.size(), cx.maxLen); const double fd = 0.001 * cx.sr;
-    putSeg (o, ch, 0, (double) a0, 0, a0, 1, 1, 1); long long cur = a0;
+    putSeg (o, ch, 0, (double) a0, 0, a0, 1, fd, 1); long long cur = a0;
     const double need = (double) (a1 - a0) + p["plus"] * cx.sr; double done = 0; int last = -1;
     std::vector<int> order; size_t oi = 0;
     while (done < need && cur < (long long) cx.maxLen)
@@ -494,7 +506,7 @@ Chans grainexExtend (const Chans& ch, Ctx& cx, const Params& p)
         putSeg (o, ch, (double) a, (double) len, cur, len, 1, fd, 1); cur += len; done += (double) len; o.touch (cur);
         cx.prog (done / need);
     }
-    putSeg (o, ch, (double) a1, (double) (n - a1), cur, n - a1, 1, 1, 1); o.touch (cur + n - a1);
+    putSeg (o, ch, (double) a1, (double) (n - a1), cur, n - a1, 1, fd, 1); o.touch (cur + n - a1);
     return o.take();
 }
 
@@ -654,7 +666,7 @@ Chans peakchop (const Chans& ch, Ctx& cx, const Params& p)
     {
         const size_t i = which[k]; const double norm = 1 + (std::min (mx / pv[i], 100.0) - 1) * p["norm"];
         const long long flat = pk[i] - jr (p["skew"] * (double) width), a = std::max (0LL, flat - rise);
-        const long long len = std::min ({ n - a, (flat - a) + width + rise, evCap ((double) times.size()) });
+        const long long len = std::min ({ n - a, (flat - a) + width + rise, evCap ((double) times.size(), cx.sr) });
         if (len <= 0) continue;
         const long long at = jr (times[k]);
         for (long long j = 0; j < len; ++j)
@@ -1160,7 +1172,12 @@ Buf makeTable (const Buf& m, double sr)
     for (long long i = std::max (1LL, pk - want * 2); i < std::min (n, pk + want * 2); ++i)
         if (m[(size_t) i - 1] < 0 && m[(size_t) i] >= 0) { if (a < 0) a = i; else if (i - a >= want) { b = i; break; } }
     if (a < 0 || b < 0) { a = std::max (0LL, pk - want / 2); b = std::min (n, a + want); }
-    Buf t (m.begin() + a, m.begin() + b); double p = peak (t);
+    Buf t (m.begin() + a, m.begin() + b);
+    {   // a lopsided cycle (a decaying kick) would put a DC offset under every event read from the table
+        double mean = 0; for (float v : t) mean += v; mean /= (double) std::max<size_t> (1, t.size());
+        for (auto& v : t) v = (float) (v - mean);
+    }
+    double p = peak (t);
     if (p > 1e-9) for (auto& v : t) v = (float) (v / p);
     if (t.size() < 4) t.assign (64, 0.0f);
     return t;
@@ -1314,7 +1331,7 @@ Chans brownian (const Chans& ch, Ctx& cx, const Params& p)
     const long long D = std::min ((long long) cx.maxLen, jr (p["dur"] * cx.sr));
     Out o (2, (size_t) std::max (1LL, D));
     double pitch = 0.5 * (lo + hi), sp = 0.5, db = 0; long long k = 0;
-    const long long cap = evCap ((double) D / (std::max (0.005, p["tick"] * 0.5) * cx.sr));
+    const long long cap = evCap ((double) D / (std::max (0.005, p["tick"] * 0.5) * cx.sr), cx.sr);
     const double base = wave ? 0 : srcMidi (m, cx.sr, cx);
     auto reflect = [] (double v, double a, double b) { if (b <= a) return a; for (int i = 0; i < 8 && (v < a || v > b); ++i) v = v < a ? 2 * a - v : 2 * b - v; return clampd (v, a, b); };
     for (double t = 0; t < (double) D; t += std::max (0.005, p["tick"] * (0.5 + cx.rand())) * cx.sr, ++k)
@@ -1375,7 +1392,7 @@ Chans crystal (const Chans& ch, Ctx& cx, const Params& p)
     const auto V = polyVerts (p.i ("shape")); const int space = p.i ("mode");
     const double base = srcMidi (m, cx.sr, cx), lo = std::min (p["plo"], p["phi"]), hi = std::max (p["plo"], p["phi"]);
     const long long D = std::min ((long long) cx.maxLen, jr (p["dur"] * cx.sr)); long long E = std::max (16LL, jr (p["evdur"] * cx.sr));
-    E = std::min (E, evCap ((double) D / (std::max (0.01, p["tstep"]) * cx.sr) * (double) V.size()));
+    E = std::min (E, evCap ((double) D / (std::max (0.01, p["tstep"]) * cx.sr) * (double) V.size(), cx.sr));
     Out o (space == 0 ? 1 : 2, (size_t) std::max (1LL, D)); const double gain = 1 / std::sqrt ((double) V.size());
     long long g = 0;
     for (double t = 0; t < (double) D; t += std::max (0.01, p["tstep"]) * cx.sr, ++g)
@@ -1422,7 +1439,7 @@ Chans pulser1 (const Chans& ch, Ctx& cx, const Params& p)
     const long long D = std::min ((long long) cx.maxLen, jr (p["dur"] * cx.sr)); const double T = (double) tab.size();
     Out o (1, (size_t) std::max (1LL, D)); long long k = 0;
     auto rv = [&] (double v) { return v * (1 - p["erand"] * cx.rand()); };
-    const long long cap = evCap ((double) D / (std::max (0.01, p["speed"] * 0.5) * cx.sr));
+    const long long cap = evCap ((double) D / (std::max (0.01, p["speed"] * 0.5) * cx.sr), cx.sr);
     for (double t = 0; t < (double) D; t += std::max (0.01, p["speed"] * (1 + p["scatter"] * (cx.rand() - 0.5))) * cx.sr, ++k)
     {
         const long long R = std::max (1LL, jr (rv (p["rise"]) * cx.sr)), S = jr (rv (p["sus"]) * cx.sr), Dc = std::min (cap, std::max (1LL, jr (rv (p["decay"]) * cx.sr))), L = R + S + Dc;
@@ -1448,7 +1465,7 @@ Chans pulser2 (const Chans& ch, Ctx& cx, const Params& p)
     const long long D = std::min ((long long) cx.maxLen, jr (p["dur"] * cx.sr)); const bool rnd = p.i ("mode") == 1;
     Out o (2, (size_t) std::max (1LL, D)); long long k = 0; Buf pk;
     auto rv = [&] (double v) { return v * (1 - p["erand"] * cx.rand()); };
-    const long long cap = evCap ((double) D / (std::max (0.01, p["speed"] * 0.5) * cx.sr));
+    const long long cap = evCap ((double) D / (std::max (0.01, p["speed"] * 0.5) * cx.sr), cx.sr);
     for (double t = 0; t < (double) D; t += std::max (0.01, p["speed"] * (1 + p["scatter"] * (cx.rand() - 0.5))) * cx.sr, ++k)
     {
         const long long R = std::max (1LL, jr (rv (p["rise"]) * cx.sr)), S = jr (rv (p["sus"]) * cx.sr), Dc = std::min (cap, std::max (1LL, jr (rv (p["decay"]) * cx.sr))), L = R + S + Dc;
@@ -1477,7 +1494,7 @@ Chans rotor (const Chans& ch, Ctx& cx, const Params& p)
     const int cnt = std::max (3, p.i ("cnt")), mode = p.i ("mode"); const bool st = p.i ("stereo") == 1;
     const double lo = std::min (p["minp"], p["maxp"]), hi = std::max (p["minp"], p["maxp"]);
     const long long D = std::min ((long long) cx.maxLen, jr (p["dur"] * cx.sr)); long long E = std::max (16LL, jr (p["evdur"] * cx.sr));
-    E = std::min (E, evCap (2 * std::max ((double) D / (std::max (0.01, p["step"] * 0.15) * cx.sr), (double) D / (std::max (0.05, p["gstp"]) * cx.sr) * cnt)));
+    E = std::min (E, evCap (2 * std::max ((double) D / (std::max (0.01, p["step"] * 0.15) * cx.sr), (double) D / (std::max (0.05, p["gstp"]) * cx.sr) * cnt), cx.sr));
     Out o (st ? 2 : 1, (size_t) std::max (1LL, D)); double setStart = 0;
     for (int j = 0; setStart < (double) D && j < 100000; ++j)
     {

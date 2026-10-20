@@ -552,7 +552,7 @@ struct Bank
 inline size_t bankCap (const Chans& ch, const Ctx& cx, double tailSec, bool dbl)
 {
     const double n = (double) std::min (cx.maxLen, ch[0].size() + (size_t) (std::max (0.0, tailSec) * cx.sr)) * (double) ch.size() * (dbl ? 2 : 1);
-    return (size_t) clampd (2.5e8 / std::max (1.0, n), 1, 240);
+    return (size_t) clampd (2.5e8 * std::max (1.0, cx.sr / 44100) / std::max (1.0, n), 1, 240);   // same filter count at any rate
 }
 template <typename Upd> Chans bankRun (const Chans& ch, Ctx& cx, size_t nf, bool dbl, double tailSec, Upd upd)
 {

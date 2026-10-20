@@ -330,6 +330,7 @@ Buf shredOnce (const Buf& x, const std::vector<size_t>& ptr, const std::vector<s
             double g = 1;
             if (q > 0 && i < S) g = (double) i / (double) S;
             if (i >= L) { if (q + 1 == cc) break; g = 1 - (double) (i - L) / (double) S; }
+            else if (q + 1 == cc && i + S > L) g *= (double) (L - i) / (double) S;   // the last chunk fades out instead of stopping dead
             y[dst] = (float) (y[dst] + x[src] * g);
         }
         pos += L;
@@ -534,7 +535,7 @@ Chans flutter (const Chans& ch, Ctx& cx, const Params& p)
     double ph = 0; size_t set = 0;
     for (size_t i = 0; i < n; ++i)
     {
-        double v = 0.5 + 0.5 * std::cos (TAU * ph);
+        double v = 0.5 - 0.5 * std::cos (TAU * ph);   // CDP's table starts at the minimum: the channel set changes at the trough, without a click
         if (depthP > 1) v = std::pow (v, depthP);
         v *= depth;
         double last = ph; ph += p["rate"] / sr; ph -= std::floor (ph);
@@ -810,6 +811,7 @@ Chans mchshred (const Chans& ch, Ctx& cx, const Params& p)
             size_t s = st + i, d = pos + i; if (s >= n || d >= n) break;
             double g = 1; if (q > 0 && i < S) g = (double) i / (double) S;
             if (i >= L) { if (q + 1 == sp.perm.size()) break; g = 1 - (double) (i - L) / (double) S; }
+            else if (q + 1 == sp.perm.size() && i + S > L) g *= (double) (L - i) / (double) S;
             if (keep) { out[0][d] += (float) (src[swapLR ? 1 : 0][s] * g); out[1][d] += (float) (src[swapLR ? 0 : 1][s] * g); }
             else { out[0][d] += (float) (src[0][s] * g * gl); out[1][d] += (float) (src[0][s] * g * gr); }
         }
@@ -958,8 +960,15 @@ Chans crumble (const Chans& ch, Ctx& cx, const Params& p)
     const size_t outLen = capLen ((double) n * std::max (1.0, p["ostrch"]) * 1.2 + sr, cx);
     Chans out (2, Buf (outLen));
     double cg = 0; for (int k = 0; k < N; ++k) cg += rd.sl[(size_t) k] + rd.sr[(size_t) k]; cg /= N;
-    for (size_t i = 0; i < (size_t) stt && i < outLen; ++i) { out[0][i] = (float) (x[i] * cg); out[1][i] = (float) (x[i] * cg); }
     double cut = stt, opos = stt; int guard = 0; const double spl = 0.015 * sr;
+    {   // the whole part crossfades into the first fragment (which fades in from START) instead of stopping dead
+        const double xf = std::max (1.0, std::min (spl, std::max (0.005, p["size"] * 0.5) * sr / 3));
+        for (size_t i = 0; (double) i < stt + xf && i < outLen && i < n; ++i)
+        {
+            const double g = (double) i < stt ? 1.0 : 1 - ((double) i - stt) / xf;
+            out[0][i] = (float) (x[i] * cg * g); out[1][i] = (float) (x[i] * cg * g);
+        }
+    }
     while (cut < (double) n - 1 && opos < (double) outLen && guard++ < 200000)
     {
         int stage = 0; while (stage + 1 < (int) bounds.size() && opos >= bounds[(size_t) stage + 1]) ++stage;
@@ -1214,6 +1223,7 @@ Chans tapdelay (const Chans& ch, Ctx& cx, const Params& p)
     const double sr = cx.sr; const size_t n = ch[0].size(); const int K = clamp (p.i ("taps"), 1, 32), sync = p.i ("sync");
     const double T = sync > 0 ? divSec (sync - 1, cx.bpm) : p["time"] / 1000;
     cx.seed (p["seed"]);
+    const size_t outLen = capLen ((double) n + p["tail"] * sr, cx);
     std::vector<size_t> d; std::vector<double> gL, gR; double t = 0, step = T, sumL = 0, sumR = 0;
     for (int k = 0; k < K; ++k)
     {
@@ -1227,13 +1237,15 @@ Chans tapdelay (const Chans& ch, Ctx& cx, const Params& p)
         double pp = 0;
         switch (p.i ("pans")) { case 0: pp = k % 2 ? 1 : -1; break; case 1: pp = K == 1 ? 0 : -1 + 2.0 * k / (K - 1); break; case 2: pp = cx.rand() * 2 - 1; break; default: pp = 0; }
         double gl, gr, amp = std::pow (p["decay"], k); cdpPan (pp * p["spread"], gl, gr);
-        d.push_back ((size_t) std::max (1.0, std::round (t * sr))); gL.push_back (amp * gl); gR.push_back (amp * gr);
+        // a tap later than the end of the render never sounds: clamping it keeps the delay line bounded (32 SLOW DOWN taps
+        // of 2 s would otherwise ask for hours of delay line, gigabytes of memory)
+        d.push_back ((size_t) clampd (std::round (t * sr), 1, (double) outLen)); gL.push_back (amp * gl); gR.push_back (amp * gr);
         sumL += gL.back(); sumR += gR.back();
     }
     const double norm = std::min (2.0, (double) K) * 0.7 / std::max (1e-9, std::max (sumL, sumR));
     const size_t D = *std::max_element (d.begin(), d.end()) + 2;
-    const double fb = clampd (p["feedback"], -0.99, 0.99), wet = p["mix"], dry = 1 - wet;
-    const size_t outLen = capLen ((double) n + p["tail"] * sr, cx);
+    // FEEDBACK is the loop gain: the recirculated taps sum to up to 1.4, so without this scaling FEEDBACK above ~0.7 ran away
+    const double fb = clampd (p["feedback"], -0.99, 0.99) / std::max (1.0, norm * std::max (sumL, sumR)), wet = p["mix"], dry = 1 - wet;
     Chans out (2, Buf (outLen));
     std::vector<double> bl (D, 0.0), br (D, 0.0); size_t w = 0; double lop = 0, rop = 0;
     for (size_t i = 0; i < outLen; ++i)
