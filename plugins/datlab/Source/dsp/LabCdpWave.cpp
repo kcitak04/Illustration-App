@@ -889,6 +889,8 @@ Chans psFeatures (const Chans& ch, Ctx& cx, const Params& p)
             if (p["hoarse"] > 0) opos += (double) jr ((cx.rand() - 0.5) * p["hoarse"] * outlen);
             if (opos < 0) opos = 0;
             if (! repeat) k += j;
+            // KEEP TIME transposing down: grains are dropped while the output is ahead, so the length stays the source's
+            if (mode == 1 && tr < 1) while (k < g.count() && (double) g.cut[k] + 0.5 * seglen < opos) k += j;
             if (! (cnt & 1023)) cx.prog (0.5 + 0.5 * (double) k / (double) g.count());
         }
         return y;
@@ -904,10 +906,10 @@ Chans psSynth (const Chans& ch, Ctx& cx, const Params& p)
     const auto& chord = CHORDS[(size_t) clamp (p.i ("chord"), 0, (int) CHORDS.size() - 1)];
     const double root = 440 * std::pow (2.0, (p["root"] - 69) / 12); const double prog[] = { 0, 5, 7, 0 };
     return eachCh (ch, cx, [&] (const Buf& x, int) {
-        cx.seed (p["seed"]); Buf y (x.size(), 0.f); std::vector<double> fr, am;
+        cx.seed (p["seed"]); Buf y (x.size(), 0.f); std::vector<double> fr, am, ph (8, 0.0);
         for (size_t k = 0; k < g.count(); ++k)
         {
-            const size_t a = g.cut[k], b = g.cut[k + 1], L = b - a; if (L < 2 || zeroSeg (x, a, b)) continue;
+            const size_t a = g.cut[k], b = g.cut[k + 1], L = b - a;
             const double u = (double) a / (double) std::max ((size_t) 1, x.size());
             fr.clear(); am.clear();
             if (mode == 1) for (int h = 1; h <= 8; ++h) { fr.push_back (root * h); am.push_back (1.0 / h); }
@@ -916,15 +918,22 @@ Chans psSynth (const Chans& ch, Ctx& cx, const Params& p)
                 double shift = mode == 2 ? p["glide"] * u : mode == 3 ? prog[std::min (3, (int) (u * 4))] : 0;
                 for (double c : chord) { fr.push_back (root * semis (c + shift)); am.push_back (1); }
             }
+            // the oscillators run on as one continuous stream (CDP: FOFs imposed on a stream of synthesized sound); restarting
+            // them at every grain (each shorter than one cycle of ROOT) gave a DC-heavy buzz at the voice's pitch, not the chord
+            std::vector<double> ph0 (ph.begin(), ph.begin() + (long) fr.size());
+            for (size_t o = 0; o < fr.size(); ++o) { ph[o] += fr[o] * (double) L / sr; ph[o] -= std::floor (ph[o]); }
+            if (L < 2 || zeroSeg (x, a, b)) continue;
             Buf s (L);
             for (size_t i = 0; i < L; ++i)
             {
                 double v = 0;
                 if (mode == 4) v = cx.rand() * 2 - 1;
-                else for (size_t o = 0; o < fr.size(); ++o) if (fr[o] < sr * 0.45) v += std::sin (TAU * fr[o] * (double) i / sr) * am[o];
+                else for (size_t o = 0; o < fr.size(); ++o) if (fr[o] < sr * 0.45) v += std::sin (TAU * (ph0[o] + fr[o] * (double) i / sr)) * am[o];
                 s[i] = (float) v;
             }
-            double mx = peak (s); if (mx < 1e-12) continue;
+            // one fixed scale for the whole stream (a per-grain peak normalisation steps the level at every grain: clicks)
+            double mx = mode == 4 ? 1.0 : 0.0; if (mode != 4) for (size_t o = 0; o < fr.size(); ++o) if (fr[o] < sr * 0.45) mx += am[o];
+            if (mx < 1e-12) continue;
             Buf env = fofEnv (x, a, b);
             for (size_t i = 0; i < L; ++i) { double v = s[i] / mx; y[a + i] = (float) (v * (1 - depth) * 0.25 + v * depth * env[i]); }
         }
@@ -1399,10 +1408,11 @@ Chans wdouble (const Chans& ch, Ctx& cx, const Params& p)
         {
             const size_t a = b[i], L = b[i + 1] - a;
             if (L <= g) { app (y, x, a, a + L, cx.maxLen); continue; }
-            w.clear(); for (size_t k = 0; k < L; k += g) w.push_back (x[a + k]);
-            if ((L - 1) % g) w.push_back (x[a + L - 1]);
-            const size_t fill = (size_t) std::max (1.0, jsround ((double) L / (double) w.size())), wl = w.size();
-            for (size_t r = 1; r < fill; ++r) for (size_t k = 0; k < wl; ++k) w.push_back (w[k]);
+            // the squeezed waveset (every g-th sample) repeated to fill exactly the waveset's own length (as CDP's octave
+            // case): appending the last sample and rounding the repeat count made every waveset a few samples longer,
+            // so the sound drifted longer (+3% at 1 octave, +7% at 2) and the octave went flat
+            w.clear(); const size_t wl = (L + g - 1) / g;
+            for (size_t k = 0; k < L; ++k) w.push_back (x[a + (k % wl) * g]);
             app (y, w, cx.maxLen);
         }
         return y;

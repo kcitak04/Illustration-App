@@ -28,6 +28,9 @@ const char* AUXMSG = "Choose a SECOND SOUND sample";
 
 inline double princ (double a) { return a - TAU * std::floor ((a + PI) / TAU); }
 inline size_t capLen (const Ctx& cx, double n) { return (size_t) std::max (1.0, std::min ((double) cx.maxLen, n)); }
+// analysis window: sized as at 44.1 kHz, then scaled by the power of two nearest to sr / 44100, so a WINDOW setting gives the
+// same time / frequency resolution at every sample rate (pow2 (win * sr) rounds 48 kHz up to twice the 44.1 kHz window)
+inline size_t winN (double win, double sr) { return (size_t) clampd ((double) pow2 (win * 44100) * std::exp2 (std::round (std::log2 (std::max (1000.0, sr) / 44100))), 256, 65536); }
 
 // aux read position (in aux samples) for a position in the main sound: STRETCH spans the main's length, LOOP plays at real speed
 inline double auxPos (double mainPos, size_t mainLen, size_t auxLen, int fit)
@@ -79,7 +82,7 @@ using XFn = std::function<void (Spec& A, Spec& B, XSt& st, long long f, double t
 // otherwise the phases are accumulated from the edited frequencies (CDP pvoc resynthesis).
 Chans xRun (const Chans& ch, const Chans& aux, Ctx& cx, double win, size_t outLen, int fit, bool keepPhase, const XFn& fn, double freezeAt = -1)
 {
-    const size_t N = pow2 (win * cx.sr), H = N >> 2, half = N >> 1; const DVec w = hann (N);
+    const size_t N = winN (win, cx.sr), H = N >> 2, half = N >> 1; const DVec w = hann (N);
     const double om = TAU * (double) H / (double) N;
     const long long frames = (long long) std::ceil ((double) outLen / (double) H) + 1;
     const size_t mainLen = ch[0].size();
@@ -175,7 +178,7 @@ Chans combMakeImpl (const Chans& ch, Ctx& cx, const Params& p, double freeze)
     const auto pt = trackPitch (monoOf (ch), sr, 50, 1500, 0.15, &cx);
     const int mode = p.i ("mode"); const double noise = p["noise"], tr = std::pow (2.0, p["transp"] / 12);
     cx.seed (p["seed"]);
-    const size_t N = pow2 (p["win"] * sr);
+    const size_t N = winN (p["win"], sr);
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), false, [&] (Spec& A, Spec& B, XSt& st, long long, double t)
     {
         const size_t half = st.half;
@@ -213,7 +216,7 @@ Chans oneCombine (const Chans& ch, Ctx& cx, const Params& p) { return combMakeIm
 // SPECTRAL SUM: adds the aux's channel amplitudes (scaled by CROSS) to the main's. after CDP specsum (combine.c)
 Chans combSum (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr);
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr);
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), true, [&] (Spec& A, Spec& B, XSt& st, long long, double)
     { for (size_t k = 0; k <= st.half; ++k) A.amp[k] += p["cross"] * B.amp[k]; });
 }
@@ -222,7 +225,7 @@ Chans combSum (const Chans& ch, Ctx& cx, const Params& p)
 // after CDP specdiff (combine.c)
 Chans combDiff (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr); const bool neg = p.i ("neg") == 1;
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr); const bool neg = p.i ("neg") == 1;
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), true, [&] (Spec& A, Spec& B, XSt& st, long long, double)
     {
         for (size_t k = 0; k <= st.half; ++k)
@@ -236,7 +239,7 @@ Chans combDiff (const Chans& ch, Ctx& cx, const Params& p)
 // WINDOW INTERLEAVE: groups of LEAF analysis windows taken alternately from the main and the aux. after CDP specleaf (combine.c)
 Chans combLeaf (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr); const long long L = std::max (1, p.i ("leaf"));
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr); const long long L = std::max (1, p.i ("leaf"));
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), false, [&] (Spec& A, Spec& B, XSt&, long long f, double)
     { if ((f / L) % 2 == 1) { A.amp = B.amp; A.frq = B.frq; } });
 }
@@ -244,7 +247,7 @@ Chans combLeaf (const Chans& ch, Ctx& cx, const Params& p)
 // SPECTRAL MAX: in every channel the louder of the two sounds wins. after CDP specmax (combine.c)
 Chans combMax (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr);
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr);
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), false, [&] (Spec& A, Spec& B, XSt& st, long long, double)
     {
         for (size_t k = 0; k <= st.half; ++k)
@@ -256,7 +259,7 @@ Chans combMax (const Chans& ch, Ctx& cx, const Params& p)
 // one-sided / max) amplitude at the mean frequency or mean pitch. after CDP specmean (combine.c)
 Chans combMean (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr); const int mode = p.i ("mode");
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr); const int mode = p.i ("mode");
     const bool zero = p.i ("outside") == 1;
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), false, [&] (Spec& A, Spec& B, XSt& st, long long, double)
     {
@@ -288,7 +291,7 @@ Chans combMean (const Chans& ch, Ctx& cx, const Params& p)
 // after CDP speccross (combine.c)
 Chans combCross (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr);
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr);
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), true, [&] (Spec& A, Spec& B, XSt& st, long long, double t)
     {
         const double ip = p["interp"] + (p["interp2"] - p["interp"]) * clampd (t, 0, 1);
@@ -304,7 +307,7 @@ Chans combCross (const Chans& ch, Ctx& cx, const Params& p)
 // after CDP specform (formants put 1-2, formants.c)
 Chans formPutImpl (const Chans& ch, Ctx& cx, const Params& p, double freeze)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr); const int mode = p.i ("mode");
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr); const int mode = p.i ("mode");
     const double g = std::pow (10.0, p["gain"] / 20);
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), true, [&] (Spec& A, Spec& B, XSt& st, long long, double)
     {
@@ -314,6 +317,7 @@ Chans formPutImpl (const Chans& ch, Ctx& cx, const Params& p, double freeze)
         envelope (A.amp, Bw, st.a); envelope (B.amp, Bw, st.b);
         double mx = 1e-12; for (double v : st.b) mx = std::max (mx, v);
         double mxa = 1e-12; for (double v : st.a) mxa = std::max (mxa, v);
+        const double pre = sumAmp (A.amp);
         for (size_t k = 0; k <= half; ++k)
         {
             const double fb = std::abs (A.frq[k]), hz = fb * st.binHz;
@@ -321,8 +325,11 @@ Chans formPutImpl (const Chans& ch, Ctx& cx, const Params& p, double freeze)
             if (mode == 0) A.amp[k] = A.amp[k] * e1 / std::max (envAt (st.a, fb), mxa * 1e-2);
             else A.amp[k] *= e1 / mx * 4;
             if (hz < p["lo"] || hz > p["hi"]) A.amp[k] = 0;
-            A.amp[k] *= g;
         }
+        // CDP normalises every window back to the main's level (normalise(pre_amptotal, post_amptotal)): only the
+        // formant SHAPE moves across, not the aux's loudness (a quiet aux moment must not silence the main)
+        const double post = sumAmp (A.amp), nrm = post > 1e-12 ? pre / post : 0;
+        for (auto& v : A.amp) v *= nrm * g;
     }, freeze);
 }
 Chans formPut (const Chans& ch, Ctx& cx, const Params& p) { return formPutImpl (ch, cx, p, -1); }
@@ -335,7 +342,7 @@ Chans onePut (const Chans& ch, Ctx& cx, const Params& p) { return formPutImpl (c
 // after CDP specvocode (formants vocode, formants.c)
 Chans formVocode (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr);
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr);
     const double g = std::pow (10.0, p["gain"] / 20);
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), true, [&] (Spec& A, Spec& B, XSt& st, long long, double)
     {
@@ -365,7 +372,7 @@ Chans formVocode (const Chans& ch, Ctx& cx, const Params& p)
 // amplitudes linearly, frequencies exponentially. after CDP specglide (morph glide, morph.c)
 Chans morphGlide (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const double sr = cx.sr; const size_t N = pow2 (p["win"] * sr), H = N >> 2, half = N >> 1;
+    Chans aux = getAux (cx, AUXMSG); const double sr = cx.sr; const size_t N = winN (p["win"], sr), H = N >> 2, half = N >> 1;
     const size_t outLen = capLen (cx, p["dur"] * sr); const DVec w = hann (N); DVec re (N), im (N), tmp;
     std::vector<Spec> s0 (ch.size()), s1 (ch.size());
     for (size_t c = 0; c < ch.size(); ++c)
@@ -392,7 +399,7 @@ Chans morphGlide (const Chans& ch, Ctx& cx, const Params& p)
 // with six level-following modes. after CDP specbridge (morph bridge 1-6, morph.c)
 Chans morphBridge (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr); const int mode = p.i ("mode");
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr); const int mode = p.i ("mode");
     const double t0 = p["start"], t1 = std::max (p["start"] + 1e-3, p["end"]);
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), false, [&] (Spec& A, Spec& B, XSt& st, long long, double t)
     {
@@ -425,7 +432,7 @@ Chans morphBridge (const Chans& ch, Ctx& cx, const Params& p)
 // each with its own curve exponent; LINEAR or COSINE interpolation. after CDP specmorph (morph morph 1-2, morph.c)
 Chans morphMorph (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr); const int mode = p.i ("mode");
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr); const int mode = p.i ("mode");
     auto ratio = [&] (double t, double a, double b, double ex)
     {
         b = std::max (a + 1e-3, b);
@@ -1001,7 +1008,7 @@ Chans specross (const Chans& ch, Ctx& cx, const Params& p)
     Chans aux = getAux (cx, AUXMSG); const double sr = cx.sr; const size_t len = ch[0].size(), al = aux[0].size(); const int fit = p.i ("fit");
     const auto pm = trackPitch (monoOf (ch), sr, 50, 1500, 0.15, &cx), pa = trackPitch (monoOf (aux), sr, 50, 1500, 0.15, &cx);
     const double tune = std::pow (2.0, p["tuning"] / 12), g = std::pow (10.0, p["level"] / 20);
-    const size_t N = pow2 (p["win"] * sr);
+    const size_t N = winN (p["win"], sr);
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), fit, true, [&] (Spec& A, Spec& B, XSt& st, long long, double t)
     {
         const size_t half = st.half; const double ip = clampd (p["interp"] + (p["interp2"] - p["interp"]) * clampd (t, 0, 1), 0, 1);
@@ -1020,12 +1027,15 @@ Chans specross (const Chans& ch, Ctx& cx, const Params& p)
             mh[(size_t) h] = peakNear (A.amp, f0 * h); mmx = std::max (mmx, mh[(size_t) h]);
             ah[(size_t) h] = af0 > 0.5 && af0 * h <= (double) half ? peakNear (B.amp, af0 * h) : envAt (st.a, f0 * h); amx = std::max (amx, ah[(size_t) h]);
         }
-        const double norm = amx > 1e-12 ? mmx / amx : 0;
+        // a silent aux window (a gap between its notes, its silent tail; the envelope floor is 1e-9) has no harmonic profile:
+        // its partials stay as they are instead of being scaled by mmx / ~0 (every partial boosted to the x100 cap: loud spikes)
+        const bool profile = amx > 1e-6 && amx > mmx * 1e-6;
+        const double norm = profile ? mmx / amx : 0;
         for (size_t k = 1; k <= half; ++k)
         {
             const double fr = std::abs (A.frq[k]); const int h = (int) jr (fr / f0);
             const bool partial = h >= 1 && h <= H && std::max (fr, f0 * h) / std::max (1e-9, std::min (fr, f0 * h)) < tune && mh[(size_t) h] > p["thresh"] * mmx;
-            if (partial) A.amp[k] *= 1 + (std::min (100.0, ah[(size_t) h] * norm / std::max (1e-12, mh[(size_t) h])) - 1) * ip;
+            if (partial) { if (profile) A.amp[k] *= 1 + (std::min (100.0, ah[(size_t) h] * norm / std::max (1e-12, mh[(size_t) h])) - 1) * ip; }
             else A.amp[k] *= 1 - ip;
             A.amp[k] *= g;
         }
@@ -1038,19 +1048,21 @@ Chans specross (const Chans& ch, Ctx& cx, const Params& p)
 // after CDP do_specenv (specenv specenv, specenv.c)
 Chans specenvX (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr); const bool pitchwise = p.i ("scale") == 1, impose = p.i ("mode") == 1, keepAux = p.i ("level") == 1;
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr); const bool pitchwise = p.i ("scale") == 1, impose = p.i ("mode") == 1, keepAux = p.i ("level") == 1;
     const double bal = p["bal"];
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), true, [&] (Spec& A, Spec& B, XSt& st, long long, double)
     {
         const size_t half = st.half;
         bandEnv (A.amp, pitchwise ? p["band"] / 12 : p["band"], pitchwise, st.a); bandEnv (B.amp, pitchwise ? p["band"] / 12 : p["band"], pitchwise, st.b);
-        double mi = 0, mi2 = 0, mo = 0, emx = 1e-12; for (double v : st.b) emx = std::max (emx, v);
+        double mi = 0, mi2 = 0, mo = 0, emx = 1e-12, ema = 1e-12; for (double v : st.b) emx = std::max (emx, v); for (double v : st.a) ema = std::max (ema, v);
         const DVec orig = A.amp;
         for (size_t k = 0; k <= half; ++k)
         {
             const double fb = std::abs (A.frq[k]), a2 = envAt (st.b, fb);
             if (impose) A.amp[k] = orig[k] * a2 / emx;
-            else { const double a1 = envAt (st.a, fb); A.amp[k] = a1 > 1e-9 ? orig[k] * a2 / a1 : orig[k]; }
+            // REPLACE divides by the main's own band level, floored at -40 dB of its loudest band: the noise floor between
+            // partials is not boosted into a flat, phase-coherent spectrum (a click at every quiet spot of the main)
+            else { const double a1 = envAt (st.a, fb); A.amp[k] = a1 > 1e-9 ? orig[k] * a2 / std::max (a1, ema * 1e-2) : orig[k]; }
             mi = std::max (mi, orig[k]); mi2 = std::max (mi2, B.amp[k]); mo = std::max (mo, A.amp[k]);
         }
         const double target = keepAux ? mi2 : mi;
@@ -1066,7 +1078,7 @@ Chans specenvX (const Chans& ch, Ctx& cx, const Params& p)
 // after CDP newmorph_core (newmorph newmorph 1-6, newmorph.c)
 Chans newmorph (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const double sr = cx.sr; const size_t len = ch[0].size(), N = pow2 (p["win"] * sr), half = N >> 1;
+    Chans aux = getAux (cx, AUXMSG); const double sr = cx.sr; const size_t len = ch[0].size(), N = winN (p["win"], sr), half = N >> 1;
     const int mode = p.i ("mode"), what = p.i ("what"); const bool cosine = mode % 2 == 1, avg = mode < 2, tune = mode >= 4, keep = p.i ("keep") == 1;
     const size_t P = (size_t) std::max (1, p.i ("peaks"));
     std::vector<size_t> pk1, pk2; DVec goal;
@@ -1126,7 +1138,7 @@ Chans newmorph (const Chans& ch, Ctx& cx, const Params& p)
 Chans newmorph2 (const Chans& ch, Ctx& cx, const Params& p)
 {
     static const std::vector<std::vector<int>> CH { {}, { 0, 4, 7 }, { 0, 3, 7 }, { 0, 7 }, { 0, 2, 4, 6, 8, 10 }, {} };
-    const double sr = cx.sr; const size_t len = ch[0].size(), N = pow2 (p["win"] * sr), half = N >> 1; const double binHz = sr / (double) N;
+    const double sr = cx.sr; const size_t len = ch[0].size(), N = winN (p["win"], sr), half = N >> 1; const double binHz = sr / (double) N;
     const int src = p.i ("source"); std::vector<double> goal;
     Chans aux;
     if (src == 0)
@@ -1171,7 +1183,7 @@ Chans newmorph2 (const Chans& ch, Ctx& cx, const Params& p)
 // original, GAIN). after CDP spec_sphinx / specvolve (specsphinx 1-2, specsphinx.c)
 Chans specsphinx (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr); const int mode = p.i ("mode");
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr); const int mode = p.i ("mode");
     const double g = std::pow (10.0, p["gain"] / 20), bias = p["bias"], ref = (double) N / 4;
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), mode == 1, [&] (Spec& A, Spec& B, XSt& st, long long, double)
     {
@@ -1212,7 +1224,7 @@ Chans specsphinx (const Chans& ch, Ctx& cx, const Params& p)
 // after CDP spectwin (spectwin 1-4, spectwin.c)
 Chans spectwin (const Chans& ch, Ctx& cx, const Params& p)
 {
-    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = pow2 (p["win"] * cx.sr); const int mode = p.i ("mode"), dupl = p.i ("dupl");
+    Chans aux = getAux (cx, AUXMSG); const size_t len = ch[0].size(), N = winN (p["win"], cx.sr); const int mode = p.i ("mode"), dupl = p.i ("dupl");
     const double fi = p["frqint"], ei = p["envint"];
     return xRun (ch, aux, cx, p["win"], capLen (cx, (double) (len + N)), p.i ("fit"), false, [&] (Spec& A, Spec& B, XSt& st, long long, double)
     {
