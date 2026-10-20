@@ -8,6 +8,7 @@
 #include "../dattrack/Source/DatTrackCore.h"
 #include <ableton/Link.hpp>
 #include <fstream>
+#include <thread>
 #include <iostream>
 
 int main (int argc, char** argv)
@@ -23,6 +24,14 @@ int main (int argc, char** argv)
     const bool looping = loopEnd > loopStart;
     const bool loopReportOnly = args.contains ("--loop-report-only");   // reports a loop but never wraps (Live's Session view?)
     const auto modeS = arg ("--mode", "slave");
+    // tempo change while playing: --tempo-at <s> --tempo-to <bpm> [--tempo-ramp <s>] (a linear ramp, like tempo automation)
+    const double tempoAt = arg ("--tempo-at", "1e9").getDoubleValue(), tempoTo = arg ("--tempo-to", "0").getDoubleValue(), tempoRamp = arg ("--tempo-ramp", "0").getDoubleValue();
+    // MIDI in: --midi "t:status:note:vel,..." (status 144 note-on, 128 note-off, 176 all notes off); --midi-off-at <s> switches MIDI IN off
+    struct Ev { double t; int st, a, b; }; std::vector<Ev> midiEvs;
+    for (auto& e : juce::StringArray::fromTokens (arg ("--midi", ""), ",", "")) { auto f = juce::StringArray::fromTokens (e, ":", ""); if (f.size() == 4) midiEvs.push_back ({ f[0].getDoubleValue(), f[1].getIntValue(), f[2].getIntValue(), f[3].getIntValue() }); }
+    const double midiOffAt = arg ("--midi-off-at", "1e9").getDoubleValue();
+    // saving the set: --save-at <s> takes the plugin state like getStateInformation (waits for the page's latest edits)
+    const double saveAt = arg ("--save-at", "1e9").getDoubleValue(); bool saved = false;
     const int block = 256;
 
     dat::DatTrackCore core;
@@ -55,14 +64,23 @@ int main (int argc, char** argv)
     while ((double) samples / sr < dur)
     {
         const double t = (double) samples / sr;
-        dat::HostTransport tr; tr.valid = true; tr.bpm = bpm; tr.playing = t >= playAt && t < stopAt;
+        dat::HostTransport tr; tr.valid = true; tr.playing = t >= playAt && t < stopAt;
+        tr.bpm = t < tempoAt ? bpm : tempoRamp > 0 && t < tempoAt + tempoRamp ? bpm + (tempoTo - bpm) * (t - tempoAt) / tempoRamp : tempoTo;
         if (tr.playing && ! jumped && t >= jumpAt) { jumped = true; ppq = jumpTo; transportLog << "jump " << t << "\n"; }
         tr.ppq = ppq;
         if (looping) { tr.looping = true; tr.loopStart = loopStart; tr.loopEnd = loopEnd; }
         if (! flushed && t >= flushAt) { flushed = true; ++core.flushRequest; std::cout << "FLUSH requested at " << t << std::endl; }
-        core.process (L.data(), R.data(), block, sr, tr, nullptr, offline);
-        if (tr.playing) ppq += block / sr * bpm / 60.0;
-        if (tr.playing && looping && ! loopReportOnly && ppq >= loopEnd && ppq - block / sr * bpm / 60.0 < loopEnd) ppq = loopStart + (ppq - loopEnd);   // wraps inside the block, like a DAW
+        juce::MidiBuffer mb;
+        for (auto& e : midiEvs) if (e.t >= t && e.t < t + block / sr) mb.addEvent (juce::MidiMessage ((juce::uint8) e.st, (juce::uint8) e.a, (juce::uint8) e.b), (int) ((e.t - t) * sr));
+        if (t >= midiOffAt) core.midiToTracker = false;
+        if (! saved && t >= saveAt)
+        {   // like getStateInformation, on another thread than the audio (the message thread)
+            saved = true;
+            std::thread ([&core, sa = arg ("--save-out", "")] { auto j = core.getSongJsonFlushed (500); if (sa.isNotEmpty()) juce::File (sa).replaceWithText (j); std::cout << "SAVED " << j.length() << std::endl; }).detach();
+        }
+        core.process (L.data(), R.data(), block, sr, tr, &mb, offline);
+        if (tr.playing) ppq += block / sr * tr.bpm / 60.0;
+        if (tr.playing && looping && ! loopReportOnly && ppq >= loopEnd && ppq - block / sr * tr.bpm / 60.0 < loopEnd) ppq = loopStart + (ppq - loopEnd);   // wraps inside the block, like a DAW
         for (int i = 0; i < block; ++i) { out.push_back (L[(size_t) i]); out.push_back (R[(size_t) i]); }
         samples += block;
         if (offline) {}

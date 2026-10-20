@@ -236,11 +236,13 @@
   function onHost(j) {
     DT.host = j;
     if (j.song !== DT.songSeq) { const first = DT.songSeq < 0; DT.songSeq = j.song; if (!first) loadHostSong(); }
-    if (j.flush && j.flush !== DT.flushSeen) { DT.flushSeen = j.flush; flushForReload(); }
+    if (j.flush && j.flush !== DT.flushSeen) { DT.flushSeen = j.flush; flushForReload(j.flush); }
     if (!ready()) return;
     if (j.midi && j.midi.length) for (const [st, note, vel] of j.midi) {
       const n = note - 12;   // MIDI 60 (C4) = DATTRACK C-4 (48)
-      if (st === 0x90 && vel > 0) previewDown('midi' + note, n); else previewUp('midi' + note);
+      if (st === 0xB0) { for (let k = 0; k < 128; k++) previewUp('midi' + k); continue; }   // all notes off
+      previewUp('midi' + note);   // a second note-on of a held note must not leave the first one sounding
+      if (st === 0x90 && vel > 0) previewDown('midi' + note, n);
     }
     if (j.stop && sched.playing) stop();
     if (j.mode === 1) {
@@ -250,7 +252,8 @@
       if (j.jump !== DT.hostJumpN) { DT.hostJumpN = j.jump; DT.hostJumpT = j.f / engine.ctx.sampleRate; }   // when the host jumped (as heard)
       if (j.playing && sched.playing && DT.slaving) checkLoopWrap(j);
       if (j.bpm > 0 && j.playing) setHostTempo(j.bpm, j.cb);
-      if (j.playing) {
+      if (j.playing && j.run === false) { }   // the plugin's buffer is (re)filling (page start or reload): no position yet
+      else if (j.playing) {
         if (!sched.playing || !DT.slaving) startAtHost(j);
         else if (j.jump !== DT.jumpSeen) { DT.jumpSeen = j.jump; correct(j, true); }
         else correct(j);
@@ -268,33 +271,39 @@
   }
   // tracker state for MASTER (beat anchor = the last scheduled row on the context timeline) and the plugin bar
   function report() {
-    let s = '&p=' + (sched.playing ? 1 : 0) + '&b=' + effBpm().toFixed(4);
+    let s = '&p=' + (sched.playing ? 1 : 0) + '&b=' + effBpm().toFixed(4) + '&e=' + (DT.hostSongApplied && (dirty !== DT.lastDirty || DT.posting > 0) ? 1 : 0);
     const q = sched.rowQueue;
     if (sched.playing && q.length) { const e = q[q.length - 1]; s += '&ab=' + (posToRow(e.order, e.row) / 4).toFixed(4) + '&at=' + e.t.toFixed(6); }
     fwd.postMessage({ type: 'info', q: s });
   }
   // Mirror the song into the plugin (it is saved with the Ableton set). Never before the song saved in the set has
   // been applied - the default song must not overwrite it - and only once the edits have paused for a moment
-  // (serialising a song with samples is not free). force: the page is going away, send now.
-  function pushState(force) {
+  // (serialising a song with samples is not free). force: send now (a reload or a save of the set waits for it);
+  // unloading: the page is going away.
+  function pushState(force, unloading) {
     if (!DT.hostSongApplied || !ready()) return;
     const now = Date.now();
     if (dirty !== DT.dirtySeen) { DT.dirtySeen = dirty; DT.dirtyAt = now; }
-    if (dirty === DT.lastDirty || (!force && now - DT.dirtyAt < 1000)) return;
+    if (dirty === DT.lastDirty || (!force && now - DT.dirtyAt < 1000)) return DT.inflight;   // (a flush waits for a post on its way)
     let body;
-    try { body = JSON.stringify(songToObj(false)); } catch (e) { return; }
-    DT.lastDirty = dirty;
-    // unloading: a beacon survives the page (but only up to ~64 KB); otherwise a normal POST
-    if (force && body.length < 60000 && navigator.sendBeacon && navigator.sendBeacon(url('state'), new Blob([body], { type: 'application/json' }))) return;
-    return fetch(url('state'), { method: 'POST', body, keepalive: body.length < 60000 }).catch(() => { DT.lastDirty = -1; });
+    try { body = JSON.stringify(songToObj(false)); } catch (e) { return DT.inflight; }
+    const d = DT.lastDirty = dirty;
+    // unloading: a beacon survives the page (but only up to ~64 KB); otherwise a normal POST (which the flush can await)
+    if (unloading && body.length < 60000 && navigator.sendBeacon && navigator.sendBeacon(url('state'), new Blob([body], { type: 'application/json' }))) return;
+    // one post at a time, in order: an older song must never land after a newer one
+    DT.posting = (DT.posting || 0) + 1;
+    const send = () => fetch(url('state'), { method: 'POST', body, keepalive: body.length < 60000 })
+      .then(r => { if (!r.ok) throw new Error(r.status); }).catch(() => { if (DT.lastDirty === d) DT.lastDirty = -1; })
+      .finally(() => { DT.posting--; });
+    return DT.inflight = (DT.inflight || Promise.resolve()).then(send);
   }
-  // the plugin is about to reload the page (RELOAD, new sample rate): save now, then acknowledge
-  async function flushForReload() {
+  // the plugin is about to reload the page (RELOAD, new sample rate) or saves the set: save now, then acknowledge
+  async function flushForReload(n) {
     try { await pushState(true); } catch (e) { }
-    fetch(url('flushed')).catch(() => { });
+    fetch(url('flushed', '&n=' + n)).catch(() => { });
   }
   setInterval(() => pushState(false), 1000);   // independent of the audio stream (it may be paused)
-  window.addEventListener('pagehide', () => pushState(true));
+  window.addEventListener('pagehide', () => pushState(true, true));
   async function loadHostSong() {
     try {
       const r = await fetch(url('state'));

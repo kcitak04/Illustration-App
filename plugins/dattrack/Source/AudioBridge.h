@@ -10,7 +10,7 @@ namespace dat
 class AudioBridge
 {
 public:
-    struct Status { double readFrame = 0; double ratio = 1; double rate = 1; bool running = false; double fillSec = 0; };
+    struct Status { double readFrame = 0; double ratio = 1; double rate = 1; bool running = false; double fillSec = 0; int epoch = 0; };
 
     void setTargetFill (double seconds) { const juce::SpinLock::ScopedLockType l (lock); targetSec = seconds; }
 
@@ -19,9 +19,12 @@ public:
     {
         const juce::SpinLock::ScopedLockType l (lock);
         ctxSr = sampleRate;
-        if (writeFrame < 0 || frame < writeFrame - CAP / 4 || frame > writeFrame + CAP / 2)
-        {   // first chunk, or the page / AudioContext restarted
+        if (writeFrame < 0 || frame < writeFrame - 4096 || frame > writeFrame + CAP / 2)
+        {   // first chunk, or the page / AudioContext restarted (the page never sends a frame twice)
             writeFrame = frame; firstFrame = frame; running = false; primed = false; resets++; errSm = 0;
+            // the read head moves to the new timeline right away (where it will start), so the position the sync
+            // code reports while the buffer fills is on the new context's clock, not on the old one's
+            readFrame = (double) frame - targetSec * sampleRate;
         }
         if (frame > writeFrame) { for (juce::int64 f = writeFrame; f < frame; ++f) { auto i = (size_t) (f & (CAP - 1)) * 2; buf[i] = buf[i + 1] = 0; } writeFrame = frame; }
         int skip = (int) juce::jmax<juce::int64> (0, writeFrame - frame);
@@ -34,10 +37,13 @@ public:
     }
 
     // consumer: renders n frames, returns the context frame that was at the read head at the start of the block
-    Status pull (float* L, float* R, int n, double hostSr)
+    // offline: the host waits for the page (hasAhead), so the clocks cannot drift - no drift correction (it would only
+    // wind up against the fill the wait keeps above the target, and speed up / pitch up the export by up to 3 %)
+    Status pull (float* L, float* R, int n, double hostSr, bool offline = false)
     {
         const juce::SpinLock::ScopedLockType l (lock);
         Status st;
+        st.epoch = resets;   // which timeline readFrame is on (a page restart starts a new one)
         const double r0 = ctxSr / hostSr, target = targetSec * ctxSr;
         if (! running && writeFrame >= 0)
         {
@@ -58,16 +64,21 @@ public:
             juce::FloatVectorOperations::clear (L, n); juce::FloatVectorOperations::clear (R, n);
             st.ratio = r0; return st;
         }
-        if (fill > target * 3.0)
-        {   // far too much buffered (a burst after a hiccup): skip ahead to the target (the sync code re-cues)
+        // (offline the host may render slower than the page plays: use the whole ring before dropping anything)
+        if (fill > (offline ? (double) (CAP - 32768) : std::min (target * 3.0, (double) (CAP - 32768))))
+        {   // far too much buffered (a burst after a hiccup): skip ahead to the target (the sync code re-cues).
+            // Never let the read head fall a whole ring behind: those frames are overwritten already.
             readFrame = (double) writeFrame - target; fill = target; skips++; st.readFrame = readFrame;
         }
         // PI controller on the smoothed fill level: the integral learns the page clock's drift
         // (a web view's device-less AudioContext can run a percent or so off), P keeps the buffer centred
         const double err = (fill - target) / target;
-        errSm += (err - errSm) * (1.0 - std::exp (-(double) n / hostSr / 1.0));
-        integ = juce::jlimit (-0.03, 0.03, integ + 3e-5 * errSm);
-        const double ratio = r0 * (1.0 + juce::jlimit (-0.03, 0.03, 0.02 * errSm + integ));
+        if (! offline)
+        {
+            errSm += (err - errSm) * (1.0 - std::exp (-(double) n / hostSr / 1.0));
+            integ = juce::jlimit (-0.03, 0.03, integ + 3e-5 * errSm);
+        }
+        const double ratio = offline ? r0 : r0 * (1.0 + juce::jlimit (-0.03, 0.03, 0.02 * errSm + integ));
         // The read head never stops: frames that have not arrived yet play as silence, so the mapping
         // context frame <-> host sample stays continuous and the sync survives a dropout.
         const bool shortNow = fill < (double) n * ratio + 2;
@@ -82,7 +93,7 @@ public:
             R[i] = buf[a + 1] + (buf[b + 1] - buf[a + 1]) * f;
             readFrame += ratio;
         }
-        st.ratio = ratio; st.rate = 1.0 + integ; st.running = true; st.fillSec = fill / ctxSr;
+        st.ratio = ratio; st.rate = offline ? 1.0 : 1.0 + integ; st.running = true; st.fillSec = fill / ctxSr;
         return st;
     }
 
@@ -98,11 +109,12 @@ public:
     }
 
     double contextRate() const { return ctxSr; }
+    int epoch() { const juce::SpinLock::ScopedLockType l (lock); return resets; }
     juce::int64 framesWritten() const { return writeFrame; }
     int underruns = 0, skips = 0, resets = 0, stalls = 0;
 
 private:
-    static constexpr juce::int64 CAP = 1 << 18;   // ~5 s at 48 kHz
+    static constexpr juce::int64 CAP = 1 << 19;   // ~11 s at 48 kHz, ~2.7 s at 192 kHz (latency up to 0.7 s, x3 before a skip)
     std::vector<float> buf = std::vector<float> ((size_t) CAP * 2);
     juce::SpinLock lock;
     juce::int64 writeFrame = -1, firstFrame = 0;

@@ -16,6 +16,7 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void refresh();
 
+    static constexpr int stripHeight = 26;
     DatTrackProcessor& proc;
     dat::LookAndFeel lnf { dat::col::accent };
     juce::TooltipWindow tips { this, 600 };

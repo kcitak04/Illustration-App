@@ -8,6 +8,10 @@
 //   loop       the host loops a region: every beat of every pass is on time, none dropped at the wrap, and
 //              DATTRACK really jumps back to the loop start (bar accents follow the looped positions)
 //   loop-off   the host reports a loop but plays straight through it: DATTRACK must notice and keep following
+//   save       saving the set right after an edit saves that edit (the page sends edits only after a pause)
+//   midi       MIDI IN: a repeated note-on, all-notes-off and switching MIDI IN off with a note held leave no note stuck
+//   tempo      a tempo ramp in the host while playing (tempo automation): every beat stays on the host's grid
+//   reload     the page reloads while the host plays (RELOAD, a new sample rate): DATTRACK must pick up the host again
 // usage: node dattrack_regression_test.mjs <dattrack_host binary> <workdir> [scenario ...]
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -22,7 +26,9 @@ const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  -  ' + detail : ''}`); };
 
 async function session(hostArgs, pageFn) {
-  const host = spawn(bin, ['--sr', String(sr), ...hostArgs]);
+  // HOST_ARGS: extra fake-host options for every session, e.g. "--drift-ppm -100000" when this machine's headless
+  // Chromium cannot render in real time (the host clock then runs as slowly as the page's)
+  const host = spawn(bin, ['--sr', String(sr), ...hostArgs, ...(process.env.HOST_ARGS ? process.env.HOST_ARGS.split(' ') : [])]);
   let log = '', url = null;
   const urlReady = new Promise(res => host.stdout.on('data', d => { log += d; const m = /URL (\S+)/.exec(log); if (m && !url) { url = m[1]; res(); } }));
   const done = new Promise(res => host.on('exit', c => res(c)));
@@ -126,15 +132,18 @@ if (want('count-in')) {
 // ---------------------------------------------------------------- offline export
 if (want('offline')) {
   const file = path.join(work, 'offline.f32');
-  const r = await session(['--mode', 'off', '--duration', '8', '--offline', '--out', file], async page => {
-    await page.evaluate(() => { setSong(new Song()); state.metro = true; play('song'); });
+  const r = await session(['--mode', 'off', '--duration', '20', '--offline', '--out', file], async page => {
+    await page.evaluate(() => { const s = new Song(); s.bpm = 120; setSong(s); state.metro = true; play('song'); });
   });
   const f = readOut(file), ons = onsets(f);
   const gaps = ons.slice(1).map((o, i) => (o - ons[i]) / sr), mean = gaps.reduce((a, b) => a + b, 0) / Math.max(1, gaps.length);
   const worst = Math.max(...gaps.map(g => Math.abs(g - mean)));
   const wall = +/wall ([\d.]+)/.exec(r.log)[1];
   check('offline: clicks stay evenly spaced (no lost audio)', gaps.length >= 8 && worst < 0.01, `${ons.length} clicks, interval ${mean.toFixed(4)} s, worst deviation ${(worst * 1000).toFixed(1)} ms`);
-  check('offline: the export waits for the page instead of racing ahead', wall > 6, `8 s of audio took ${wall.toFixed(1)} s`);
+  check('offline: the export waits for the page instead of racing ahead', wall > 15, `20 s of audio took ${wall.toFixed(1)} s`);
+  // 120 BPM = 0.5 s a beat: no speed-up (and pitch-up) from the drift correction winding up while the export waits
+  const late = gaps.slice(-8).reduce((a, b) => a + b, 0) / 8;
+  check('offline: the export keeps its tempo (and pitch)', Math.abs(late - 0.5) < 0.0005, `last beats ${late.toFixed(5)} s apart, expected 0.50000`);
 }
 
 // ---------------------------------------------------------------- host loop
@@ -187,6 +196,81 @@ if (want('loop-off')) {
   for (let k = 0; first + k * beat < f.length / 2 - sr * 0.2; k++) if (first + k * beat >= settle) expected.push(first + k * beat);
   const hits = expected.filter(at => ons.some(o => Math.abs(o - at) < sr * 0.005)).length;
   check('loop-off: a loop the host does not play is not followed', expected.length >= 6 && hits === expected.length, `${hits}/${expected.length} beats on the host grid after the loop end`);
+}
+
+// ---------------------------------------------------------------- save the set right after an edit
+if (want('save')) {
+  const saveOut = path.join(work, 'save-out.json');
+  const r = await session(['--mode', 'off', '--duration', '7', '--out', path.join(work, 'o.f32'), '--save-at', '4.3', '--save-out', saveOut], async page => {
+    await page.waitForFunction(() => DTVST.host && DTVST.hostSongApplied, null, { timeout: 20000 });
+    const t = await page.evaluate(() => DTVST.ctx.currentTime);
+    await page.waitForTimeout(Math.max(0, (4.1 - t) * 1000));
+    await page.evaluate(() => { song.title = 'JUSTSAVED'; markDirty(); });
+  });
+  let out = ''; try { out = readFileSync(saveOut, 'utf8'); } catch (e) { }
+  check('save: an edit made just before saving the set is in the saved state', out.includes('"JUSTSAVED"'), /SAVED \d+/.exec(r.log) ? '' : 'no save');
+}
+
+// ---------------------------------------------------------------- MIDI notes
+if (want('midi')) {
+  const ev = ['3:144:60:100', '3.2:144:60:100', '3.5:128:60:0', '3.8:144:65:100', '4.2:176:123:0', '4:144:62:100', '5:128:62:0', '5.5:144:64:100', '6:128:64:0'];
+  const r = await session(['--mode', 'off', '--duration', '7', '--out', path.join(work, 'o.f32'), '--midi', ev.join(','), '--midi-off-at', '4.5'], async page => {
+    await page.evaluate(() => {
+      const on = engine.noteOn.bind(engine), off = engine.noteOff.bind(engine);
+      DTVST.held = new Set(); DTVST.ons = [];
+      engine.noteOn = (ch, inst, note, out) => { DTVST.held.add(ch); DTVST.ons.push(note); return on(ch, inst, note, out); };
+      engine.noteOff = ch => { DTVST.held.delete(ch); return off(ch); };
+    });
+    await page.waitForTimeout(6500);
+    return page.evaluate(() => ({ held: [...DTVST.held], ons: DTVST.ons }));
+  });
+  const x = r.extra || { held: ['?'], ons: [] };
+  check('midi: no note left sounding', x.held.length === 0, `held channels [${x.held}], notes played [${x.ons}]`);
+  check('midi: notes play, and none after MIDI IN is off', x.ons.join() === '48,48,53,50', `notes played [${x.ons}]`);
+}
+
+// ---------------------------------------------------------------- tempo automation in SLAVE
+if (want('tempo')) {
+  const file = path.join(work, 'tempo.f32'), bpm = 128, playAt = 3, t0 = 6, t1 = 100, ramp = 2, dur = 13;
+  const r = await session(['--mode', 'slave', '--bpm', String(bpm), '--play-at', String(playAt), '--tempo-at', String(t0), '--tempo-to', String(t1), '--tempo-ramp', String(ramp),
+                           '--duration', String(dur), ...(process.env.REALTIME ? [] : ['--follow-page']), '--out', file], async page => {
+    await page.evaluate(() => { setSong(new Song()); state.metro = true; });
+  });
+  const latency = +/LATENCY (\d+)/.exec(r.log)[1];
+  const f = readOut(file), ons = onsets(f), block = 256, expected = [];
+  let ppq = 0;
+  for (let s = 0; s < dur * sr; s += block) {   // the fake host's transport, block by block
+    const t = s / sr; if (t < playAt) continue;
+    const b = t < t0 ? bpm : t < t0 + ramp ? bpm + (t1 - bpm) * (t - t0) / ramp : t1, p1 = ppq + block / sr * b / 60;
+    for (let k = Math.ceil(ppq - 1e-9); k < p1; k++) expected.push(s + (k - ppq) / (b / 60) * sr + latency);
+    ppq = p1;
+  }
+  let worst = 0, missing = 0;
+  for (const e of expected.slice(1)) { if (e > f.length / 2 - sr * 0.2) break; const o = ons.find(x => Math.abs(x - e) < sr * 0.05); if (o === undefined) missing++; else worst = Math.max(worst, Math.abs(o - e) / sr); }
+  check('tempo: beats follow a host tempo ramp', missing === 0 && worst < 0.004, `${expected.length} beats, ${missing} missing, worst ${(worst * 1000).toFixed(2)} ms`);
+}
+
+// ---------------------------------------------------------------- page reload while the host plays (RELOAD, new sample rate)
+if (want('reload')) {
+  const file = path.join(work, 'reload.f32'), bpm = 128, playAt = 2, dur = 14;
+  let reloadedAt = 0;
+  const r = await session(['--mode', 'slave', '--bpm', String(bpm), '--play-at', String(playAt), '--duration', String(dur), '--out', file], async page => {
+    await page.evaluate(() => { setSong(new Song()); state.metro = true; song.title = 'RELOADME'; markDirty(); });
+    await page.waitForTimeout(5000);
+    await page.reload();
+    await page.waitForFunction(() => window.DTVST && window.DTVST.started, null, { timeout: 30000 });
+    await page.evaluate(() => { window.requestAnimationFrame = () => 0; state.metro = true; });
+    reloadedAt = Date.now();
+    if (process.env.DBG) { await page.waitForTimeout(5000); console.log(await page.evaluate(() => DTVST.log.join('\n') + '\nhost ' + JSON.stringify(DTVST.host) + ' now ' + engine.ctx.currentTime)); }
+  });
+  if (process.env.DBG) console.log(r.log.split('\n').filter(l => /DONE|^T /.test(l)).join('\n'));
+  const latency = +/LATENCY (\d+)/.exec(r.log)[1];
+  const f = readOut(file), n = f.length / 2, ons = onsets(f), beat = 60 / bpm * sr;
+  // the last 4 s: clicks on the host's beat grid again
+  const grid = k => playAt * sr + k * beat + latency, from = n - 4 * sr;
+  let hits = 0, total = 0;
+  for (let k = 0; grid(k) < n - sr * 0.2; k++) if (grid(k) >= from) { total++; if (ons.some(o => Math.abs(o - grid(k)) < sr * 0.005)) hits++; }
+  check('reload: after a page reload while the host plays, DATTRACK follows again', total >= 6 && hits === total, `${hits}/${total} beats on the grid in the last 4 s`);
 }
 
 const failed = results.filter(r => !r.ok).length;

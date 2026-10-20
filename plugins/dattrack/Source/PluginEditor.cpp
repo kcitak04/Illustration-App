@@ -89,7 +89,7 @@ void DatTrackEditor::refresh()
 void DatTrackEditor::paint (juce::Graphics& g)
 {
     g.fillAll (col::bg);
-    g.setColour (col::panel); g.fillRect (getLocalBounds().removeFromTop (56));
+    g.setColour (col::panel); g.fillRect (getLocalBounds().removeFromTop (56 + (status.getY() >= 56 ? stripHeight : 0)));
     g.setColour (col::accent); g.setFont (LookAndFeel::font (20, true));
     g.drawText ("DATTRACK", 14, 0, 130, 56, juce::Justification::centredLeft);
     g.setColour (col::dim); g.setFont (LookAndFeel::font (10.5f, true));
@@ -110,6 +110,13 @@ void DatTrackEditor::resized()
     reloadBtn.setBounds (bar.removeFromRight (64)); bar.removeFromRight (4);
     midiBtn.setBounds (bar.removeFromRight (68)); bar.removeFromRight (4);
     latency.setBounds (bar.removeFromRight (112)); bar.removeFromRight (6);
+    // NUDGE and the status line need ~460 px; on a narrower window they move to a strip under the bar
+    // (squeezed into the bar they would vanish: the status at the minimum width had no room at all)
+    if (bar.getWidth() < 460)
+    {
+        bar = r.removeFromTop (stripHeight).reduced (10, 2);
+        bar.removeFromLeft (166);
+    }
     auto off = bar.removeFromRight (150);
     offsetLabel.setBounds (off.removeFromLeft (42)); offset.setBounds (off);
     bar.removeFromRight (6); bar.removeFromLeft (10);

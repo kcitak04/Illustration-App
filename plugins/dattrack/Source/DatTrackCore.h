@@ -47,6 +47,10 @@ public:
 
     // song (JSON .mtk project) - saved in the Ableton set
     juce::String getSongJson() const { std::lock_guard<std::mutex> l (songLock); return songJson; }
+    // the song for saving the set: if the page has edits it has not sent yet (it waits for a pause in the
+    // editing), ask it for them and wait up to timeoutMs (any thread; the page answers through the server)
+    juce::String getSongJsonFlushed (int timeoutMs);
+    std::atomic<bool> pageEditsPending { false };
     void setSongFromHost (const juce::String& json);
     std::atomic<int> songEditsFromPage { 0 };   // bumped when the page saves an edited song (the set needs saving)
     // before a page reload: ask the page to save its song; flushAck catches up with flushRequest when it has
@@ -73,7 +77,7 @@ private:
     AudioBridge bridge;
 
     // audio thread -> page: where the host's musical time sits on the context timeline
-    struct Anchor { double f = 0, ppq = 0, bpm = 120, rate = 1; bool playing = false; int jump = 0; double jumpPpq = 0; bool looping = false; double ls = 0, le = 0; };
+    struct Anchor { double f = 0, ppq = 0, bpm = 120, rate = 1; bool playing = false, running = false; int epoch = 0, jump = 0; double jumpPpq = 0; bool looping = false; double ls = 0, le = 0; };
     juce::SpinLock anchorLock; Anchor anchor;
     double lastPpq = 0, lastPpqStep = 0, jumpPpq = 0; bool lastPlaying = false; int jumps = 0;
 

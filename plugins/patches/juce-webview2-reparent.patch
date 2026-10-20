@@ -1,3 +1,24 @@
+diff --git a/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp b/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
+index 049baf7..912579a 100644
+--- a/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
++++ b/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
+@@ -2035,6 +2035,16 @@ private:
+             if (component != nullptr)
+             {
+                #if JUCE_WINDOWS
++                // DATTRACK patch: delete the editor while its window still exists. An editor may keep a child window
++                // alive elsewhere when it closes (DATTRACK moves its WebView2 to a hidden window so the page keeps
++                // running); once DestroyWindow has run on the plug-in window, that child window is gone with it.
++                if (component->pluginEditor != nullptr)
++                {
++                    PopupMenu::dismissAllActiveMenus();
++                    component->pluginEditor->processor.editorBeingDeleted (component->pluginEditor.get());
++                    component->pluginEditor = nullptr;
++                }
++
+                 component->removeFromDesktop();
+                #elif JUCE_MAC
+                 if (macHostWindow != nullptr)
 diff --git a/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp b/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
 index ddd7343..e1339d0 100644
 --- a/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp

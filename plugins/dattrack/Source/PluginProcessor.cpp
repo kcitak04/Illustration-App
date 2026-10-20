@@ -73,6 +73,7 @@ void DatTrackProcessor::recreateBrowser()
     auto* editor = attachedTo.getComponent();
     web.reset();
     keepAlive.reset();
+    core.pageConnected = false;
     createBrowser();
     if (editor != nullptr) { editor->addAndMakeVisible (*web); editor->resized(); }
 }
@@ -80,7 +81,9 @@ void DatTrackProcessor::recreateBrowser()
 void DatTrackProcessor::reloadPage()
 {
     if (! web) return;
-    if (! core.pageConnected.load()) { recreateBrowser(); return; }
+    // the page never came up, or has stopped talking to the plugin for a while (its web view died, e.g. a WebView2
+    // that lost its window): navigating would go nowhere, start a fresh web view
+    if (! core.pageConnected.load() || juce::Time::currentTimeMillis() - core.lastPacketMs.load() > 5000) { recreateBrowser(); return; }
     pageSr = hostSr.load() > 0 ? hostSr.load() : 48000.0;
     if (core.pageConnected.load() && juce::Time::currentTimeMillis() - core.lastPacketMs.load() < 1000)
     {   // a running page saves its song first (the timer navigates once it has, or after 1 s)
@@ -131,8 +134,9 @@ void DatTrackProcessor::timerCallback()
     // edits made in DATTRACK (or sync settings) mark the Ableton set as changed, so closing Live asks to save
     const int edits = core.songEditsFromPage.load();
     if (edits != editsSeen) { editsSeen = edits; markDirty(); }
-    // a new host sample rate: restart the page so the AudioContext runs at it (the song survives through the plugin state)
-    if (reloadAt == 0 && hostSr.load() > 0 && std::abs (hostSr.load() - pageSr) > 1 && core.pageConnected.load()) reloadPage();
+    // a new host sample rate: restart the page so the AudioContext runs at it (the song survives through the plugin state).
+    // Not during an offline render (an export at another sample rate): that would cut the export; the bridge resamples.
+    if (reloadAt == 0 && ! isNonRealtime() && hostSr.load() > 0 && std::abs (hostSr.load() - pageSr) > 1 && core.pageConnected.load()) reloadPage();
     core.updateLink();
 }
 
@@ -145,7 +149,7 @@ void DatTrackProcessor::getStateInformation (juce::MemoryBlock& dest)
     x.setAttribute ("latency", core.latencySec.load());
     x.setAttribute ("offset", core.offsetMs.load());
     x.setAttribute ("midi", core.midiToTracker.load());
-    auto song = core.getSongJson();
+    auto song = core.getSongJsonFlushed (500);   // edits made a moment ago are still in the page
     if (song.isNotEmpty()) x.createNewChildElement ("Song")->addTextElement (song);
     copyXmlToBinary (x, dest);
 }

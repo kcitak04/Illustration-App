@@ -65,6 +65,17 @@ void DatTrackCore::setSongFromHost (const juce::String& j)
     { std::lock_guard<std::mutex> l (songLock); songJson = j; songSeq++; }
 }
 
+juce::String DatTrackCore::getSongJsonFlushed (int timeoutMs)
+{
+    if (pageEditsPending.load() && juce::Time::currentTimeMillis() - lastPacketMs.load() < 1000)
+    {
+        const int req = ++flushRequest;
+        const auto t0 = juce::Time::getMillisecondCounter();
+        while (flushAck.load() < req && juce::Time::getMillisecondCounter() - t0 < (juce::uint32) timeoutMs) juce::Thread::sleep (5);
+    }
+    return getSongJson();
+}
+
 // ---------------- HTTP (server threads) ----------------
 HttpResponse DatTrackCore::handle (const HttpRequest& r)
 {
@@ -82,12 +93,18 @@ HttpResponse DatTrackCore::handle (const HttpRequest& r)
         std::lock_guard<std::mutex> l (songLock);
         return songJson.isEmpty() ? HttpResponse::empty() : HttpResponse::text (songJson);
     }
-    if (route == "flushed") { flushAck = flushRequest.load(); return HttpResponse::empty(); }
+    if (route == "flushed")
+    {   // the page names the request it saved for (a newer one may have come in meanwhile)
+        const int n = r.q ("n").isNotEmpty() ? r.q ("n").getIntValue() : flushRequest.load();
+        for (int a = flushAck.load(); a < n && ! flushAck.compare_exchange_weak (a, n);) {}
+        return HttpResponse::empty();
+    }
     if (route == "save" && r.method == "POST")
     {
         auto name = juce::File::createLegalFileName (r.q ("name", "export.wav"));
         if (name.isEmpty()) name = "export.wav";
-        auto f = exportFolder().getNonexistentChildFile (juce::File (name).getFileNameWithoutExtension(), juce::File (name).getFileExtension(), true);
+        const auto folder = exportFolder(), wanted = folder.getChildFile (name);
+        auto f = folder.getNonexistentChildFile (wanted.getFileNameWithoutExtension(), wanted.getFileExtension(), true);
         if (! f.replaceWithData (r.body.getData(), r.body.getSize())) return HttpResponse::text ("{\"error\":\"write\"}", "application/json", 500);
         { std::lock_guard<std::mutex> l (songLock); lastExport = f; }
         sendChangeMessage();
@@ -107,12 +124,17 @@ HttpResponse DatTrackCore::onAudio (const HttpRequest& r)
 
     // what the page reports about DATTRACK (used by MASTER and the GUI)
     {
+        // edits the page has not sent yet: the set is changed already (Live then asks to save it on closing)
+        const bool edits = r.q ("e") == "1";
+        if (edits && ! pageEditsPending.exchange (true)) ++songEditsFromPage;
+        else if (! edits) pageEditsPending = false;
         PageState p; p.playing = r.q ("p") == "1"; p.bpm = r.q ("b").getDoubleValue(); p.beat = r.q ("ab").getDoubleValue(); p.at = r.q ("at").getDoubleValue();
         const juce::SpinLock::ScopedLockType l (pageLock); p.seq = page.seq + 1; page = p;
         dtPlaying = p.playing; dtBpm = p.bpm;
     }
 
     Anchor a; { const juce::SpinLock::ScopedLockType l (anchorLock); a = anchor; }
+    if (a.epoch != bridge.epoch()) a.running = false;   // this request restarted the timeline: the anchor is on the old one
     juce::String midi;
     {
         int s1, n1, s2, n2; midiFifo.prepareToRead (midiFifo.getNumReady(), s1, n1, s2, n2);
@@ -121,7 +143,7 @@ HttpResponse DatTrackCore::onAudio (const HttpRequest& r)
     }
     int seq; { std::lock_guard<std::mutex> l (songLock); seq = songSeq; }
     juce::String out;
-    out << "{\"mode\":" << mode.load() << ",\"playing\":" << (a.playing ? "true" : "false") << ",\"bpm\":" << json (a.bpm)
+    out << "{\"mode\":" << mode.load() << ",\"playing\":" << (a.playing ? "true" : "false") << ",\"run\":" << (a.running ? "true" : "false") << ",\"bpm\":" << json (a.bpm)
         << ",\"r\":" << json (a.rate) << ",\"f\":" << json (a.f) << ",\"ppq\":" << json (a.ppq) << ",\"jump\":" << a.jump << ",\"jp\":" << json (a.jumpPpq) << ",\"song\":" << seq
         << ",\"midi\":[" << midi << "],\"stop\":" << pendingStop.exchange (0) << ",\"flush\":" << flushRequest.load();
     if (a.looping) out << ",\"loop\":[" << json (a.ls) << "," << json (a.le) << "]";
@@ -140,18 +162,24 @@ void DatTrackCore::process (float* L, float* R, int n, double hostSr, const Host
         const auto t0 = juce::Time::getMillisecondCounter();
         while (! bridge.hasAhead (n, hostSr) && juce::Time::getMillisecondCounter() - t0 < 3000) juce::Thread::sleep (1);
     }
-    auto st = bridge.pull (L, R, n, hostSr);
+    const bool paced = offline && juce::Time::currentTimeMillis() - lastPacketMs.load() < 2000;
+    auto st = bridge.pull (L, R, n, hostSr, paced);
     audioRunning = st.running; fillSec = st.fillSec; underruns = bridge.underruns;
     hostBpm = t.valid ? t.bpm : 0.0;
 
-    if (midi != nullptr && midiToTracker.load())
+    // MIDI IN off: only note-offs (and all-notes-off) still go through, so a note held while switching it off is released
+    if (midi != nullptr)
         for (const auto m : *midi)
         {
             auto msg = m.getMessage();
-            if (! msg.isNoteOnOrOff()) continue;
+            juce::uint32 ev;
+            if (msg.isNoteOn()) { if (! midiToTracker.load()) continue; ev = (0x90u << 16) | ((juce::uint32) msg.getNoteNumber() << 8) | (juce::uint32) msg.getVelocity(); }
+            else if (msg.isNoteOff()) ev = (0x80u << 16) | ((juce::uint32) msg.getNoteNumber() << 8);
+            else if (msg.isAllNotesOff() || msg.isAllSoundOff()) ev = (0xB0u << 16) | (123u << 8);
+            else continue;
             int s1, n1, s2, n2; midiFifo.prepareToWrite (1, s1, n1, s2, n2);
             if (n1 + n2 == 0) break;
-            midiData[(size_t) (n1 ? s1 : s2)] = ((juce::uint32) (msg.isNoteOn() ? 0x90 : 0x80) << 16) | ((juce::uint32) msg.getNoteNumber() << 8) | (juce::uint32) msg.getVelocity();
+            midiData[(size_t) (n1 ? s1 : s2)] = ev;
             midiFifo.finishedWrite (1);
         }
 
@@ -170,6 +198,7 @@ void DatTrackCore::process (float* L, float* R, int n, double hostSr, const Host
         anchor.f = st.readFrame + latHost * st.ratio; anchor.ppq = t.ppq; anchor.bpm = t.bpm; anchor.playing = t.playing; anchor.jump = jumps; anchor.jumpPpq = jumpPpq;
         // context seconds per host second at the read head right now (the resampling ratio, drift correction included)
         anchor.rate = st.running ? st.ratio * hostSr / bridge.contextRate() : 1.0;
+        anchor.running = st.running; anchor.epoch = st.epoch;   // not running: the buffer is (re)filling, f does not move with the host yet
         anchor.looping = t.looping; anchor.ls = t.loopStart; anchor.le = t.loopEnd;
     }
 

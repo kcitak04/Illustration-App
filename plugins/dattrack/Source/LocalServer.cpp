@@ -10,13 +10,22 @@ juce::String urlDecode (const juce::String& s) { return juce::URL::removeEscapeC
 struct Reader
 {
     juce::StreamingSocket& s;
+    const std::atomic<bool>& stopping;
     juce::MemoryBlock buf; size_t pos = 0, len = 0;
-    explicit Reader (juce::StreamingSocket& sock) : s (sock) { buf.setSize (65536); }
+    Reader (juce::StreamingSocket& sock, const std::atomic<bool>& stop) : s (sock), stopping (stop) { buf.setSize (65536); }
     bool fill (int timeoutMs)
     {
         if (pos == len) { pos = len = 0; }
         if (len == buf.getSize()) { if (pos == 0) return false; std::memmove (buf.getData(), (char*) buf.getData() + pos, len - pos); len -= pos; pos = 0; }
-        if (s.waitUntilReady (true, timeoutMs) != 1) return false;
+        // wait in short slices: closing the socket from another thread does not wake a waiting poll() everywhere
+        // (macOS), and the server's destructor must not hang for the whole keep-alive timeout
+        for (int waited = 0;; waited += 200)
+        {
+            if (stopping.load() || waited >= timeoutMs) return false;
+            const int r = s.waitUntilReady (true, std::min (200, timeoutMs - waited));
+            if (r < 0) return false;
+            if (r == 1) break;
+        }
         int n = s.read ((char*) buf.getData() + len, (int) (buf.getSize() - len), false);
         if (n <= 0) return false;
         len += (size_t) n; return true;
@@ -141,7 +150,7 @@ void LocalServer::acceptLoop()
 
 void LocalServer::serve (std::unique_ptr<juce::StreamingSocket> sock)
 {
-    Reader rd (*sock);
+    Reader rd (*sock, stopping);
     const juce::String hostOk1 = "127.0.0.1:" + juce::String (port), hostOk2 = "localhost:" + juce::String (port);
     while (! stopping.load())
     {
