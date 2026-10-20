@@ -2,6 +2,7 @@
 // lab_cli <proc> <in.f32> <channels> <sr> <out.f32> [aux.f32 auxChannels] [key=value ...]
 // .f32 files are planar: channel 0 samples, then channel 1 samples. Output header: one line "channels length".
 #include "../datlab/Source/dsp/LabEngine.h"
+#include "../datlab/Source/dsp/LabDspUtil.h"
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -105,6 +106,18 @@ int main (int argc, char** argv)
                     if (! okId || pd.def < pd.min || pd.def > pd.max || pd.min > pd.max) { std::printf ("FAIL param %s.%s\n", d.id.c_str(), pd.id.c_str()); bad++; }
                 }
             }
+        }
+        {   // pitch tracker: a sung E4 whose first formant sits on the 2nd harmonic must not read an octave up
+            lab::Buf v ((size_t) sr); double ph = 0;
+            for (size_t i = 0; i < v.size(); ++i)
+            {
+                ph += lab::TAU * 329.63 * (1 + 0.01 * std::sin (lab::TAU * 5.5 * (double) i / sr)) / sr; double y = 0;
+                for (int h = 1; h * 329.63 < 8000; ++h) { auto res = [&] (double F, double bw) { double q = (h * 329.63 - F) / bw; return 1 / (1 + q * q); }; y += (0.15 / h + 3 * res (660, 60) + 1.5 * res (1100, 90)) * std::sin (h * ph); }
+                v[i] = (float) (0.1 * y);
+            }
+            auto pt = lab::dsp::trackPitch (v, sr); int wrong = 0;
+            for (size_t i = 5; i + 5 < pt.f0.size(); ++i) if (! (pt.f0[i] > 0) || std::abs (std::log2 (pt.f0[i] / 329.63)) > 0.1) ++wrong;
+            if (wrong) { std::printf ("FAIL pitch tracker: %d frames of a sung E4 off by an octave or unvoiced\n", wrong); bad++; }
         }
         const std::string only = argc > 2 ? argv[2] : "";   // optional: only processes whose id starts with this
         for (auto& d : lab::procs())

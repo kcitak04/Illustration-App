@@ -50,6 +50,7 @@ public:
     juce::String status = "Load or drop a sample (or CAPTURE the track), pick a process, then PROCESS";
 
     bool loadFile (const juce::File&, bool asAux, juce::String& error);
+    bool readFile (const juce::File&, LabSample& into, juce::String& error);
     void setSource (LabSample s, bool pushHistory);
     void chainResult();
     void undoChain();

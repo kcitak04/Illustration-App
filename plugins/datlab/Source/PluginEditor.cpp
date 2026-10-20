@@ -121,6 +121,24 @@ void WaveView::mouseDrag (const juce::MouseEvent& e)
 }
 
 // ======================= ParamControl =======================
+// Typed-in knob values, read in the unit the knob shows: "50%" is 0.5, "120 ms" / "1.5 s" are seconds, "2.5 kHz" is 2500, "A#3" is a note
+static double parseValue (const lab::ParamDef& d, const juce::String& text)
+{
+    const auto t = text.trim().toLowerCase();
+    if (d.fmt == lab::Fmt::note && t.isNotEmpty() && t[0] >= 'a' && t[0] <= 'g')
+    {
+        static const int semis[] = { 9, 11, 0, 2, 4, 5, 7 };   // a b c d e f g
+        int n = semis[t[0] - 'a'], i = 1;
+        if (t[i] == '#') { ++n; ++i; } else if (t[i] == 'b') { --n; ++i; } else if (t[i] == '-') ++i;   // "C-4" is C4 in the display
+        return n + 12 * t.substring (i).getIntValue();
+    }
+    const double v = t.retainCharacters ("-0123456789.").getDoubleValue();
+    if (d.fmt == lab::Fmt::pct) return v / 100;
+    if (d.fmt == lab::Fmt::time) return t.contains ("ms") ? v / 1000 : t.contains ("s") ? v : (v > d.max ? v / 1000 : v);
+    if (d.fmt == lab::Fmt::hz) return t.contains ("k") ? v * 1000 : v;
+    return v;
+}
+
 ParamControl::ParamControl (const lab::ParamDef& d, double value, std::function<void (double)> changed) : def (d), onChange (std::move (changed))
 {
     if (def.isOptions())
@@ -139,7 +157,7 @@ ParamControl::ParamControl (const lab::ParamDef& d, double value, std::function<
         if (def.flags & lab::PExp) { if (def.min > 0) knob.setSkewFactorFromMidPoint (std::sqrt (def.min * def.max)); else knob.setSkewFactor (0.4); }
         knob.setDoubleClickReturnValue (true, def.def);
         knob.textFromValueFunction = [this] (double v) { return U (lab::formatValue (def, v)); };
-        knob.valueFromTextFunction = [] (const juce::String& t) { return t.retainCharacters ("-0123456789.").getDoubleValue(); };
+        knob.valueFromTextFunction = [this] (const juce::String& t) { return parseValue (def, t); };
         knob.setValue (value, juce::dontSendNotification);
         knob.onValueChange = [this] { onChange (knob.getValue()); };
         knob.setPopupDisplayEnabled (false, false, nullptr);
@@ -363,7 +381,8 @@ DatLabEditor::DatLabEditor (DatLabProcessor& p) : AudioProcessorEditor (p), proc
         chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting, [this] (const juce::FileChooser& fc)
         {
             auto f = fc.getResult(); if (f == juce::File()) return;
-            if (proc.result.file.copyFileTo (f.withFileExtension ("wav"))) proc.status = "Saved " + f.getFullPathName();
+            const auto dst = f.withFileExtension ("wav");
+            proc.status = proc.result.file.copyFileTo (dst) ? "Saved " + dst.getFullPathName() : "Couldn't save " + dst.getFullPathName() + " (is it open in another program?)";
             refresh();
         });
     }, "Save a copy of the result somewhere else");
@@ -519,14 +538,20 @@ void DatLabEditor::resized()
     statusLabel.setBounds (status.withTrimmedRight (210)); progressBar.setBounds (status.removeFromRight (200));
     r.removeFromBottom (6);
     auto buttons = r.removeFromBottom (34);
-    processBtn.setBounds (buttons.removeFromLeft (120)); buttons.removeFromLeft (8);
-    for (auto* b : { &playSrc, &playRes, &stopBtn, &loopBtn }) { b->setBounds (buttons.removeFromLeft (b == &playRes ? 100 : (b == &playSrc ? 80 : 54))); buttons.removeFromLeft (4); }
-    buttons.removeFromLeft (10);
-    for (auto* b : { &chainBtn, &undoBtn, &randBtn, &resetBtn }) { b->setBounds (buttons.removeFromLeft (66)); buttons.removeFromLeft (4); }
-    buttons.removeFromLeft (6);
-    const int fw = juce::jmin (72, juce::jmax (40, (buttons.getWidth() - 4) / 2));
-    folderBtn.setBounds (buttons.removeFromRight (fw)); buttons.removeFromRight (4);
-    saveBtn.setBounds (buttons.removeFromRight (fw));
+    {   // natural widths need 876 px; a narrower window (e.g. a scaled laptop screen) shrinks every button instead of cutting off the last ones
+        struct B { juce::Component* c; int w, gap; };
+        const B row[] = { { &processBtn, 120, 8 }, { &playSrc, 80, 4 }, { &playRes, 100, 4 }, { &stopBtn, 54, 4 }, { &loopBtn, 54, 14 }, { &chainBtn, 66, 4 },
+                          { &undoBtn, 66, 4 }, { &randBtn, 66, 4 }, { &resetBtn, 66, 10 }, { &saveBtn, 72, 4 }, { &folderBtn, 72, 0 } };
+        int total = 0; for (auto& e : row) total += e.w + e.gap;
+        const double k = juce::jmin (1.0, (double) buttons.getWidth() / total);
+        int x = buttons.getX();
+        for (auto& e : row)
+        {
+            if (e.c == &saveBtn && k >= 1.0) x = buttons.getRight() - (72 + 4 + 72);   // SAVE / FOLDER sit at the right edge
+            const int w = (int) (e.w * k);
+            e.c->setBounds (x, buttons.getY(), w, buttons.getHeight()); x += w + (int) (e.gap * k);
+        }
+    }
     r.removeFromBottom (8);
     const int waveH = getHeight() < 720 ? 64 : 91;   // shorter waveforms on small windows
     auto waves = r.removeFromBottom (waveH * 2 + 8);
@@ -577,7 +602,8 @@ void DatLabEditor::filesDropped (const juce::StringArray& files, int x, int y)
 {
     dropHover = false;
     bool asAux = ! auxZone.isEmpty() && auxBtn.isVisible() && auxZone.contains (x, y);
-    const juce::File f (files[0]);
+    juce::File f (files[0]);
+    for (auto& path : files) if (juce::File (path).hasFileExtension ("wav;aif;aiff;flac;ogg;mp3;m4a;caf")) { f = juce::File (path); break; }   // the first audio file of the drop
     // the result dragged out and released over this window again: treat it as CHAIN (undoable),
     // not as a fresh load that would wipe the source and its history
     if (! asAux && f == proc.result.file && ! proc.result.empty()) { proc.chainResult(); refresh(); return; }

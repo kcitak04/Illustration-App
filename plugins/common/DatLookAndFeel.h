@@ -23,7 +23,7 @@ class LookAndFeel : public juce::LookAndFeel_V4
 public:
     explicit LookAndFeel (juce::Colour accentColour = col::lab) : acc (accentColour)
     {
-        setColourScheme ({ col::bg, col::panel, col::panel2, col::line, col::text, col::panel2, col::text, acc, col::bg });
+        setColourScheme ({ col::bg, col::panel, col::panel2, col::line, col::text, col::panel2, col::text, acc, col::text });   // last = menu text: readable on the dark menu
         setColour (juce::ResizableWindow::backgroundColourId, col::bg);
         setColour (juce::Slider::rotarySliderFillColourId, acc);
         setColour (juce::Slider::rotarySliderOutlineColourId, col::line);
@@ -41,6 +41,7 @@ public:
         setColour (juce::ComboBox::textColourId, col::text);
         setColour (juce::ComboBox::arrowColourId, acc);
         setColour (juce::PopupMenu::backgroundColourId, col::panel);
+        setColour (juce::PopupMenu::textColourId, col::text);
         setColour (juce::PopupMenu::highlightedBackgroundColourId, acc);
         setColour (juce::PopupMenu::highlightedTextColourId, col::bg);
         setColour (juce::ListBox::backgroundColourId, col::panel);
@@ -58,7 +59,12 @@ public:
 
     juce::Colour accent() const { return acc; }
 
-    juce::Font getTextButtonFont (juce::TextButton&, int h) override { return font (juce::jmin (13.0f, (float) h * 0.48f), true); }
+    juce::Font getTextButtonFont (juce::TextButton& b, int h) override
+    {   // shrinks to fit a narrow button (small / scaled windows) instead of cutting the text to "RAN..."
+        auto f = font (juce::jmin (13.0f, (float) h * 0.48f), true);
+        const float textW = juce::GlyphArrangement::getStringWidth (f, b.getButtonText()), room = (float) b.getWidth() - 8.0f;
+        return textW > room && room > 0 ? font (juce::jmax (8.0f, f.getHeight() * room / textW), true) : f;
+    }
     juce::Font getLabelFont (juce::Label& l) override { return l.getFont(); }
     juce::Font getComboBoxFont (juce::ComboBox&) override { return font (12.0f, true); }
     juce::Font getPopupMenuFont() override { return font (13.0f, false); }
@@ -75,6 +81,7 @@ public:
         l->setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
         l->setColour (juce::Label::outlineWhenEditingColourId, acc);
         l->setFont (font (11.5f));
+        l->setMinimumHorizontalScale (0.5f); l->setBorderSize ({ 1, 1, 1, 1 });   // "20.00 kHz" squeezes into a narrow knob rather than becoming "20.00 ..." 
         return l;
     }
 

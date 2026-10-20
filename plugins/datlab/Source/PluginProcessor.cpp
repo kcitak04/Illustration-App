@@ -61,7 +61,12 @@ bool DatLabProcessor::isBusesLayoutSupported (const BusesLayout& l) const
     return in.isDisabled() || in == juce::AudioChannelSet::stereo() || in == juce::AudioChannelSet::mono();
 }
 
-void DatLabProcessor::prepareToPlay (double sampleRate, int) { hostSr = sampleRate; }
+void DatLabProcessor::prepareToPlay (double sampleRate, int)
+{
+    // a take can't change sample rate halfway: it ends at the switch (the timer then turns it into the source, at its own rate)
+    if (capturing.load() && std::abs (sampleRate - capSr) > 0.5) capturing = false;
+    hostSr = sampleRate;
+}
 
 void DatLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
@@ -92,25 +97,28 @@ void DatLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     const int req = playRequest.load();
     if (req != playSeen) { playSeen = req; playPos = 0; }
     auto* pb = playBuf.get();
-    if (playing.load() != Play::none && pb != nullptr && ! pb->ch.empty())
+    if (playing.load() != Play::none && pb != nullptr && ! pb->ch.empty() && pb->ch[0].size() > 1)
     {
-        const double step = pb->sr / hostSr.load(); const size_t len = pb->ch[0].size();
+        // len real samples; play() appends one 0 so a one-shot ends on a ramp to silence. A loop wraps
+        // from the last sample straight back to the first (no dip to 0 = no click at the loop point).
+        const double step = pb->sr / hostSr.load(); const size_t len = pb->ch[0].size() - 1;
+        const bool loop = loopPreview.load();
         for (int i = 0; i < n; ++i)
         {
-            if (playPos >= (double) len - 1)
+            if (playPos >= (double) len)
             {
-                if (loopPreview.load()) playPos = 0;
+                if (loop) playPos = std::fmod (playPos, (double) len);
                 else { playing = Play::none; break; }
             }
-            size_t i0 = (size_t) playPos; float f = (float) (playPos - (double) i0);
+            size_t i0 = (size_t) playPos, i1 = loop && i0 + 1 >= len ? 0 : i0 + 1; float f = (float) (playPos - (double) i0);
             for (int c = 0; c < nOut; ++c)
             {
                 const auto& x = pb->ch[(size_t) juce::jmin (c, (int) pb->ch.size() - 1)];
-                buffer.addSample (c, i, x[i0] + (x[i0 + 1] - x[i0]) * f);
+                buffer.addSample (c, i, x[i0] + (x[i1] - x[i0]) * f);
             }
             playPos += step;
         }
-        playFrac = (float) (playPos / (double) juce::jmax<size_t> (1, len));
+        playFrac = (float) (playPos / (double) len);
     }
 }
 
@@ -133,15 +141,27 @@ juce::File DatLabProcessor::renderFolder() const
     return f;
 }
 
-bool DatLabProcessor::loadFile (const juce::File& file, bool asAux, juce::String& error)
+bool DatLabProcessor::readFile (const juce::File& file, LabSample& s, juce::String& error)
 {
     std::unique_ptr<juce::AudioFormatReader> r (formats.createReaderFor (file));
     if (! r) { error = "Can't read " + file.getFileName(); return false; }
-    const auto len = (int) juce::jmin<juce::int64> (r->lengthInSamples, (juce::int64) (r->sampleRate * 600));
+    if (! (r->sampleRate >= 1000 && r->sampleRate <= 768000) || r->numChannels < 1) { error = file.getFileName() + ": unsupported format"; return false; }
+    const auto len = (int) juce::jmin<juce::int64> (r->lengthInSamples, (juce::int64) (r->sampleRate * 600));   // 10 minutes at most
     if (len < 16) { error = file.getFileName() + " is empty"; return false; }
-    juce::AudioBuffer<float> b ((int) juce::jmin (2u, r->numChannels), len);
-    r->read (&b, 0, len, 0, true, true);
-    LabSample s; s.ch = toChans (b, len); s.sr = r->sampleRate; s.name = file.getFileNameWithoutExtension(); s.file = file;
+    try
+    {
+        juce::AudioBuffer<float> b ((int) juce::jmin (2u, r->numChannels), len);
+        r->read (&b, 0, len, 0, true, true);
+        s = {}; s.ch = toChans (b, len); s.sr = r->sampleRate; s.name = file.getFileNameWithoutExtension(); s.file = file;
+    }
+    catch (const std::bad_alloc&) { error = file.getFileName() + " is too big to load"; return false; }
+    return true;
+}
+
+bool DatLabProcessor::loadFile (const juce::File& file, bool asAux, juce::String& error)
+{
+    LabSample s;
+    if (! readFile (file, s, error)) return false;
     if (asAux) { aux = std::move (s); status = "Second sample: " + aux.name; }
     else { setSource (std::move (s), false); history.clear(); }
     markDirty();
@@ -152,7 +172,9 @@ bool DatLabProcessor::loadFile (const juce::File& file, bool asAux, juce::String
 void DatLabProcessor::setSource (LabSample s, bool pushHistory)
 {
     if (pushHistory && ! source.empty()) history.push_back (source);
-    if (history.size() > 32) history.erase (history.begin());
+    // UNDO keeps up to 32 sources, but never more than ~1 GB of audio (each step is a full copy)
+    auto bytes = [this] { size_t b = 0; for (auto& h : history) for (auto& c : h.ch) b += c.size() * sizeof (float); return b; };
+    while (history.size() > 32 || (history.size() > 1 && bytes() > ((size_t) 1 << 30))) history.erase (history.begin());
     source = std::move (s);
     shape.start = 0; shape.end = 1;
     if (playing.load() == Play::source) stopPlay();
@@ -184,12 +206,9 @@ void DatLabProcessor::startProcessing()
     if (source.empty()) { status = "No source sample: drop a file, LOAD one or CAPTURE the track"; sendChangeMessage(); return; }
     const auto& d = proc();
     lab::Job job; job.src = source.ch; job.sr = source.sr; job.procId = d.id; job.params = paramsFor (procId); job.shape = shape; job.bpm = effectiveBpm();
-    bool needsAux = ! d.aux.empty() && ! (d.id == "mask" && job.params.i ("mode") != 0);
-    if (needsAux)
-    {
-        if (aux.empty()) { status = "This process needs a second sample (" + juce::String (d.aux) + "): drop one on the row under the knobs"; sendChangeMessage(); return; }
-        job.aux = resampleTo (aux.ch, aux.sr, source.sr);
-    }
+    // the second sample goes along whenever there is one; a process that can't work without it (in the chosen mode) says
+    // so itself ("Choose a ... sample"), others (MASK's spectral modes, PEAK TUNE's chord / harmonic goals...) run without
+    if (! d.aux.empty() && ! aux.empty()) job.aux = resampleTo (aux.ch, aux.sr, source.sr);
     waitForThreadToExit (-1);   // the previous render already finished (busy was cleared after it returned)
     pendingJob = std::move (job); pendingName = source.name; pendingTag = d.id == "robot" && pendingJob.params.i ("mode") == 1 ? "WHSP" : juce::String (d.tag);
     busy = true; progress = 0;
@@ -206,7 +225,10 @@ void DatLabProcessor::run()
     auto r = lab::run (pendingJob, [this] (double f) { progress = (float) f; }, [this] { return threadShouldExit(); });
     LabSample res;
     juce::String msg;
-    if (! r.error.empty()) msg = r.error == "Cancelled" ? juce::String ("Cancelled") : "Failed: " + juce::String (r.error);
+    if (! r.error.empty())
+        msg = r.error == "Cancelled" ? juce::String ("Cancelled")
+            : juce::String (r.error).startsWith ("Choose") ? juce::String (r.error) + ": drop one on the row under the knobs (or LOAD / USE RESULT)"
+            : "Failed: " + juce::String (r.error);
     else
     {
         res.ch = std::move (r.ch); res.sr = r.sr;
@@ -246,13 +268,15 @@ void DatLabProcessor::randomize()
     {
         double u = rnd.nextDouble(), v;
         if (pd.flags & lab::PExp && pd.min > 0) v = pd.min * std::pow (pd.max / pd.min, u);
+        else if (pd.isInt()) v = pd.min + std::floor ((pd.max - pd.min + 1) * u);   // every option / whole number equally likely
         else v = pd.min + (pd.max - pd.min) * u;
-        if (pd.isInt()) v = std::round (v);
+        if (pd.isInt()) v = juce::jlimit (pd.min, pd.max, std::round (v));
         p.v[pd.id] = v;
     }
+    markDirty();
     sendChangeMessage();
 }
-void DatLabProcessor::resetParams() { values[procId] = lab::defaults (proc()); sendChangeMessage(); }
+void DatLabProcessor::resetParams() { values[procId] = lab::defaults (proc()); markDirty(); sendChangeMessage(); }
 
 void DatLabProcessor::play (Play what)
 {
@@ -261,7 +285,9 @@ void DatLabProcessor::play (Play what)
     auto pb = std::make_unique<PlayBuf>();
     if (what == Play::source)
     {   // only the selected region
-        size_t len = s.ch[0].size(), a = juce::jmin (len - 1, (size_t) (shape.start * (double) len)), b = juce::jlimit (a + 2, len, (size_t) (shape.end * (double) len));
+        auto frac = [] (double v, double def) { return std::isfinite (v) ? juce::jlimit (0.0, 1.0, v) : def; };
+        size_t len = s.ch[0].size(), a = juce::jmin (len - 1, (size_t) (frac (shape.start, 0) * (double) len));
+        size_t b = juce::jmin (len, juce::jmax (a + 2, (size_t) (frac (shape.end, 1) * (double) len)));
         if (b <= a + 1) return;
         for (auto& c : s.ch) pb->ch.emplace_back (c.begin() + (long) a, c.begin() + (long) b);
     }
@@ -281,6 +307,7 @@ float DatLabProcessor::playPosition() const { return playFrac.load(); }
 
 void DatLabProcessor::startCapture()
 {
+    if (capPending) stopCapture();   // a take that just hit the time limit becomes the source before the next one starts
     capSr = hostSr.load();
     if (capBuf.getNumSamples() != (int) (capSr * 120)) capBuf.setSize (2, (int) (capSr * 120));
     capBuf.clear();
@@ -321,7 +348,8 @@ void DatLabProcessor::getStateInformation (juce::MemoryBlock& dest)
         auto* e = x.createNewChildElement ("Params"); e->setAttribute ("proc", id);
         for (auto& [k, v] : p.v) e->setAttribute (juce::String (k), v);
     }
-    auto file = [&] (const char* tag, const LabSample& s) { if (s.file.existsAsFile()) { auto* e = x.createNewChildElement (tag); e->setAttribute ("path", s.file.getFullPathName()); e->setAttribute ("name", s.name); } };
+    // a file that was missing when the set was opened (unplugged drive, moved folder) keeps its path, so saving the set doesn't forget it
+    auto file = [&] (const char* tag, const LabSample& s) { if (s.file != juce::File()) { auto* e = x.createNewChildElement (tag); e->setAttribute ("path", s.file.getFullPathName()); e->setAttribute ("name", s.name); } };
     file ("Source", source); file ("Aux", aux); file ("Result", result);
     copyXmlToBinary (x, dest);
 }
@@ -352,24 +380,24 @@ void DatLabProcessor::setStateInformation (const void* data, int size)
         values[id] = p;
     }
     const auto keepShape = shape;
-    juce::String err;
-    auto load = [&] (const char* tag, int which)
+    // the samples of the state being loaded replace whatever this instance held (a preset / undo of the device state)
+    stopPlay(); source = {}; aux = {}; result = {}; history.clear();
+    juce::StringArray missing;
+    auto load = [&] (const char* tag, LabSample& dst)
     {
         if (auto* e = x->getChildByName (tag))
         {
-            juce::File f (e->getStringAttribute ("path"));
-            if (! f.existsAsFile()) return;
-            if (which == 2)
-            {
-                std::unique_ptr<juce::AudioFormatReader> r (formats.createReaderFor (f)); if (! r) return;
-                juce::AudioBuffer<float> b ((int) juce::jmin (2u, r->numChannels), (int) r->lengthInSamples); r->read (&b, 0, b.getNumSamples(), 0, true, true);
-                result.ch = toChans (b, b.getNumSamples()); result.sr = r->sampleRate; result.file = f; result.name = e->getStringAttribute ("name", f.getFileNameWithoutExtension());
-            }
-            else if (loadFile (f, which == 1, err) && which == 0) source.name = e->getStringAttribute ("name", source.name);
+            juce::File f (e->getStringAttribute ("path")); auto name = e->getStringAttribute ("name", f.getFileNameWithoutExtension());
+            juce::String err;
+            if (f.getFullPathName().isNotEmpty() && readFile (f, dst, err)) dst.name = name;
+            else { dst = {}; dst.file = f; dst.name = name; missing.add (f.getFullPathName()); }
         }
     };
-    load ("Source", 0); load ("Aux", 1); load ("Result", 2);
+    load ("Source", source); load ("Aux", aux); load ("Result", result);
     shape = keepShape;
+    if (! missing.isEmpty()) status = "Missing file" + juce::String (missing.size() > 1 ? "s: " : ": ") + missing.joinIntoString (", ");
+    else if (! source.empty())
+        status = "Source: " + source.name + juce::String::formatted ("  %.2f s  %d Hz  %s", source.seconds(), (int) source.sr, source.ch.size() > 1 ? "stereo" : "mono");
     sendChangeMessage();
 }
 

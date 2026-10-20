@@ -100,9 +100,35 @@ inline PitchTrack trackPitch (const Buf& x, double sr, double minHz = 50, double
         for (size_t tau = tauMin; tau < tauMax; ++tau)
             if (cm[tau] < thresh) { while (tau + 1 < tauMax && cm[tau + 1] < cm[tau]) ++tau; best = tau; break; }
         if (! best) continue;
+        // Octave check: a strong 2nd / 3rd harmonic (e.g. a sung vowel whose first formant sits on it) makes a dip at a
+        // fraction of the period cross the threshold first. If the dip at a multiple of the lag is much deeper, that
+        // multiple is the real period. A clean periodic sound has both dips near 0, so it never moves down an octave.
+        for (bool moved = (double) best >= sr / 1000; moved;)   // (not above 1 kHz: short lags are too coarse to compare)
+        {
+            moved = false;
+            for (size_t k = 2; k <= 3 && ! moved; ++k)
+            {
+                const size_t c0 = best * k; if (c0 + 2 >= tauMax) break;
+                size_t m = c0 - std::min (c0 - 1, k + 1);
+                for (size_t tau = m; tau <= c0 + k + 1 && tau < tauMax; ++tau) if (cm[tau] < cm[m]) m = tau;
+                if (cm[best] > 0.05 && cm[m] < cm[best] * 0.2) { best = m; moved = true; }
+            }
+        }
         double t = (double) best;   // parabolic interpolation
         if (best > 1 && best < tauMax) { double y0 = cm[best - 1], y1 = cm[best], y2 = cm[best + 1], den = y0 - 2 * y1 + y2; if (std::abs (den) > 1e-12) t += 0.5 * (y0 - y2) / den; }
         pt.f0[fi] = sr / t;
+    }
+    // 5-frame median of the voiced neighbours: removes isolated octave jumps that survive the check above
+    {
+        const auto raw = pt.f0;
+        for (size_t i = 0; i < frames; ++i)
+        {
+            if (raw[i] <= 0) continue;
+            double v[5]; int n = 0;
+            for (size_t j = i >= 2 ? i - 2 : 0; j <= i + 2 && j < frames; ++j) if (raw[j] > 0 && n < 5) v[n++] = raw[j];
+            for (int a = 1; a < n; ++a) for (int b = a; b > 0 && v[b] < v[b - 1]; --b) std::swap (v[b], v[b - 1]);   // (std::sort trips GCC's -Warray-bounds here)
+            pt.f0[i] = n % 2 ? v[n / 2] : (std::abs (std::log2 (v[n / 2 - 1] / raw[i])) < std::abs (std::log2 (v[n / 2] / raw[i])) ? v[n / 2 - 1] : v[n / 2]);
+        }
     }
     // remove single-frame octave glitches / dropouts
     for (size_t i = 1; i + 1 < frames; ++i)

@@ -185,7 +185,7 @@ std::string formatValue (const ParamDef& d, double v)
     {
         case Fmt::pct: std::snprintf (b, sizeof b, "%d%%", (int) jr (v * 100)); return b;
         case Fmt::time: if (v < 1) std::snprintf (b, sizeof b, "%d ms", (int) jr (v * 1000)); else std::snprintf (b, sizeof b, "%.2f s", v); return b;
-        case Fmt::hz: if (v >= 1000) std::snprintf (b, sizeof b, "%.2f kHz", v / 1000); else std::snprintf (b, sizeof b, "%d Hz", (int) jr (v)); return b;
+        case Fmt::hz: if (v >= 1000) std::snprintf (b, sizeof b, "%.3g kHz", v / 1000); /* "20 kHz", "2.5 kHz": fits a narrow knob */ else std::snprintf (b, sizeof b, "%d Hz", (int) jr (v)); return b;
         case Fmt::db: std::snprintf (b, sizeof b, "%.1f dB", v); return b;
         case Fmt::note:
         {

@@ -128,6 +128,8 @@ Result run (const Job& job, const std::function<void (double)>& progress, const 
         for (auto& c : src) for (auto& v : c) if (! std::isfinite (v)) v = 0;   // a corrupt file must not poison the maths
         Chans out = def->fn (src, cx, p);
         for (auto& a : out) for (auto& v : a) if (! std::isfinite (v)) v = 0;
+        // MAX LENGTH holds for every process (several size their output from the input / an impulse and never look at cx.maxLen)
+        for (auto& a : out) if (a.size() > cx.maxLen) a.resize (cx.maxLen);
         applyPost (out, src, job.sr, sh);
         if (out.empty() || out[0].empty()) { r.error = "The result is empty: try other settings"; return r; }
         double pk = peakAll (out);
