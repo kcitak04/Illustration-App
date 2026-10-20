@@ -79,15 +79,15 @@ jobs:
           path: out/
 
       - name: Zip for the release
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/claude/ableton-vst-sample-effects-ngnlc4' || github.event_name == 'workflow_dispatch')
         shell: bash
         run: |
           cd out
           if [ "$RUNNER_OS" = "Windows" ]; then 7z a ../${{ matrix.artifact }}.zip . ; else zip -qry ../${{ matrix.artifact }}.zip . ; fi
 
-      # Every push to main refreshes the "plugins-latest" release
+      # Every push to main (or the plugins branch) refreshes the "plugins-latest" release
       - name: Publish "plugins-latest" release
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/claude/ableton-vst-sample-effects-ngnlc4' || github.event_name == 'workflow_dispatch')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: plugins-latest
