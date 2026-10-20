@@ -8,6 +8,8 @@
 //   loop       the host loops a region: every beat of every pass is on time, none dropped at the wrap, and
 //              DATTRACK really jumps back to the loop start (bar accents follow the looped positions)
 //   loop-off   the host reports a loop but plays straight through it: DATTRACK must notice and keep following
+//   step       other step lengths (one row = 1/4, 1/32, 1/64): SLAVE still lands every beat on the host's beat, accents
+//              on the bars, and follows a host loop
 //   save       saving the set right after an edit saves that edit (the page sends edits only after a pause)
 //   midi       MIDI IN: a repeated note-on, all-notes-off and switching MIDI IN off with a note held leave no note stuck
 //   tempo      a tempo ramp in the host while playing (tempo automation): every beat stays on the host's grid
@@ -271,6 +273,39 @@ if (want('reload')) {
   let hits = 0, total = 0;
   for (let k = 0; grid(k) < n - sr * 0.2; k++) if (grid(k) >= from) { total++; if (ons.some(o => Math.abs(o - grid(k)) < sr * 0.005)) hits++; }
   check('reload: after a page reload while the host plays, DATTRACK follows again', total >= 6 && hits === total, `${hits}/${total} beats on the grid in the last 4 s`);
+}
+
+// ---------------------------------------------------------------- step length (rows per beat) in SLAVE
+if (want('step')) {
+  for (const [rd, loop] of [[4, false], [32, false], [64, false], [32, true]]) {
+    const file = path.join(work, 'step' + rd + '.f32'), bpm = 128, playAt = 3, startPpq = loop ? 2 : 0, ls = 4, le = 10, dur = loop ? 14 : 9;
+    const args = ['--mode', 'slave', '--bpm', String(bpm), '--play-at', String(playAt), '--start-ppq', String(startPpq), '--duration', String(dur), '--follow-page', '--out', file];
+    if (loop) args.push('--loop-start', String(ls), '--loop-end', String(le));
+    const r = await session(args, async page => {
+      await page.evaluate(rd => { const s = new Song(); s.rowDiv = rd; setSong(s); state.metro = true; }, rd);
+    });
+    const latency = +/LATENCY (\d+)/.exec(r.log)[1];
+    const f = readOut(file), ons = onsets(f);
+    const beat = 60 / bpm * sr, first = playAt * sr + latency, expected = [];
+    for (let k = 0; first + k * beat < f.length / 2 - sr * 0.2; k++) {
+      let u = startPpq + k; if (loop && u >= le) u = ls + (u - le) % (le - ls);
+      expected.push({ at: first + k * beat, pos: u });
+    }
+    let worst = 0, missing = 0; const peaks = [];
+    for (const e of expected) {
+      const o = ons.find(x => Math.abs(x - e.at) < sr * 0.03);
+      if (o === undefined) { missing++; continue; }
+      worst = Math.max(worst, Math.abs(o - e.at) / sr);
+      let pk = 0; for (let i = o; i < o + sr * 0.02 && i < f.length / 2; i++) pk = Math.max(pk, Math.abs(f[2 * i]));
+      peaks.push({ pk, pos: e.pos });
+    }
+    const extra = ons.filter(o => o < f.length / 2 - sr * 0.2 && !expected.some(e => Math.abs(o - e.at) < sr * 0.03)).length;
+    const mx = Math.max(...peaks.map(p => p.pk)), mn = Math.min(...peaks.map(p => p.pk)), thr = (mx + mn) / 2;
+    const wrong = peaks.filter(p => (p.pk > thr) !== (p.pos % 4 === 0)).length;
+    check(`step 1/${rd}${loop ? ' + host loop' : ''}: every beat on the host's beat, accents on the bars`,
+          missing === 0 && extra === 0 && worst < 0.005 && wrong === 0 && mx > mn * 1.3,
+          `${expected.length} beats, ${missing} missing, ${extra} extra, worst ${(worst * 1000).toFixed(2)} ms, ${wrong} wrong accents`);
+  }
 }
 
 const failed = results.filter(r => !r.ok).length;

@@ -596,7 +596,7 @@ Put DATTRACK on a **MIDI track**. The app starts by itself.
 
 | Mode | Who leads | What happens |
 |---|---|---|
-| **SLAVE** (default) | Ableton | DATTRACK follows Ableton's **tempo, play / stop and position**. One beat is 4 rows, and the arrangement position maps onto the song. **Ableton's loop brace is followed exactly**: DATTRACK jumps back to the loop start on the same row as Live, so the first beat of every pass is on time (the loop must start and end on a 16th note). Fxx tempo commands are ignored while slaved; speed (ticks per row) changes keep the beat. |
+| **SLAVE** (default) | Ableton | DATTRACK follows Ableton's **tempo, play / stop and position**. One beat is 4 rows at the default step length (ROW = 1/16; 1 row at 1/4, 16 rows at 1/64), and the arrangement position maps onto the song. **Ableton's loop brace is followed exactly**: DATTRACK jumps back to the loop start on the same row as Live, so the first beat of every pass is on time (the loop must start and end on a 16th note). Fxx tempo commands are ignored while slaved; speed (ticks per row) changes keep the beat. |
 | **MASTER** | DATTRACK | DATTRACK's **tempo and play / stop drive Ableton through Ableton Link**. In Live, open **Settings → Link, Tempo & MIDI**, turn on **Show Link Toggle** and **Start Stop Sync**, then click **LINK** in Live's control bar. Pressing play in DATTRACK now starts Live on the same beat, and changing DATTRACK's BPM changes Live's tempo. Stopping Live stops DATTRACK. The bar shows how many Link peers are connected. |
 | **FREE** | nobody | DATTRACK runs on its own clock. |
 
@@ -647,8 +647,6 @@ node plugins/tests/dattrack_sync_test.mjs build/dattrack/dattrack_host_artefacts
 # regression tests (song survives start-up and reloads, stalls go silent, count-in, offline export):
 node plugins/tests/dattrack_regression_test.mjs build/dattrack/dattrack_host_artefacts/Release/dattrack_host /tmp
 ```
-
-The bundled copy contains one fix that `kcitak04/mobtrack` (and `mobtrack-live`) still need. Since the "Rename to DATTRACK" commit, a comment in `songToObj` swallows `title, bpm, speed, order`, so saved projects and autosaves lose their tempo, title and pattern order.
 
 To refresh the bundled DATTRACK, copy `index.html` from `kcitak04/mobtrack` to `plugins/dattrack/web/dattrack.html`. The bridge uses DATTRACK's internals (`sched`, `player`, `song`, `songToObj`…), so run the sync test after updating.
 

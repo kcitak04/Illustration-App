@@ -105,7 +105,9 @@
     return { order: 0, row: 0 };
   }
   function posToRow(order, row) { let r = 0; for (let o = 0; o < order && o < song.order.length; o++) r += (song.patterns[song.order[o]] || song.patterns[0]).rows; return r + row; }
-  // DATTRACK beat = 4 rows = 4 * speed * 2.5 / bpm seconds, so its "real" tempo is bpm * 6 / speed
+  // DATTRACK beat = 4 * speed * 2.5 / bpm seconds whatever the step length, so its "real" tempo is bpm * 6 / speed.
+  // One beat is rowsPerBeat() rows: 4 at the default step length 1/16, 1 at 1/4, 16 at 1/64.
+  const RPB = () => { try { return rowsPerBeat(song); } catch (e) { return 4; } };
   const effBpm = () => sched.playing ? player.bpm * 6 / player.speed : song.bpm * 6 / song.speed;
 
   // In SLAVE the player's tempo is locked to the host (Fxx tempo changes are ignored, speed changes keep the beat)
@@ -132,7 +134,7 @@
   // The host's loop (Ableton's loop brace), in rows. Only a loop on the row grid can be followed row-exactly.
   function loopOf(j) {
     if (!j.loop) return null;
-    const s = j.loop[0] * 4, e = j.loop[1] * 4, S = Math.round(s), E = Math.round(e);
+    const s = j.loop[0] * RPB(), e = j.loop[1] * RPB(), S = Math.round(s), E = Math.round(e);
     if (Math.abs(s - S) > 0.01 || Math.abs(e - E) > 0.01 || E - S < 1) return null;
     if (DT.loopDistrust === S + ':' + E) return null;   // reported but not looping (e.g. Session view): just follow
     return { s: S, e: E };
@@ -195,13 +197,13 @@
   }
   const hostTime = (beat, j) => j.f / engine.ctx.sampleRate + (beat - j.ppq) * 60 / j.cb;
   function startAtHost(j) {
-    const total = songRows(), rowSec = 60 / j.cb / 4, ctx = engine.ctx;
+    const rpb = RPB(), total = songRows(), rowSec = 60 / j.cb / rpb, ctx = engine.ctx;
     // count-in / pre-roll: Ableton reports a negative position; the song starts at row 0 on the downbeat
     // from where the host started or jumped to (the latest report may already be a little past it)
     const from = j.jump === DT.jumpCued ? j.ppq : Math.min(j.ppq, j.jp != null ? j.jp : j.ppq);
-    let r = Math.max(0, Math.ceil(from * 4 - 1e-6)), t = hostTime(r / 4, j);
+    let r = Math.max(0, Math.ceil(from * rpb - 1e-6)), t = hostTime(r / rpb, j);
     while (t < ctx.currentTime + 0.015) { r++; t += rowSec; }
-    r = wrapRow(r, j.ppq * 4);
+    r = wrapRow(r, j.ppq * rpb);
     DT.jumpCued = j.jump;
     DT.wrapPending = null;
     const p = rowToPos(((r % total) + total) % total);
@@ -218,12 +220,12 @@
     const e = q[q.length - 1], total = songRows();
     // DATTRACK's position at the moment the report describes (later than its last scheduled row), following the
     // host loop the way DATTRACK does, against the host's reported row there
-    const ahead = (j.f / engine.ctx.sampleRate - e.t) * j.cb / 15;
+    const rpb = RPB(), ahead = (j.f / engine.ctx.sampleRate - e.t) * j.cb / 60 * rpb;
     let R = posToRow(e.order, e.row) + ahead;
     if (e.hr != null) R -= (e.hr + ahead) - wrapRow(e.hr + ahead, e.hr);
-    let d = j.ppq * 4 - R;                                                       // host row - DATTRACK row
+    let d = j.ppq * rpb - R;                                                       // host row - DATTRACK row
     d = ((d % total) + total) % total; if (d > total / 2) d -= total;
-    const err = d * 60 / j.cb / 4;                                               // seconds DATTRACK is behind
+    const err = d * 60 / j.cb / rpb;                                               // seconds DATTRACK is behind
     if (Math.abs(d) > (jumped ? 0.25 : 1)) { DT.log.push('recue d' + d.toFixed(2)); return startAtHost(j); }                 // relocated / pattern jump: re-cue
     // a nudge moves only the rows scheduled after it; until the next row is queued, the error measured on the last one
     // still includes the nudges already made - count them, or every report would correct the same error again
@@ -273,7 +275,7 @@
   function report() {
     let s = '&p=' + (sched.playing ? 1 : 0) + '&b=' + effBpm().toFixed(4) + '&e=' + (DT.hostSongApplied && (dirty !== DT.lastDirty || DT.posting > 0) ? 1 : 0);
     const q = sched.rowQueue;
-    if (sched.playing && q.length) { const e = q[q.length - 1]; s += '&ab=' + (posToRow(e.order, e.row) / 4).toFixed(4) + '&at=' + e.t.toFixed(6); }
+    if (sched.playing && q.length) { const e = q[q.length - 1]; s += '&ab=' + (posToRow(e.order, e.row) / RPB()).toFixed(4) + '&at=' + e.t.toFixed(6); }
     fwd.postMessage({ type: 'info', q: s });
   }
   // Mirror the song into the plugin (it is saved with the Ableton set). Never before the song saved in the set has
