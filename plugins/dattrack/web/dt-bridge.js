@@ -234,9 +234,23 @@
     if (Math.abs(rest) > 0.0015) { const s = Math.max(-0.01, Math.min(0.01, rest)); sched.next -= s; DT.corrSum += s; }
   }
 
+  // The playhead (FOLLOW, the playing row) shows what DATTRACK's audio clock says is heard. Here that clock runs ahead
+  // of the sound by the plugin's buffer (the LATENCY setting), so take the frame the plugin is playing out instead:
+  // its read head at the last report, moved on by the time since. (DATTRACK's own scripts load after this one.)
+  function hookPlayhead() {
+    if (DT.pageAudible || typeof window.audibleTime !== 'function') return;
+    const pageAudible = DT.pageAudible = window.audibleTime;
+    window.audibleTime = function () {
+      const j = DT.host, age = (performance.now() - DT.hostAt) / 1000;
+      if (!j || j.run === false || j.rd == null || !(age < 0.3)) return pageAudible();   // no fresh report (buffer refilling, page busy)
+      return j.rd / engine.ctx.sampleRate + age * (j.r > 0.5 && j.r < 1.5 ? j.r : 1);
+    };
+  }
+
   // ---------------------------------------------------------------- messages from the plugin (every audio post)
   function onHost(j) {
-    DT.host = j;
+    DT.host = j; DT.hostAt = performance.now();
+    hookPlayhead();
     if (j.song !== DT.songSeq) { const first = DT.songSeq < 0; DT.songSeq = j.song; if (!first) loadHostSong(); }
     if (j.flush && j.flush !== DT.flushSeen) { DT.flushSeen = j.flush; flushForReload(j.flush); }
     if (!ready()) return;

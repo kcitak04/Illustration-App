@@ -77,7 +77,7 @@ private:
     AudioBridge bridge;
 
     // audio thread -> page: where the host's musical time sits on the context timeline
-    struct Anchor { double f = 0, ppq = 0, bpm = 120, rate = 1; bool playing = false, running = false; int epoch = 0, jump = 0; double jumpPpq = 0; bool looping = false; double ls = 0, le = 0; };
+    struct Anchor { double f = 0, rd = 0, ppq = 0, bpm = 120, rate = 1; bool playing = false, running = false; int epoch = 0, jump = 0; double jumpPpq = 0; bool looping = false; double ls = 0, le = 0; };
     juce::SpinLock anchorLock; Anchor anchor;
     double lastPpq = 0, lastPpqStep = 0, jumpPpq = 0; bool lastPlaying = false; int jumps = 0;
 

@@ -144,7 +144,7 @@ HttpResponse DatTrackCore::onAudio (const HttpRequest& r)
     int seq; { std::lock_guard<std::mutex> l (songLock); seq = songSeq; }
     juce::String out;
     out << "{\"mode\":" << mode.load() << ",\"playing\":" << (a.playing ? "true" : "false") << ",\"run\":" << (a.running ? "true" : "false") << ",\"bpm\":" << json (a.bpm)
-        << ",\"r\":" << json (a.rate) << ",\"f\":" << json (a.f) << ",\"ppq\":" << json (a.ppq) << ",\"jump\":" << a.jump << ",\"jp\":" << json (a.jumpPpq) << ",\"song\":" << seq
+        << ",\"r\":" << json (a.rate) << ",\"f\":" << json (a.f) << ",\"rd\":" << json (a.rd) << ",\"ppq\":" << json (a.ppq) << ",\"jump\":" << a.jump << ",\"jp\":" << json (a.jumpPpq) << ",\"song\":" << seq
         << ",\"midi\":[" << midi << "],\"stop\":" << pendingStop.exchange (0) << ",\"flush\":" << flushRequest.load();
     if (a.looping) out << ",\"loop\":[" << json (a.ls) << "," << json (a.le) << "]";
     out << "}";
@@ -184,6 +184,7 @@ void DatTrackCore::process (float* L, float* R, int n, double hostSr, const Host
         }
 
     // anchor: the host's position at this block start plays out 'latency' later, i.e. at context frame readFrame + latency * ratio
+    // (rd: the context frame playing out right now - where DATTRACK's playhead belongs)
     if (t.valid)
     {
         const double latHost = latencySec.load() * hostSr - offsetMs.load() / 1000.0 * hostSr;
@@ -195,7 +196,7 @@ void DatTrackCore::process (float* L, float* R, int n, double hostSr, const Host
         }
         lastPpq = t.ppq; lastPlaying = t.playing;
         const juce::SpinLock::ScopedLockType l (anchorLock);
-        anchor.f = st.readFrame + latHost * st.ratio; anchor.ppq = t.ppq; anchor.bpm = t.bpm; anchor.playing = t.playing; anchor.jump = jumps; anchor.jumpPpq = jumpPpq;
+        anchor.f = st.readFrame + latHost * st.ratio; anchor.rd = st.readFrame; anchor.ppq = t.ppq; anchor.bpm = t.bpm; anchor.playing = t.playing; anchor.jump = jumps; anchor.jumpPpq = jumpPpq;
         // context seconds per host second at the read head right now (the resampling ratio, drift correction included)
         anchor.rate = st.running ? st.ratio * hostSr / bridge.contextRate() : 1.0;
         anchor.running = st.running; anchor.epoch = st.epoch;   // not running: the buffer is (re)filling, f does not move with the host yet
